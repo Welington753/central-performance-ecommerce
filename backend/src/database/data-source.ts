@@ -21,7 +21,7 @@ if (!databaseUrl) {
   );
 }
 
-export const AppDataSource = new DataSource(
+const AppDataSource = new DataSource(
   buildDataSourceOptions({
     databaseUrl,
     nodeEnv: process.env.NODE_ENV ?? 'development',
