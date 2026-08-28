@@ -13,8 +13,7 @@ export type TokenExchangeOutcome =
   | { kind: 'invalid_response' };
 
 export type IdentityLookupOutcome =
-  | { kind: 'success'; externalUserId: number }
-  | { kind: 'failure' };
+  { kind: 'success'; externalUserId: number } | { kind: 'failure' };
 
 const TOKEN_ENDPOINT = 'https://api.mercadolibre.com/oauth/token';
 const IDENTITY_ENDPOINT = 'https://api.mercadolibre.com/users/me';
@@ -180,7 +179,8 @@ export class MercadoLivreHttpClient {
         // `errorCode`.
         if (controller.signal.aborted) return { kind: 'unknown_result' };
         if (errorCode === 'invalid_grant') return { kind: 'definitive_error' };
-        if (errorCode === 'invalid_client') return { kind: 'client_configuration_error' };
+        if (errorCode === 'invalid_client')
+          return { kind: 'client_configuration_error' };
         return { kind: 'unknown_result' };
       }
 

@@ -8,8 +8,7 @@ export interface MercadoLivreTokenResponse {
 }
 
 export type TokenResponseValidation =
-  | { valid: true; token: MercadoLivreTokenResponse }
-  | { valid: false };
+  { valid: true; token: MercadoLivreTokenResponse } | { valid: false };
 
 /**
  * Teto interno DEFENSIVO (design §10) — não é a validade oficial do token do

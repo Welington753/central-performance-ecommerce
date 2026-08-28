@@ -18,8 +18,8 @@
  * HTTP usa exclusivamente seu próprio `ML_FETCH` injetado — nunca
  * `global.fetch` diretamente.
  */
-global.fetch = (() => {
+global.fetch = () => {
   throw new Error(
     'Chamada de rede real bloqueada nos testes — mocke a fronteira HTTP (ex.: forneça um `ML_FETCH` fake ao instanciar MercadoLivreHttpClient).',
   );
-}) as typeof fetch;
+};

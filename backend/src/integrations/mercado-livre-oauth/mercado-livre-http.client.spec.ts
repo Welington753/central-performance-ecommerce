@@ -5,7 +5,8 @@ function makeConfigService(): ConfigService {
   const values: Record<string, unknown> = {
     ML_CLIENT_ID: 'app-id',
     ML_CLIENT_SECRET: 'app-secret',
-    ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+    ML_REDIRECT_URI:
+      'https://api.example.com/integrations/mercado-livre/callback',
     ML_HTTP_TIMEOUT_MS: 50,
   };
   return {
@@ -63,9 +64,11 @@ describe('MercadoLivreHttpClient', () => {
       .mockResolvedValue(jsonResponse(400, { error: 'invalid_grant' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'definitive_error',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'definitive_error',
+      },
+    );
   });
 
   it('exchangeCode: maps a 5xx to unknown_result', async () => {
@@ -74,18 +77,22 @@ describe('MercadoLivreHttpClient', () => {
       .mockResolvedValue(jsonResponse(500, { error: 'internal' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'unknown_result',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'unknown_result',
+      },
+    );
   });
 
   it('exchangeCode: maps a network/abort error to unknown_result, never retries', async () => {
     const fetchImpl = jest.fn().mockRejectedValue(new Error('network down'));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'unknown_result',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'unknown_result',
+      },
+    );
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -95,9 +102,11 @@ describe('MercadoLivreHttpClient', () => {
       .mockResolvedValue(jsonResponse(200, { access_token: 'x' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'invalid_response',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'invalid_response',
+      },
+    );
   });
 
   it('exchangeCode: maps a 200 response whose body is not even valid JSON to invalid_response — NOT unknown_result (structurally invalid is a different case from an ambiguous/timeout result)', async () => {
@@ -109,14 +118,16 @@ describe('MercadoLivreHttpClient', () => {
     );
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'invalid_response',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'invalid_response',
+      },
+    );
   });
 
   it('exchangeCode: times out and resolves unknown_result when the request exceeds ML_HTTP_TIMEOUT_MS', async () => {
     const fetchImpl = jest.fn(
-      (_url: string, options?: RequestInit) =>
+      (_url: RequestInfo | URL, options?: RequestInit) =>
         new Promise<Response>((_resolve, reject) => {
           options?.signal?.addEventListener('abort', () =>
             reject(new DOMException('Aborted', 'AbortError')),
@@ -139,20 +150,22 @@ describe('MercadoLivreHttpClient', () => {
     // arbitrária — só depende do `ML_HTTP_TIMEOUT_MS=50` já configurado por
     // `makeConfigService()`.
     let capturedSignal: AbortSignal | undefined;
-    const fetchImpl = jest.fn((_url: string, options?: RequestInit) => {
-      capturedSignal = options?.signal ?? undefined;
-      const response = {
-        ok: true,
-        status: 200,
-        json: () =>
-          new Promise((_resolve, reject) => {
-            capturedSignal?.addEventListener('abort', () =>
-              reject(new DOMException('Aborted', 'AbortError')),
-            );
-          }),
-      } as unknown as Response;
-      return Promise.resolve(response);
-    });
+    const fetchImpl = jest.fn(
+      (_url: RequestInfo | URL, options?: RequestInit) => {
+        capturedSignal = options?.signal ?? undefined;
+        const response = {
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              capturedSignal?.addEventListener('abort', () =>
+                reject(new DOMException('Aborted', 'AbortError')),
+              );
+            }),
+        } as unknown as Response;
+        return Promise.resolve(response);
+      },
+    );
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     const outcome = await client.exchangeCode({ code: 'c', codeVerifier: 'v' });
@@ -165,9 +178,11 @@ describe('MercadoLivreHttpClient', () => {
       .mockResolvedValue(jsonResponse(400, { error: 'invalid_client' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'client_configuration_error',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'client_configuration_error',
+      },
+    );
   });
 
   it('exchangeCode: maps a 408 to unknown_result, not definitive_error (the provider timed out, the code was never actually evaluated)', async () => {
@@ -176,9 +191,11 @@ describe('MercadoLivreHttpClient', () => {
       .mockResolvedValue(jsonResponse(408, { error: 'request_timeout' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'unknown_result',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'unknown_result',
+      },
+    );
   });
 
   it('exchangeCode: maps a 429 to unknown_result, not definitive_error (rate limited, not rejected)', async () => {
@@ -187,9 +204,11 @@ describe('MercadoLivreHttpClient', () => {
       .mockResolvedValue(jsonResponse(429, { error: 'too_many_requests' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual({
-      kind: 'unknown_result',
-    });
+    expect(await client.exchangeCode({ code: 'c', codeVerifier: 'v' })).toEqual(
+      {
+        kind: 'unknown_result',
+      },
+    );
   });
 
   it('refreshToken: sends grant_type=refresh_token and the refresh token', async () => {
@@ -270,7 +289,7 @@ describe('MercadoLivreHttpClient', () => {
 
   it('refreshToken: maps a network/timeout error to unknown_result', async () => {
     const fetchImpl = jest.fn(
-      (_url: string, options?: RequestInit) =>
+      (_url: RequestInfo | URL, options?: RequestInit) =>
         new Promise<Response>((_resolve, reject) => {
           options?.signal?.addEventListener('abort', () =>
             reject(new DOMException('Aborted', 'AbortError')),
@@ -299,7 +318,9 @@ describe('MercadoLivreHttpClient', () => {
   });
 
   it('fetchIdentity: returns success with the numeric id from /users/me', async () => {
-    const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(200, { id: 42 }));
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { id: 42 }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.fetchIdentity('APP_USR-1')).toEqual({
@@ -318,6 +339,8 @@ describe('MercadoLivreHttpClient', () => {
     const fetchImpl = jest.fn().mockResolvedValue(jsonResponse(401, {}));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
-    expect(await client.fetchIdentity('bad-token')).toEqual({ kind: 'failure' });
+    expect(await client.fetchIdentity('bad-token')).toEqual({
+      kind: 'failure',
+    });
   });
 });

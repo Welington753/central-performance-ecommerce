@@ -4,7 +4,8 @@ describe('buildAuthorizationUrl', () => {
   it('builds a deterministic URL with all required parameters, S256 fixed', () => {
     const url = buildAuthorizationUrl({
       clientId: 'app-123',
-      redirectUri: 'https://api.example.com/integrations/mercado-livre/callback',
+      redirectUri:
+        'https://api.example.com/integrations/mercado-livre/callback',
       state: 'state-value-with-special-&-chars',
       codeChallenge: 'challenge-value',
     });
