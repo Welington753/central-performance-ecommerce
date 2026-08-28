@@ -35,6 +35,10 @@ class FakeMarketplaceAccountRepository {
       lastSuccessfulSyncAt: null,
       createdAt: new Date(),
       updatedAt: new Date(),
+      errorSummary: null,
+      failureCode: null,
+      connectedByUserId: null,
+      tokenVersion: 0,
     };
   }
 
@@ -108,6 +112,15 @@ describe('MarketplaceAccountsService', () => {
     await service.create({ marketplace: Marketplace.MERCADO_LIVRE });
 
     await expect(service.findAll()).resolves.toHaveLength(2);
+  });
+
+  it('creates a new account with the OAuth bookkeeping fields at their defaults', async () => {
+    const account = await service.create({ marketplace: Marketplace.MERCADO_LIVRE });
+
+    expect(account.errorSummary).toBeNull();
+    expect(account.failureCode).toBeNull();
+    expect(account.connectedByUserId).toBeNull();
+    expect(account.tokenVersion).toBe(0);
   });
 
   it('rejects two accounts of the same marketplace with the same non-null externalSellerId', async () => {

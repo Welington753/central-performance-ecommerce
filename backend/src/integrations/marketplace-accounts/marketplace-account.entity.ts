@@ -67,6 +67,18 @@ export class MarketplaceAccount {
   @Column({ type: 'timestamptz', nullable: true })
   lastSuccessfulSyncAt!: Date | null;
 
+  @Column({ type: 'varchar', length: 500, nullable: true })
+  errorSummary!: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  failureCode!: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  connectedByUserId!: string | null;
+
+  @Column({ type: 'integer', default: 0 })
+  tokenVersion!: number;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 
