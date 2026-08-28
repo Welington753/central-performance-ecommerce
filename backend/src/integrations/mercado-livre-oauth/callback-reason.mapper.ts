@@ -1,0 +1,42 @@
+import type { MercadoLivreOAuthFailureCode } from './mercado-livre-oauth-failure-code';
+
+export type MercadoLivreOAuthPublicReason =
+  | 'success'
+  | 'OAUTH_CALLBACK_INVALID'
+  | 'AUTHORIZATION_DENIED'
+  | 'IDENTITY_MISMATCH'
+  | 'ACCOUNT_ALREADY_CONNECTED'
+  | 'TRY_AGAIN_LATER';
+
+/**
+ * Mapeamento failureCode -> reason público (design §7). REFRESH_* nunca
+ * chegam a este mapper (nunca aparecem no callback — ver design §7), mas
+ * ganham um valor aqui só para manter o Record exaustivo no TypeScript.
+ */
+const REASON_BY_FAILURE_CODE: Record<
+  MercadoLivreOAuthFailureCode,
+  MercadoLivreOAuthPublicReason
+> = {
+  STATE_INVALID: 'OAUTH_CALLBACK_INVALID',
+  AUTHORIZATION_PROVIDER_ERROR: 'OAUTH_CALLBACK_INVALID',
+  AUTHORIZATION_DENIED: 'AUTHORIZATION_DENIED',
+  IDENTITY_MISMATCH: 'IDENTITY_MISMATCH',
+  ACCOUNT_ALREADY_CONNECTED: 'ACCOUNT_ALREADY_CONNECTED',
+  ACCOUNT_BUSY: 'TRY_AGAIN_LATER',
+  CALLBACK_RESULT_UNKNOWN: 'TRY_AGAIN_LATER',
+  TOKEN_EXCHANGE_FAILED: 'TRY_AGAIN_LATER',
+  IDENTITY_LOOKUP_FAILED: 'TRY_AGAIN_LATER',
+  INVALID_TOKEN_RESPONSE: 'TRY_AGAIN_LATER',
+  CREDENTIAL_DECRYPTION_FAILED: 'TRY_AGAIN_LATER',
+  ACCOUNT_STATE_CONFLICT: 'TRY_AGAIN_LATER',
+  TOKEN_RESULT_NOT_COMMITTED: 'TRY_AGAIN_LATER',
+  REFRESH_RESULT_UNKNOWN: 'TRY_AGAIN_LATER',
+  REFRESH_TOKEN_REJECTED: 'TRY_AGAIN_LATER',
+  REFRESH_RESULT_NOT_COMMITTED: 'TRY_AGAIN_LATER',
+};
+
+export function mapFailureCodeToPublicReason(
+  code: MercadoLivreOAuthFailureCode,
+): MercadoLivreOAuthPublicReason {
+  return REASON_BY_FAILURE_CODE[code];
+}
