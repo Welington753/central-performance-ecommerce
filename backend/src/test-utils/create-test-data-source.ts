@@ -1,6 +1,8 @@
-import { DataSource } from 'typeorm';
+import { DataSource, DataSourceOptions } from 'typeorm';
 import { SnakeNamingStrategy } from 'typeorm-naming-strategies';
 import { requireTestDatabaseUrl } from './require-test-database-url';
+
+type DataSourceEntities = NonNullable<DataSourceOptions['entities']>;
 
 /**
  * Único ponto de criação de `DataSource` para testes reais neste plano.
@@ -13,7 +15,7 @@ import { requireTestDatabaseUrl } from './require-test-database-url';
  * reais (Task 5), nunca de `entities` sincronizadas.
  */
 export async function createTestDataSource(
-  entities: Function[],
+  entities: DataSourceEntities,
 ): Promise<DataSource> {
   const dataSource = new DataSource({
     type: 'postgres',

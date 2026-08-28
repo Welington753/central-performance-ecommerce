@@ -2,13 +2,44 @@ import Joi from 'joi';
 import { validateMercadoLivreRedirectUri } from './mercado-livre-redirect-uri.validator';
 
 /**
+ * `helpers.state.ancestors` do Joi não é tipado (é `any` na definição do
+ * pacote) — este helper isola o `unknown` na fronteira e devolve um objeto
+ * seguro para leitura de campos irmãos dentro de um `.custom()`.
+ */
+function readSiblingRecord(ancestors: unknown): Record<string, unknown> {
+  const parent = Array.isArray(ancestors)
+    ? (ancestors as unknown[])[0]
+    : undefined;
+  return typeof parent === 'object' && parent !== null
+    ? (parent as Record<string, unknown>)
+    : {};
+}
+
+function readStringField(
+  record: Record<string, unknown>,
+  key: string,
+): string | undefined {
+  const value = record[key];
+  return typeof value === 'string' ? value : undefined;
+}
+
+function readNumberField(
+  record: Record<string, unknown>,
+  key: string,
+): number | undefined {
+  const value = record[key];
+  return typeof value === 'number' ? value : undefined;
+}
+
+/**
  * Esquema de validação das variáveis de ambiente da aplicação.
  *
  * A aplicação deve falhar ao subir (erro síncrono no boot do ConfigModule)
  * caso alguma variável obrigatória esteja ausente ou em formato inválido.
  *
- * Nenhuma credencial de marketplace é validada aqui: nesta fase não existem
- * integrações externas reais, apenas a fundação (contratos e stubs).
+ * As credenciais e configurações OAuth do Mercado Livre (`ML_*`) já são
+ * validadas aqui, incluindo a regra de negócio do `ML_REDIRECT_URI` e a
+ * margem de segurança de `ML_OAUTH_PROCESSING_STALE_AFTER_MS`.
  */
 export const envValidationSchema = Joi.object({
   NODE_ENV: Joi.string()
@@ -44,9 +75,9 @@ export const envValidationSchema = Joi.object({
     .uri()
     .required()
     .custom((value: string, helpers) => {
-      const nodeEnv = (helpers.state.ancestors[0] as { NODE_ENV?: string })
-        .NODE_ENV as string;
-      if (!validateMercadoLivreRedirectUri(value, nodeEnv ?? 'development')) {
+      const siblings = readSiblingRecord(helpers.state.ancestors);
+      const nodeEnv = readStringField(siblings, 'NODE_ENV') ?? 'development';
+      if (!validateMercadoLivreRedirectUri(value, nodeEnv)) {
         return helpers.error('any.invalid');
       }
       return value;
@@ -59,12 +90,10 @@ export const envValidationSchema = Joi.object({
     .min(1)
     .default(120000)
     .custom((value: number, helpers) => {
-      const ancestors = helpers.state.ancestors[0] as {
-        ML_HTTP_TIMEOUT_MS?: number;
-        ML_ACCOUNT_LOCK_WAIT_MS?: number;
-      };
-      const timeout = ancestors.ML_HTTP_TIMEOUT_MS ?? 10000;
-      const lockWait = ancestors.ML_ACCOUNT_LOCK_WAIT_MS ?? 3000;
+      const siblings = readSiblingRecord(helpers.state.ancestors);
+      const timeout = readNumberField(siblings, 'ML_HTTP_TIMEOUT_MS') ?? 10000;
+      const lockWait =
+        readNumberField(siblings, 'ML_ACCOUNT_LOCK_WAIT_MS') ?? 3000;
       const explicitSafetyMarginMs = 5000;
       // Duração combinada plausível do pior caso do callback: espera pelo
       // advisory lock + troca de code + /users/me, as duas últimas limitadas

@@ -22,4 +22,5 @@ export const ML_OAUTH_FAILURE_CODES = [
   'CREDENTIAL_DECRYPTION_FAILED',
 ] as const;
 
-export type MercadoLivreOAuthFailureCode = (typeof ML_OAUTH_FAILURE_CODES)[number];
+export type MercadoLivreOAuthFailureCode =
+  (typeof ML_OAUTH_FAILURE_CODES)[number];

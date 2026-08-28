@@ -6,6 +6,13 @@ interface ValidatedEnv {
   REFRESH_TOKEN_TTL_DAYS: number;
 }
 
+interface ValidatedMercadoLivreTimingEnv {
+  ML_HTTP_TIMEOUT_MS: number;
+  ML_OAUTH_PROCESSING_STALE_AFTER_MS: number;
+  ML_ACCOUNT_LOCK_WAIT_MS: number;
+  ML_TOKEN_REFRESH_LEEWAY_MS: number;
+}
+
 const VALID_ENV: Record<string, string> = {
   NODE_ENV: 'development',
   PORT: '3000',
@@ -146,7 +153,7 @@ describe('envValidationSchema', () => {
   });
 
   it('accepts valid Mercado Livre variables and applies defaults for timing configs', () => {
-    const { error, value } = envValidationSchema.validate({
+    const result = envValidationSchema.validate({
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://u:p@localhost:5432/db',
       ACCESS_TOKEN_SECRET: 'x'.repeat(32),
@@ -155,14 +162,16 @@ describe('envValidationSchema', () => {
       COOKIE_SECURE: 'true',
       ML_CLIENT_ID: 'app-id',
       ML_CLIENT_SECRET: 'app-secret',
-      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+      ML_REDIRECT_URI:
+        'https://api.example.com/integrations/mercado-livre/callback',
     });
 
-    expect(error).toBeUndefined();
-    expect(value.ML_HTTP_TIMEOUT_MS).toBe(10000);
-    expect(value.ML_OAUTH_PROCESSING_STALE_AFTER_MS).toBe(120000);
-    expect(value.ML_ACCOUNT_LOCK_WAIT_MS).toBe(3000);
-    expect(value.ML_TOKEN_REFRESH_LEEWAY_MS).toBe(900000);
+    expect(result.error).toBeUndefined();
+    const validated = result.value as ValidatedMercadoLivreTimingEnv;
+    expect(validated.ML_HTTP_TIMEOUT_MS).toBe(10000);
+    expect(validated.ML_OAUTH_PROCESSING_STALE_AFTER_MS).toBe(120000);
+    expect(validated.ML_ACCOUNT_LOCK_WAIT_MS).toBe(3000);
+    expect(validated.ML_TOKEN_REFRESH_LEEWAY_MS).toBe(900000);
   });
 
   it('rejects an ML_REDIRECT_URI with a query string in production', () => {
@@ -175,13 +184,14 @@ describe('envValidationSchema', () => {
       COOKIE_SECURE: 'true',
       ML_CLIENT_ID: 'app-id',
       ML_CLIENT_SECRET: 'app-secret',
-      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback?x=1',
+      ML_REDIRECT_URI:
+        'https://api.example.com/integrations/mercado-livre/callback?x=1',
     });
 
     expect(error?.message).toMatch(/ML_REDIRECT_URI/);
   });
 
-  it('rejects ML_OAUTH_PROCESSING_STALE_AFTER_MS smaller than the callback\'s worst-case duration (2x ML_HTTP_TIMEOUT_MS + ML_ACCOUNT_LOCK_WAIT_MS)', () => {
+  it("rejects ML_OAUTH_PROCESSING_STALE_AFTER_MS smaller than the callback's worst-case duration (2x ML_HTTP_TIMEOUT_MS + ML_ACCOUNT_LOCK_WAIT_MS)", () => {
     const { error } = envValidationSchema.validate({
       NODE_ENV: 'production',
       DATABASE_URL: 'postgres://u:p@localhost:5432/db',
@@ -191,7 +201,8 @@ describe('envValidationSchema', () => {
       COOKIE_SECURE: 'true',
       ML_CLIENT_ID: 'app-id',
       ML_CLIENT_SECRET: 'app-secret',
-      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+      ML_REDIRECT_URI:
+        'https://api.example.com/integrations/mercado-livre/callback',
       ML_HTTP_TIMEOUT_MS: 10000,
       ML_ACCOUNT_LOCK_WAIT_MS: 3000,
       // Mínimo exigido: 2*10000 + 3000 + margem > 23000. 5000 é claramente insuficiente.
@@ -211,7 +222,8 @@ describe('envValidationSchema', () => {
       COOKIE_SECURE: 'true',
       ML_CLIENT_ID: 'app-id',
       ML_CLIENT_SECRET: 'app-secret',
-      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+      ML_REDIRECT_URI:
+        'https://api.example.com/integrations/mercado-livre/callback',
     });
 
     expect(error).toBeUndefined();

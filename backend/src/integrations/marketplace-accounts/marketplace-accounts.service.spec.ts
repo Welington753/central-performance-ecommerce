@@ -115,7 +115,9 @@ describe('MarketplaceAccountsService', () => {
   });
 
   it('creates a new account with the OAuth bookkeeping fields at their defaults', async () => {
-    const account = await service.create({ marketplace: Marketplace.MERCADO_LIVRE });
+    const account = await service.create({
+      marketplace: Marketplace.MERCADO_LIVRE,
+    });
 
     expect(account.errorSummary).toBeNull();
     expect(account.failureCode).toBeNull();
