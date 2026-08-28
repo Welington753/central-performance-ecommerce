@@ -225,6 +225,15 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
   }
 
   beforeEach(async () => {
+    // Mesma ordem de `oauth_authorization_requests.service.spec.ts` (Task
+    // 12): `TRUNCATE ... CASCADE` em `marketplace_accounts` também tranca
+    // `oauth_authorization_requests` (referencia `marketplace_accounts` por
+    // FK). Quando duas suítes reais de Postgres truncam essas mesmas tabelas
+    // em ordens diferentes sob os workers paralelos do Jest, o Postgres
+    // detecta um deadlock real (ordem de locks cruzada) e derruba uma das
+    // duas transações. Ordem consistente entre as suítes elimina a espera
+    // circular.
+    await dataSource.query('TRUNCATE TABLE oauth_authorization_requests');
     await dataSource.query('TRUNCATE TABLE marketplace_accounts CASCADE');
     await dataSource.query('TRUNCATE TABLE users CASCADE');
 
