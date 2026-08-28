@@ -1,4 +1,5 @@
 import Joi from 'joi';
+import { validateMercadoLivreRedirectUri } from './mercado-livre-redirect-uri.validator';
 
 /**
  * Esquema de validação das variáveis de ambiente da aplicação.
@@ -32,6 +33,50 @@ export const envValidationSchema = Joi.object({
   // Chave AES-256-GCM (32 bytes) para o EncryptionService genérico.
   // Aceita hex (64 caracteres) ou base64. Sem valor padrão: nunca deve ter fallback inseguro.
   CREDENTIAL_ENCRYPTION_KEY: Joi.string().required(),
+
+  // --- Mercado Livre OAuth (Fase 2) --------------------------------------
+  // Segredos da aplicação ML cadastrada no DevCenter. Sem valor padrão.
+  ML_CLIENT_ID: Joi.string().required(),
+  ML_CLIENT_SECRET: Joi.string().required(),
+  // Validado também pela regra de negócio (HTTPS em produção, sem
+  // query/fragmento) em `mercado-livre-redirect-uri.validator.ts`.
+  ML_REDIRECT_URI: Joi.string()
+    .uri()
+    .required()
+    .custom((value: string, helpers) => {
+      const nodeEnv = (helpers.state.ancestors[0] as { NODE_ENV?: string })
+        .NODE_ENV as string;
+      if (!validateMercadoLivreRedirectUri(value, nodeEnv ?? 'development')) {
+        return helpers.error('any.invalid');
+      }
+      return value;
+    }, 'ML_REDIRECT_URI business rule'),
+
+  ML_HTTP_TIMEOUT_MS: Joi.number().integer().min(1).default(10000),
+  ML_ACCOUNT_LOCK_WAIT_MS: Joi.number().integer().min(1).default(3000),
+  ML_OAUTH_PROCESSING_STALE_AFTER_MS: Joi.number()
+    .integer()
+    .min(1)
+    .default(120000)
+    .custom((value: number, helpers) => {
+      const ancestors = helpers.state.ancestors[0] as {
+        ML_HTTP_TIMEOUT_MS?: number;
+        ML_ACCOUNT_LOCK_WAIT_MS?: number;
+      };
+      const timeout = ancestors.ML_HTTP_TIMEOUT_MS ?? 10000;
+      const lockWait = ancestors.ML_ACCOUNT_LOCK_WAIT_MS ?? 3000;
+      const explicitSafetyMarginMs = 5000;
+      // Duração combinada plausível do pior caso do callback: espera pelo
+      // advisory lock + troca de code + /users/me, as duas últimas limitadas
+      // por ML_HTTP_TIMEOUT_MS cada — design §5.
+      const worstCasePlausibleDurationMs =
+        lockWait + 2 * timeout + explicitSafetyMarginMs;
+      if (value <= worstCasePlausibleDurationMs) {
+        return helpers.error('any.invalid');
+      }
+      return value;
+    }, 'ML_OAUTH_PROCESSING_STALE_AFTER_MS safety margin'),
+  ML_TOKEN_REFRESH_LEEWAY_MS: Joi.number().integer().min(1).default(900000),
 
   // Origem única do frontend, usada para CORS com credentials: true.
   FRONTEND_URL: Joi.string().uri().required(),

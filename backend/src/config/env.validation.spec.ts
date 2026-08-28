@@ -14,6 +14,9 @@ const VALID_ENV: Record<string, string> = {
   CREDENTIAL_ENCRYPTION_KEY: 'b'.repeat(64),
   FRONTEND_URL: 'http://localhost:3001',
   COOKIE_SECURE: 'false',
+  ML_CLIENT_ID: 'app-id',
+  ML_CLIENT_SECRET: 'app-secret',
+  ML_REDIRECT_URI: 'http://localhost:3000/integrations/mercado-livre/callback',
 };
 
 function withoutKey(
@@ -121,5 +124,96 @@ describe('envValidationSchema', () => {
     );
 
     expect(error).toBeDefined();
+  });
+
+  it('fails without ML_CLIENT_ID / ML_CLIENT_SECRET / ML_REDIRECT_URI', () => {
+    const { error } = envValidationSchema.validate(
+      {
+        NODE_ENV: 'production',
+        DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+        ACCESS_TOKEN_SECRET: 'x'.repeat(32),
+        CREDENTIAL_ENCRYPTION_KEY: 'y'.repeat(64),
+        FRONTEND_URL: 'https://app.example.com',
+        COOKIE_SECURE: 'true',
+      },
+      { abortEarly: false },
+    );
+
+    const messages = error?.details.map((d) => d.message).join('\n') ?? '';
+    expect(messages).toMatch(/ML_CLIENT_ID/);
+    expect(messages).toMatch(/ML_CLIENT_SECRET/);
+    expect(messages).toMatch(/ML_REDIRECT_URI/);
+  });
+
+  it('accepts valid Mercado Livre variables and applies defaults for timing configs', () => {
+    const { error, value } = envValidationSchema.validate({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      ACCESS_TOKEN_SECRET: 'x'.repeat(32),
+      CREDENTIAL_ENCRYPTION_KEY: 'y'.repeat(64),
+      FRONTEND_URL: 'https://app.example.com',
+      COOKIE_SECURE: 'true',
+      ML_CLIENT_ID: 'app-id',
+      ML_CLIENT_SECRET: 'app-secret',
+      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+    });
+
+    expect(error).toBeUndefined();
+    expect(value.ML_HTTP_TIMEOUT_MS).toBe(10000);
+    expect(value.ML_OAUTH_PROCESSING_STALE_AFTER_MS).toBe(120000);
+    expect(value.ML_ACCOUNT_LOCK_WAIT_MS).toBe(3000);
+    expect(value.ML_TOKEN_REFRESH_LEEWAY_MS).toBe(900000);
+  });
+
+  it('rejects an ML_REDIRECT_URI with a query string in production', () => {
+    const { error } = envValidationSchema.validate({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      ACCESS_TOKEN_SECRET: 'x'.repeat(32),
+      CREDENTIAL_ENCRYPTION_KEY: 'y'.repeat(64),
+      FRONTEND_URL: 'https://app.example.com',
+      COOKIE_SECURE: 'true',
+      ML_CLIENT_ID: 'app-id',
+      ML_CLIENT_SECRET: 'app-secret',
+      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback?x=1',
+    });
+
+    expect(error?.message).toMatch(/ML_REDIRECT_URI/);
+  });
+
+  it('rejects ML_OAUTH_PROCESSING_STALE_AFTER_MS smaller than the callback\'s worst-case duration (2x ML_HTTP_TIMEOUT_MS + ML_ACCOUNT_LOCK_WAIT_MS)', () => {
+    const { error } = envValidationSchema.validate({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      ACCESS_TOKEN_SECRET: 'x'.repeat(32),
+      CREDENTIAL_ENCRYPTION_KEY: 'y'.repeat(64),
+      FRONTEND_URL: 'https://app.example.com',
+      COOKIE_SECURE: 'true',
+      ML_CLIENT_ID: 'app-id',
+      ML_CLIENT_SECRET: 'app-secret',
+      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+      ML_HTTP_TIMEOUT_MS: 10000,
+      ML_ACCOUNT_LOCK_WAIT_MS: 3000,
+      // Mínimo exigido: 2*10000 + 3000 + margem > 23000. 5000 é claramente insuficiente.
+      ML_OAUTH_PROCESSING_STALE_AFTER_MS: 5000,
+    });
+
+    expect(error?.message).toMatch(/ML_OAUTH_PROCESSING_STALE_AFTER_MS/);
+  });
+
+  it('accepts the Task 5 defaults (10000/3000/120000) since 120000 comfortably exceeds 2*10000 + 3000', () => {
+    const { error } = envValidationSchema.validate({
+      NODE_ENV: 'production',
+      DATABASE_URL: 'postgres://u:p@localhost:5432/db',
+      ACCESS_TOKEN_SECRET: 'x'.repeat(32),
+      CREDENTIAL_ENCRYPTION_KEY: 'y'.repeat(64),
+      FRONTEND_URL: 'https://app.example.com',
+      COOKIE_SECURE: 'true',
+      ML_CLIENT_ID: 'app-id',
+      ML_CLIENT_SECRET: 'app-secret',
+      ML_REDIRECT_URI: 'https://api.example.com/integrations/mercado-livre/callback',
+    });
+
+    expect(error).toBeUndefined();
   });
 });
