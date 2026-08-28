@@ -1,6 +1,8 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
+import { DataSource } from 'typeorm';
+import { createTestDataSource } from '../../test-utils/create-test-data-source';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
   MarketplaceAccount,
@@ -92,6 +94,10 @@ describe('MarketplaceAccountsService', () => {
           provide: getRepositoryToken(MarketplaceAccount),
           useValue: fakeRepository,
         },
+        {
+          provide: DataSource,
+          useValue: {},
+        },
       ],
     }).compile();
 
@@ -155,9 +161,7 @@ describe('MarketplaceAccountsService', () => {
     const created = await service.create({
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    await expect(service.findByIdOrFail(created.id)).resolves.toEqual(
-      created,
-    );
+    await expect(service.findByIdOrFail(created.id)).resolves.toEqual(created);
   });
 
   it('findByIdOrFail throws NotFoundException when the account does not exist', async () => {
@@ -185,5 +189,359 @@ describe('MarketplaceAccountsService', () => {
       'nonexistent',
     );
     expect(found).toBeNull();
+  });
+});
+
+describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
+  let dataSource: DataSource;
+  let service: MarketplaceAccountsService;
+  let userId: string;
+
+  beforeAll(async () => {
+    dataSource = await createTestDataSource([MarketplaceAccount]);
+    service = new MarketplaceAccountsService(
+      dataSource.getRepository(MarketplaceAccount),
+      dataSource,
+    );
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+  });
+
+  async function seedAccount(overrides: Partial<Record<string, unknown>> = {}) {
+    const id = randomUUID();
+    await dataSource.query(
+      `INSERT INTO marketplace_accounts (id, marketplace, status, token_version, external_seller_id)
+       VALUES ($1, 'MERCADO_LIVRE', $2, $3, $4)`,
+      [
+        id,
+        overrides.status ?? 'DISCONNECTED',
+        overrides.tokenVersion ?? 0,
+        overrides.externalSellerId ?? null,
+      ],
+    );
+    return id;
+  }
+
+  beforeEach(async () => {
+    await dataSource.query('TRUNCATE TABLE marketplace_accounts CASCADE');
+    await dataSource.query('TRUNCATE TABLE users CASCADE');
+
+    userId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO users (id, name, email, password_hash, active) VALUES ($1, 'Test User', $2, 'x', true)`,
+      [userId, `test-${userId}@example.com`],
+    );
+  });
+
+  it('the Repository<MarketplaceAccount> correctly maps snake_case columns to camelCase properties (proves SnakeNamingStrategy is wired)', async () => {
+    const tokenExpiresAt = new Date(Date.now() + 3600 * 1000);
+    const id = randomUUID();
+    await dataSource.query(
+      `INSERT INTO marketplace_accounts
+         (id, marketplace, status, token_version, external_seller_id, token_expires_at)
+       VALUES ($1, 'MERCADO_LIVRE', 'CONNECTED', $2, $3, $4)`,
+      [id, 3, 'seller-snake-case-proof', tokenExpiresAt],
+    );
+
+    // Sem `namingStrategy: new SnakeNamingStrategy()` no `DataSource` de
+    // teste, este `findOneByOrFail` (que gera
+    // `SELECT ... WHERE "id" = $1` usando os nomes de coluna derivados do
+    // `@Entity`) leria colunas camelCase inexistentes e devolveria
+    // `undefined`/erro em vez dos valores reais gravados acima em
+    // snake_case — este teste falharia silenciosamente sem a estratégia
+    // correta.
+    const found = await dataSource
+      .getRepository(MarketplaceAccount)
+      .findOneByOrFail({ id });
+
+    expect(found.tokenVersion).toBe(3);
+    expect(found.externalSellerId).toBe('seller-snake-case-proof');
+    expect(found.tokenExpiresAt?.getTime()).toBe(tokenExpiresAt.getTime());
+  });
+
+  it('applySuccessfulConnection applies when tokenVersion matches, increments it, sets CONNECTED', async () => {
+    const id = await seedAccount();
+
+    const outcome = await service.applySuccessfulConnection({
+      id,
+      expectedTokenVersion: 0,
+      externalSellerId: 'seller-1',
+      encryptedAccessToken: 'iv:tag:a',
+      encryptedRefreshToken: 'iv:tag:r',
+      tokenExpiresAt: new Date(Date.now() + 10800 * 1000),
+      connectedByUserId: userId,
+    });
+
+    expect(outcome).toBe('applied');
+
+    const rows: Array<{
+      status: string;
+      token_version: number;
+      external_seller_id: string | null;
+    }> = await dataSource.query(
+      'SELECT status, token_version, external_seller_id FROM marketplace_accounts WHERE id = $1',
+      [id],
+    );
+    expect(rows[0].status).toBe('CONNECTED');
+    expect(rows[0].token_version).toBe(1);
+    expect(rows[0].external_seller_id).toBe('seller-1');
+  });
+
+  it('applySuccessfulConnection returns version_conflict and writes nothing when tokenVersion is stale', async () => {
+    const id = await seedAccount({ tokenVersion: 5 });
+
+    const outcome = await service.applySuccessfulConnection({
+      id,
+      expectedTokenVersion: 0,
+      externalSellerId: 'seller-2',
+      encryptedAccessToken: 'iv:tag:a',
+      encryptedRefreshToken: 'iv:tag:r',
+      tokenExpiresAt: new Date(),
+      connectedByUserId: userId,
+    });
+
+    expect(outcome).toBe('version_conflict');
+    const rows: Array<{ status: string; token_version: number }> =
+      await dataSource.query(
+        'SELECT status, token_version FROM marketplace_accounts WHERE id = $1',
+        [id],
+      );
+    expect(rows[0].status).toBe('DISCONNECTED');
+    expect(rows[0].token_version).toBe(5);
+  });
+
+  it('applySuccessfulConnection returns external_seller_conflict and preserves the winning account when externalSellerId is already taken', async () => {
+    await seedAccount({
+      status: 'CONNECTED',
+      externalSellerId: 'taken-seller',
+    });
+    const losingId = await seedAccount();
+
+    const outcome = await service.applySuccessfulConnection({
+      id: losingId,
+      expectedTokenVersion: 0,
+      externalSellerId: 'taken-seller',
+      encryptedAccessToken: 'iv:tag:a',
+      encryptedRefreshToken: 'iv:tag:r',
+      tokenExpiresAt: new Date(),
+      connectedByUserId: userId,
+    });
+
+    expect(outcome).toBe('external_seller_conflict');
+    const losingRow: Array<{
+      status: string;
+      external_seller_id: string | null;
+    }> = await dataSource.query(
+      'SELECT status, external_seller_id FROM marketplace_accounts WHERE id = $1',
+      [losingId],
+    );
+    expect(losingRow[0].status).toBe('DISCONNECTED');
+    expect(losingRow[0].external_seller_id).toBeNull();
+  });
+
+  it('applySuccessfulConnection, given an external QueryRunner, does NOT commit or roll back itself — the caller controls the transaction (Task 19 relies on this for atomicity with the request finalization)', async () => {
+    const id = await seedAccount();
+    const queryRunner = dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      const outcome = await service.applySuccessfulConnection(
+        {
+          id,
+          expectedTokenVersion: 0,
+          externalSellerId: 'seller-shared-tx',
+          encryptedAccessToken: 'iv:tag:a',
+          encryptedRefreshToken: 'iv:tag:r',
+          tokenExpiresAt: new Date(Date.now() + 10800 * 1000),
+          connectedByUserId: userId,
+        },
+        queryRunner,
+      );
+      expect(outcome).toBe('applied');
+
+      // Visível dentro da mesma transação (mesmo QueryRunner)...
+      const withinTx = (await queryRunner.query(
+        'SELECT status FROM marketplace_accounts WHERE id = $1',
+        [id],
+      )) as Array<{ status: string }>;
+      expect(withinTx[0].status).toBe('CONNECTED');
+
+      // ...mas ainda NÃO commitada — outra conexão não vê a mudança.
+      const outsideTx: Array<{ status: string }> = await dataSource.query(
+        'SELECT status FROM marketplace_accounts WHERE id = $1',
+        [id],
+      );
+      expect(outsideTx[0].status).toBe('DISCONNECTED');
+
+      // O chamador decide: aqui, propositalmente, faz ROLLBACK em vez de commit.
+      await queryRunner.rollbackTransaction();
+    } finally {
+      await queryRunner.release();
+    }
+
+    const afterRollback: Array<{ status: string; token_version: number }> =
+      await dataSource.query(
+        'SELECT status, token_version FROM marketplace_accounts WHERE id = $1',
+        [id],
+      );
+    expect(afterRollback[0].status).toBe('DISCONNECTED');
+    expect(afterRollback[0].token_version).toBe(0);
+  });
+
+  it('markError applies only when tokenVersion matches, and is a no-op otherwise', async () => {
+    const id = await seedAccount();
+
+    expect(
+      await service.markError({
+        id,
+        expectedTokenVersion: 0,
+        failureCode: 'ACCOUNT_ALREADY_CONNECTED',
+        errorSummary: 'Conflito de identidade.',
+      }),
+    ).toBe(true);
+
+    expect(
+      await service.markError({
+        id,
+        expectedTokenVersion: 0, // stale now, row wasn't versioned up by markError itself
+        failureCode: 'ACCOUNT_ALREADY_CONNECTED',
+        errorSummary: 'Conflito de identidade.',
+      }),
+    ).toBe(true); // markError does not bump tokenVersion by design, so this is still valid
+
+    const rows: Array<{
+      status: string;
+      failure_code: string | null;
+      error_summary: string | null;
+    }> = await dataSource.query(
+      'SELECT status, failure_code, error_summary FROM marketplace_accounts WHERE id = $1',
+      [id],
+    );
+    expect(rows[0].status).toBe('ERROR');
+    expect(rows[0].failure_code).toBe('ACCOUNT_ALREADY_CONNECTED');
+  });
+
+  it('applyRefreshedTokens applies atomically and clears failureCode/errorSummary', async () => {
+    const id = await seedAccount({ status: 'CONNECTED' });
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET failure_code = 'REFRESH_RESULT_UNKNOWN', error_summary = 'x' WHERE id = $1`,
+      [id],
+    );
+
+    const applied = await service.applyRefreshedTokens({
+      id,
+      expectedTokenVersion: 0,
+      encryptedAccessToken: 'iv:tag:new-a',
+      encryptedRefreshToken: 'iv:tag:new-r',
+      tokenExpiresAt: new Date(Date.now() + 10800 * 1000),
+    });
+
+    expect(applied).toBe(true);
+    const rows: Array<{
+      status: string;
+      token_version: number;
+      failure_code: string | null;
+      error_summary: string | null;
+    }> = await dataSource.query(
+      'SELECT status, token_version, failure_code, error_summary FROM marketplace_accounts WHERE id = $1',
+      [id],
+    );
+    expect(rows[0].status).toBe('CONNECTED');
+    expect(rows[0].token_version).toBe(1);
+    expect(rows[0].failure_code).toBeNull();
+    expect(rows[0].error_summary).toBeNull();
+  });
+
+  it('applyRefreshedTokens returns false and writes nothing on a stale tokenVersion (REFRESH_RESULT_NOT_COMMITTED case)', async () => {
+    const id = await seedAccount({ status: 'CONNECTED', tokenVersion: 2 });
+
+    const applied = await service.applyRefreshedTokens({
+      id,
+      expectedTokenVersion: 0,
+      encryptedAccessToken: 'iv:tag:new-a',
+      encryptedRefreshToken: 'iv:tag:new-r',
+      tokenExpiresAt: new Date(),
+    });
+
+    expect(applied).toBe(false);
+    const rows: Array<{ token_version: number }> = await dataSource.query(
+      'SELECT token_version FROM marketplace_accounts WHERE id = $1',
+      [id],
+    );
+    expect(rows[0].token_version).toBe(2);
+  });
+
+  it('markTokenExpired sets TOKEN_EXPIRED conditionally on tokenVersion', async () => {
+    const id = await seedAccount({ status: 'CONNECTED' });
+
+    expect(
+      await service.markTokenExpired({
+        id,
+        expectedTokenVersion: 0,
+        failureCode: 'REFRESH_TOKEN_REJECTED',
+        errorSummary: 'Refresh token rejeitado. Reconexão necessária.',
+      }),
+    ).toBe(true);
+
+    const rows: Array<{
+      status: string;
+      failure_code: string | null;
+    }> = await dataSource.query(
+      'SELECT status, failure_code FROM marketplace_accounts WHERE id = $1',
+      [id],
+    );
+    expect(rows[0].status).toBe('TOKEN_EXPIRED');
+    expect(rows[0].failure_code).toBe('REFRESH_TOKEN_REJECTED');
+  });
+
+  it('findConnectedDueForRenewal returns only CONNECTED accounts expiring before the cutoff, limited', async () => {
+    const dueSoon = await seedAccount({ status: 'CONNECTED' });
+    const dueLater = await seedAccount({ status: 'CONNECTED' });
+    const disconnected = await seedAccount({ status: 'DISCONNECTED' });
+
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET token_expires_at = now() + interval '1 minute' WHERE id = $1`,
+      [dueSoon],
+    );
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET token_expires_at = now() + interval '1 day' WHERE id = $1`,
+      [dueLater],
+    );
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET token_expires_at = now() + interval '1 minute' WHERE id = $1`,
+      [disconnected],
+    );
+
+    const dueBefore = new Date(Date.now() + 15 * 60 * 1000);
+    const due = await service.findConnectedDueForRenewal(dueBefore, 25);
+
+    expect(due.map((a) => a.id)).toEqual([dueSoon]);
+  });
+
+  it('findConnectedDueForRenewal orders results by tokenExpiresAt ascending (most urgent first) — matters when the batch is limited', async () => {
+    const latest = await seedAccount({ status: 'CONNECTED' });
+    const earliest = await seedAccount({ status: 'CONNECTED' });
+    const middle = await seedAccount({ status: 'CONNECTED' });
+
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET token_expires_at = now() + interval '10 minutes' WHERE id = $1`,
+      [latest],
+    );
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET token_expires_at = now() + interval '1 minute' WHERE id = $1`,
+      [earliest],
+    );
+    await dataSource.query(
+      `UPDATE marketplace_accounts SET token_expires_at = now() + interval '5 minutes' WHERE id = $1`,
+      [middle],
+    );
+
+    const dueBefore = new Date(Date.now() + 15 * 60 * 1000);
+    const due = await service.findConnectedDueForRenewal(dueBefore, 25);
+
+    expect(due.map((a) => a.id)).toEqual([earliest, middle, latest]);
   });
 });
