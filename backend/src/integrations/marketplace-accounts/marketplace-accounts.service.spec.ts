@@ -65,6 +65,18 @@ class FakeMarketplaceAccountRepository {
   find(): Promise<MarketplaceAccount[]> {
     return Promise.resolve([...this.rows]);
   }
+
+  findOne(options: {
+    where: Partial<MarketplaceAccount>;
+  }): Promise<MarketplaceAccount | null> {
+    const entries = Object.entries(options.where) as Array<
+      [keyof MarketplaceAccount, unknown]
+    >;
+    const found = this.rows.find((row) =>
+      entries.every(([key, value]) => row[key] === value),
+    );
+    return Promise.resolve(found ?? null);
+  }
 }
 
 describe('MarketplaceAccountsService', () => {
@@ -137,5 +149,41 @@ describe('MarketplaceAccountsService', () => {
         externalSellerId: '123456',
       }),
     ).rejects.toThrow(/unique constraint/i);
+  });
+
+  it('findByIdOrFail returns the account when it exists', async () => {
+    const created = await service.create({
+      marketplace: Marketplace.MERCADO_LIVRE,
+    });
+    await expect(service.findByIdOrFail(created.id)).resolves.toEqual(
+      created,
+    );
+  });
+
+  it('findByIdOrFail throws NotFoundException when the account does not exist', async () => {
+    await expect(service.findByIdOrFail('does-not-exist')).rejects.toThrow(
+      /não encontrada/i,
+    );
+  });
+
+  it('findByMarketplaceAndExternalSellerId finds an existing connected account', async () => {
+    await service.create({
+      marketplace: Marketplace.MERCADO_LIVRE,
+      externalSellerId: '999',
+    });
+
+    const found = await service.findByMarketplaceAndExternalSellerId(
+      Marketplace.MERCADO_LIVRE,
+      '999',
+    );
+    expect(found?.externalSellerId).toBe('999');
+  });
+
+  it('findByMarketplaceAndExternalSellerId returns null when no account matches', async () => {
+    const found = await service.findByMarketplaceAndExternalSellerId(
+      Marketplace.MERCADO_LIVRE,
+      'nonexistent',
+    );
+    expect(found).toBeNull();
   });
 });

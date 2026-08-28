@@ -1,7 +1,9 @@
-import { Controller, Get, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
-import { MarketplaceAccount } from './marketplace-account.entity';
+import { CreateMarketplaceAccountDto } from './dto/create-marketplace-account.dto';
+import { toMarketplaceAccountResponse } from './dto/marketplace-account-response.dto';
+import type { MarketplaceAccountResponseDto } from './dto/marketplace-account-response.dto';
 import { MarketplaceAccountsService } from './marketplace-accounts.service';
 
 @ApiTags('marketplace-accounts')
@@ -14,7 +16,22 @@ export class MarketplaceAccountsController {
   ) {}
 
   @Get()
-  findAll(): Promise<MarketplaceAccount[]> {
-    return this.marketplaceAccountsService.findAll();
+  async findAll(): Promise<MarketplaceAccountResponseDto[]> {
+    const accounts = await this.marketplaceAccountsService.findAll();
+    return accounts.map(toMarketplaceAccountResponse);
+  }
+
+  @Post()
+  async create(
+    @Body() dto: CreateMarketplaceAccountDto,
+  ): Promise<MarketplaceAccountResponseDto> {
+    // Mapeamento explícito (nunca `...dto`): garante que, mesmo que o DTO
+    // ganhe campos novos no futuro, só o que está listado aqui chega ao
+    // serviço — `externalSellerId` nunca é aceito nesta rota.
+    const account = await this.marketplaceAccountsService.create({
+      marketplace: dto.marketplace,
+      nickname: dto.nickname ?? null,
+    });
+    return toMarketplaceAccountResponse(account);
   }
 }

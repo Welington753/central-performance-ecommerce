@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import type { Marketplace } from '../contracts/marketplace.enum';
@@ -47,5 +47,22 @@ export class MarketplaceAccountsService {
       status: MarketplaceAccountStatus.DISCONNECTED,
     });
     return this.repository.save(account);
+  }
+
+  async findByIdOrFail(id: string): Promise<MarketplaceAccount> {
+    const account = await this.repository.findOne({ where: { id } });
+    if (!account) {
+      throw new NotFoundException('Conta de marketplace não encontrada.');
+    }
+    return account;
+  }
+
+  async findByMarketplaceAndExternalSellerId(
+    marketplace: Marketplace,
+    externalSellerId: string,
+  ): Promise<MarketplaceAccount | null> {
+    return this.repository.findOne({
+      where: { marketplace, externalSellerId },
+    });
   }
 }
