@@ -29,7 +29,9 @@ import { MercadoLivreOAuthService } from './mercado-livre-oauth.service';
  */
 @Global()
 @Module({
-  providers: [{ provide: DataSource, useValue: { createQueryRunner: jest.fn() } }],
+  providers: [
+    { provide: DataSource, useValue: { createQueryRunner: jest.fn() } },
+  ],
   exports: [DataSource],
 })
 class FakeDataSourceModule {}

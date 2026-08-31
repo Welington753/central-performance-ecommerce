@@ -54,7 +54,9 @@ export class MercadoLivreTokenRenewalJob {
       try {
         await this.service.ensureValidAccessToken(account.id);
       } catch {
-        this.logger.warn(`mercado_livre_renewal_failed accountId=${account.id}`);
+        this.logger.warn(
+          `mercado_livre_renewal_failed accountId=${account.id}`,
+        );
       }
     }
   }

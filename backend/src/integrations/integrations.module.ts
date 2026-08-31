@@ -10,7 +10,15 @@ import { MercadoLivreOAuthModule } from './mercado-livre-oauth/mercado-livre-oau
  * apenas reexporta os módulos que compõem a área de integrações.
  */
 @Module({
-  imports: [ConnectorsModule, MarketplaceAccountsModule, MercadoLivreOAuthModule],
-  exports: [ConnectorsModule, MarketplaceAccountsModule, MercadoLivreOAuthModule],
+  imports: [
+    ConnectorsModule,
+    MarketplaceAccountsModule,
+    MercadoLivreOAuthModule,
+  ],
+  exports: [
+    ConnectorsModule,
+    MarketplaceAccountsModule,
+    MercadoLivreOAuthModule,
+  ],
 })
 export class IntegrationsModule {}
