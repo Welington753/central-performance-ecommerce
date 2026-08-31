@@ -1,17 +1,22 @@
 import {
   Controller,
+  Get,
   HttpCode,
   HttpStatus,
   Param,
   ParseUUIDPipe,
   Post,
+  Query,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
+import type { Response } from 'express';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
 import type { AccessTokenPayload } from '../../auth/interfaces/access-token-payload.interface';
+import type { CallbackQuery } from './callback-params.validator';
 import { MercadoLivreOAuthService } from './mercado-livre-oauth.service';
 
 @ApiTags('mercado-livre-oauth')
@@ -38,5 +43,16 @@ export class MercadoLivreOAuthController {
       marketplaceAccountId: id,
       initiatedByUserId: user.sub,
     });
+  }
+
+  // Público, sem AccessTokenGuard (design §6.2) — autorizado exclusivamente
+  // pelo `state` reivindicado atomicamente dentro do próprio service.
+  @Get('integrations/mercado-livre/callback')
+  async callback(
+    @Query() query: CallbackQuery,
+    @Res() res: Response,
+  ): Promise<void> {
+    const { redirectUrl } = await this.service.handleCallback(query);
+    res.redirect(302, redirectUrl);
   }
 }

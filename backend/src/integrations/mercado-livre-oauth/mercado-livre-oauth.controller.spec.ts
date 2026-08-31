@@ -20,4 +20,26 @@ describe('MercadoLivreOAuthController.connect', () => {
     });
     expect(result.authorizationUrl).toContain('authorization');
   });
+
+  it('callback: redirects (302) to whatever URL the service returns, never a JSON body', async () => {
+    const service = {
+      handleCallback: jest.fn().mockResolvedValue({
+        redirectUrl:
+          'https://app.example.com/integracoes?ml=success&reason=success',
+      }),
+    };
+    const controller = new MercadoLivreOAuthController(service as never);
+    const res = { redirect: jest.fn() };
+
+    await controller.callback({ state: 's', code: 'c' }, res as never);
+
+    expect(service.handleCallback).toHaveBeenCalledWith({
+      state: 's',
+      code: 'c',
+    });
+    expect(res.redirect).toHaveBeenCalledWith(
+      302,
+      'https://app.example.com/integracoes?ml=success&reason=success',
+    );
+  });
 });
