@@ -775,3 +775,308 @@ describe('MercadoLivreOAuthService.handleCallback', () => {
     expect(redirectUrl).toContain('reason=TRY_AGAIN_LATER');
   });
 });
+
+function connectedAccount(
+  overrides: Partial<MarketplaceAccount> = {},
+): MarketplaceAccount {
+  return account({
+    status: MarketplaceAccountStatus.CONNECTED,
+    externalSellerId: '42',
+    encryptedAccessToken: 'enc:old-access',
+    encryptedRefreshToken: 'enc:old-refresh',
+    tokenExpiresAt: new Date(Date.now() + 5 * 60 * 1000), // dentro da janela padrão de leeway (15min)
+    tokenVersion: 3,
+    ...overrides,
+  });
+}
+
+describe('MercadoLivreOAuthService.ensureValidAccessToken', () => {
+  function makeTokenCollaborators() {
+    const lockHandle = { release: jest.fn().mockResolvedValue(undefined) };
+    return {
+      marketplaceAccountsService: {
+        findByIdOrFail: jest.fn().mockResolvedValue(connectedAccount()),
+        applyRefreshedTokens: jest.fn().mockResolvedValue(true),
+        markTokenExpired: jest.fn().mockResolvedValue(true),
+        markError: jest.fn().mockResolvedValue(true),
+      },
+      authorizationRequestsService: {},
+      advisoryLockService: {
+        tryAcquire: jest.fn().mockResolvedValue(lockHandle),
+      },
+      httpClient: {
+        refreshToken: jest.fn().mockResolvedValue({
+          kind: 'success',
+          token: {
+            accessToken: 'APP_USR-new',
+            refreshToken: 'TG-new',
+            expiresInSeconds: 10800,
+            userId: 42,
+            tokenType: 'bearer',
+            scope: 'offline_access read',
+          },
+        }),
+      },
+      encryptionService: {
+        encrypt: jest.fn((v: string) => `enc:${v}`),
+        decrypt: jest.fn((v: string) => v.replace('enc:', '')),
+      },
+      configService: {
+        getOrThrow: () => undefined,
+        get: (key: string, fallback?: unknown) =>
+          key === 'ML_TOKEN_REFRESH_LEEWAY_MS' ? 900000 : fallback,
+      } as unknown as ConfigService,
+      lockHandle,
+    };
+  }
+
+  function buildTokenService(c: ReturnType<typeof makeTokenCollaborators>) {
+    return new MercadoLivreOAuthService(
+      c.marketplaceAccountsService as never,
+      c.authorizationRequestsService as never,
+      c.advisoryLockService as never,
+      c.httpClient as never,
+      c.encryptionService as never,
+      c.configService,
+      {} as never, // DataSource, unused by ensureValidAccessToken
+    );
+  }
+
+  it.each([
+    MarketplaceAccountStatus.DISCONNECTED,
+    MarketplaceAccountStatus.TOKEN_EXPIRED,
+    MarketplaceAccountStatus.ERROR,
+  ])(
+    'never returns a token for a %s account, even with a future tokenExpiresAt',
+    async (status) => {
+      const c = makeTokenCollaborators();
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({
+          status,
+          tokenExpiresAt: new Date(Date.now() + 3600_000),
+        }),
+      );
+      const service = buildTokenService(c);
+
+      await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow();
+      expect(c.advisoryLockService.tryAcquire).not.toHaveBeenCalled();
+    },
+  );
+
+  it('fast path: returns the current token without acquiring the lock or calling the ML when well within the leeway window', async () => {
+    const c = makeTokenCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+    );
+    const service = buildTokenService(c);
+
+    const token = await service.ensureValidAccessToken('acc-1');
+
+    expect(token).toBe('old-access');
+    expect(c.advisoryLockService.tryAcquire).not.toHaveBeenCalled();
+    expect(c.httpClient.refreshToken).not.toHaveBeenCalled();
+  });
+
+  it('renews when inside the leeway window: acquires the lock, calls refreshToken, applies CAS, returns the new token', async () => {
+    const c = makeTokenCollaborators();
+    const service = buildTokenService(c);
+
+    const token = await service.ensureValidAccessToken('acc-1');
+
+    expect(c.advisoryLockService.tryAcquire).toHaveBeenCalledWith('acc-1');
+    expect(c.httpClient.refreshToken).toHaveBeenCalledWith({
+      refreshToken: 'old-refresh',
+    });
+    expect(
+      c.marketplaceAccountsService.applyRefreshedTokens,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'acc-1',
+        expectedTokenVersion: 3,
+        encryptedAccessToken: 'enc:APP_USR-new',
+        encryptedRefreshToken: 'enc:TG-new',
+      }),
+    );
+    expect(token).toBe('APP_USR-new');
+    expect(c.lockHandle.release).toHaveBeenCalled();
+  });
+
+  it('re-checks eligibility AFTER acquiring the lock: an account that stopped being CONNECTED while waiting for the lock is rejected without calling the ML', async () => {
+    const c = makeTokenCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail
+      .mockResolvedValueOnce(connectedAccount())
+      .mockResolvedValueOnce(
+        connectedAccount({ status: MarketplaceAccountStatus.ERROR }),
+      );
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow();
+    expect(c.httpClient.refreshToken).not.toHaveBeenCalled();
+    expect(c.lockHandle.release).toHaveBeenCalled();
+  });
+
+  it('rethrows ACCOUNT_BUSY when the lock cannot be acquired', async () => {
+    const c = makeTokenCollaborators();
+    c.advisoryLockService.tryAcquire.mockResolvedValue(null);
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /ACCOUNT_BUSY/,
+    );
+  });
+
+  it('refresh token rejected definitively (invalid_grant) -> marks TOKEN_EXPIRED with REFRESH_TOKEN_REJECTED, never reuses the old refresh token', async () => {
+    const c = makeTokenCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({ kind: 'definitive_error' });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /REFRESH_TOKEN_REJECTED/,
+    );
+    expect(c.marketplaceAccountsService.markTokenExpired).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'acc-1',
+        failureCode: 'REFRESH_TOKEN_REJECTED',
+      }),
+    );
+  });
+
+  it('refresh outcome unknown (timeout) -> marks ERROR with REFRESH_RESULT_UNKNOWN, no blind retry', async () => {
+    const c = makeTokenCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({ kind: 'unknown_result' });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /REFRESH_RESULT_UNKNOWN/,
+    );
+    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'acc-1',
+        failureCode: 'REFRESH_RESULT_UNKNOWN',
+      }),
+    );
+    expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+  });
+
+  it("refresh outcome is a structurally invalid 200 body -> ALSO maps to REFRESH_RESULT_UNKNOWN (design §7's account-status table has no entry for INVALID_TOKEN_RESPONSE — the provider may have rotated the refresh token even with a malformed response, so it is treated as ambiguous, never as harmless)", async () => {
+    const c = makeTokenCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_response' });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /REFRESH_RESULT_UNKNOWN/,
+    );
+    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'acc-1',
+        failureCode: 'REFRESH_RESULT_UNKNOWN',
+      }),
+    );
+  });
+
+  it('refresh outcome is client_configuration_error (invalid_client) -> maps to REFRESH_RESULT_UNKNOWN, account goes to ERROR by CAS, NEVER TOKEN_EXPIRED (a misconfigured client_id/client_secret does not prove the refresh token itself was rejected)', async () => {
+    const c = makeTokenCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({
+      kind: 'client_configuration_error',
+    });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /REFRESH_RESULT_UNKNOWN/,
+    );
+    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
+      expect.objectContaining({
+        id: 'acc-1',
+        failureCode: 'REFRESH_RESULT_UNKNOWN',
+      }),
+    );
+    expect(
+      c.marketplaceAccountsService.markTokenExpired,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('CAS fails after the ML already issued new tokens (REFRESH_RESULT_NOT_COMMITTED) -> re-reads the account for real, preserves whatever it finds, does NOT force any account status write', async () => {
+    const c = makeTokenCollaborators();
+    c.marketplaceAccountsService.applyRefreshedTokens.mockResolvedValue(false);
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /REFRESH_RESULT_NOT_COMMITTED/,
+    );
+    // findByIdOrFail: 1x elegibilidade inicial + 1x releitura pós-lock + 1x
+    // releitura real após o REFRESH_RESULT_NOT_COMMITTED (não é só um comentário).
+    expect(c.marketplaceAccountsService.findByIdOrFail).toHaveBeenCalledTimes(
+      3,
+    );
+    expect(c.marketplaceAccountsService.markError).not.toHaveBeenCalled();
+    expect(
+      c.marketplaceAccountsService.markTokenExpired,
+    ).not.toHaveBeenCalled();
+    expect(
+      c.marketplaceAccountsService.applyRefreshedTokens,
+    ).toHaveBeenCalledTimes(1); // refresh token anterior nunca reutilizado
+  });
+
+  it('a failed decryption of the stored refresh token -> ERROR/CREDENTIAL_DECRYPTION_FAILED, releases the lock', async () => {
+    const c = makeTokenCollaborators();
+    c.encryptionService.decrypt.mockImplementation(() => {
+      throw new Error('bad auth tag');
+    });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /CREDENTIAL_DECRYPTION_FAILED/,
+    );
+    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
+      expect.objectContaining({ failureCode: 'CREDENTIAL_DECRYPTION_FAILED' }),
+    );
+    expect(c.lockHandle.release).toHaveBeenCalled();
+  });
+
+  it('a failed decryption of the ACCESS token on the FAST PATH (before any lock) also maps to CREDENTIAL_DECRYPTION_FAILED — decrypt failures are not only handled for the refresh token post-lock', async () => {
+    const c = makeTokenCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }), // dentro do leeway: fast path
+    );
+    c.encryptionService.decrypt.mockImplementation(() => {
+      throw new Error('bad auth tag');
+    });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /CREDENTIAL_DECRYPTION_FAILED/,
+    );
+    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
+      expect.objectContaining({ failureCode: 'CREDENTIAL_DECRYPTION_FAILED' }),
+    );
+    expect(c.advisoryLockService.tryAcquire).not.toHaveBeenCalled(); // fast path nunca chega a adquirir o lock
+  });
+
+  it('a failed decryption of the ACCESS token on the post-lock re-check also maps to CREDENTIAL_DECRYPTION_FAILED', async () => {
+    const c = makeTokenCollaborators();
+    // Elegível no fast path (fora do leeway, então segue para o lock), e
+    // ainda dentro do leeway na releitura pós-lock — mas a descriptografia
+    // do access token falha nesse ponto específico.
+    c.marketplaceAccountsService.findByIdOrFail
+      .mockResolvedValueOnce(connectedAccount())
+      .mockResolvedValueOnce(
+        connectedAccount({
+          tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+        }),
+      );
+    c.encryptionService.decrypt.mockImplementation(() => {
+      throw new Error('bad auth tag');
+    });
+    const service = buildTokenService(c);
+
+    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+      /CREDENTIAL_DECRYPTION_FAILED/,
+    );
+    expect(c.httpClient.refreshToken).not.toHaveBeenCalled();
+    expect(c.lockHandle.release).toHaveBeenCalled();
+  });
+});

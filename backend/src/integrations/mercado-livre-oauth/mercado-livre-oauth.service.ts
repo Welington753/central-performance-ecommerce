@@ -10,6 +10,7 @@ import { DataSource } from 'typeorm';
 import { redactSensitiveData } from '../../common/logging/redact.util';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Marketplace } from '../contracts/marketplace.enum';
+import type { MarketplaceAccount } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
 import { AdvisoryLockService } from './advisory-lock.service';
@@ -423,6 +424,176 @@ export class MercadoLivreOAuthService {
         // Idem: uma falha na liberação não pode suprimir o erro (ou o
         // resultado) que já está sendo propagado/retornado.
       }
+    }
+  }
+
+  /**
+   * design §6.4: fast path sem lock quando o token atual ainda está fora da
+   * janela de leeway; caso contrário, adquire o advisory lock (mesmo do
+   * callback, §3), relê e revalida a conta, renova no ML fora de transação
+   * e aplica CAS por `tokenVersion`. Nunca reutiliza automaticamente um
+   * refresh token após um resultado ambíguo, nunca faz retry cego.
+   */
+  async ensureValidAccessToken(accountId: string): Promise<string> {
+    const leewayMs = this.configService.get<number>(
+      'ML_TOKEN_REFRESH_LEEWAY_MS',
+      900000,
+    );
+
+    const account = await this.assertEligibleForToken(accountId);
+    if (this.isWithinLeeway(account.tokenExpiresAt, leewayMs)) {
+      return this.decryptOrMarkError(
+        account,
+        account.encryptedAccessToken as string,
+      );
+    }
+
+    const lock = await this.advisoryLockService.tryAcquire(accountId);
+    if (!lock) {
+      throw new ConflictException('ACCOUNT_BUSY');
+    }
+
+    try {
+      const reread = await this.assertEligibleForToken(accountId);
+      if (this.isWithinLeeway(reread.tokenExpiresAt, leewayMs)) {
+        return this.decryptOrMarkError(
+          reread,
+          reread.encryptedAccessToken as string,
+        );
+      }
+
+      const refreshTokenPlain = await this.decryptOrMarkError(
+        reread,
+        reread.encryptedRefreshToken as string,
+      );
+
+      const refreshOutcome = await this.httpClient.refreshToken({
+        refreshToken: refreshTokenPlain,
+      });
+
+      if (refreshOutcome.kind === 'definitive_error') {
+        await this.marketplaceAccountsService.markTokenExpired({
+          id: accountId,
+          expectedTokenVersion: reread.tokenVersion,
+          failureCode: 'REFRESH_TOKEN_REJECTED',
+          errorSummary:
+            'O Mercado Livre rejeitou o refresh token. Reconexão necessária.',
+        });
+        throw new ConflictException('REFRESH_TOKEN_REJECTED');
+      }
+
+      if (
+        refreshOutcome.kind === 'unknown_result' ||
+        refreshOutcome.kind === 'invalid_response' ||
+        refreshOutcome.kind === 'client_configuration_error'
+      ) {
+        // design §7: a tabela de status de conta para falhas de renovação
+        // só define REFRESH_TOKEN_REJECTED / REFRESH_RESULT_UNKNOWN /
+        // REFRESH_RESULT_NOT_COMMITTED / CREDENTIAL_DECRYPTION_FAILED — não
+        // INVALID_TOKEN_RESPONSE. Uma resposta 200 estruturalmente inválida
+        // durante o refresh é tratada como REFRESH_RESULT_UNKNOWN também: o
+        // provedor pode ter rotacionado o refresh token mesmo com uma
+        // resposta malformada, então o resultado é ambíguo, nunca
+        // "claramente inofensivo". `client_configuration_error`
+        // (invalid_client) entra no MESMO ramo por razão distinta: um
+        // client_id/client_secret mal configurado no nosso lado não prova
+        // nada sobre o refresh_token apresentado — tratá-lo como
+        // REFRESH_TOKEN_REJECTED forçaria a conta para TOKEN_EXPIRED sem
+        // causa real no token do usuário, exigindo reconexão desnecessária.
+        // Fail-closed: a conta vai para ERROR (nunca TOKEN_EXPIRED) e o
+        // refresh token antigo nunca é reutilizado/reenviado.
+        await this.marketplaceAccountsService.markError({
+          id: accountId,
+          expectedTokenVersion: reread.tokenVersion,
+          failureCode: 'REFRESH_RESULT_UNKNOWN',
+          errorSummary: 'Não foi possível confirmar a renovação do token.',
+        });
+        throw new ConflictException('REFRESH_RESULT_UNKNOWN');
+      }
+
+      const applied =
+        await this.marketplaceAccountsService.applyRefreshedTokens({
+          id: accountId,
+          expectedTokenVersion: reread.tokenVersion,
+          encryptedAccessToken: this.encryptionService.encrypt(
+            refreshOutcome.token.accessToken,
+          ),
+          encryptedRefreshToken: this.encryptionService.encrypt(
+            refreshOutcome.token.refreshToken,
+          ),
+          tokenExpiresAt: new Date(
+            Date.now() + refreshOutcome.token.expiresInSeconds * 1000,
+          ),
+        });
+
+      if (!applied) {
+        // REFRESH_RESULT_NOT_COMMITTED (design §6.4/§7): outra operação já
+        // mudou a tokenVersion (ex.: reconexão concorrente). Relê de
+        // verdade a conta (não é só um comentário) e preserva
+        // integralmente o que encontrar — NUNCA sobrescreve, NUNCA força
+        // nenhum status, só alerta sobre a chamada atual.
+        const currentState =
+          await this.marketplaceAccountsService.findByIdOrFail(accountId);
+        this.logger.warn('mercado_livre_refresh_result_not_committed', {
+          accountId,
+          currentStatus: currentState.status,
+          currentTokenVersion: currentState.tokenVersion,
+        });
+        throw new ConflictException('REFRESH_RESULT_NOT_COMMITTED');
+      }
+
+      return refreshOutcome.token.accessToken;
+    } finally {
+      await lock.release();
+    }
+  }
+
+  private isWithinLeeway(
+    tokenExpiresAt: Date | null,
+    leewayMs: number,
+  ): boolean {
+    if (!tokenExpiresAt) return false;
+    return tokenExpiresAt.getTime() > Date.now() + leewayMs;
+  }
+
+  private async assertEligibleForToken(
+    accountId: string,
+  ): Promise<MarketplaceAccount> {
+    const account =
+      await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    if (
+      account.marketplace !== Marketplace.MERCADO_LIVRE ||
+      account.status !== MarketplaceAccountStatus.CONNECTED ||
+      !account.encryptedAccessToken ||
+      !account.encryptedRefreshToken ||
+      !account.tokenExpiresAt
+    ) {
+      throw new ConflictException('ACCOUNT_NOT_ELIGIBLE_FOR_TOKEN');
+    }
+    return account;
+  }
+
+  /**
+   * Descriptografa qualquer credencial armazenada (access ou refresh
+   * token) e trata falha uniformemente — usado tanto no fast path (sem
+   * lock: `markError` é uma escrita condicional autocontida, segura sem
+   * lock) quanto na releitura pós-lock, para o access token E o refresh
+   * token.
+   */
+  private async decryptOrMarkError(
+    account: MarketplaceAccount,
+    encryptedValue: string,
+  ): Promise<string> {
+    try {
+      return this.encryptionService.decrypt(encryptedValue);
+    } catch {
+      await this.marketplaceAccountsService.markError({
+        id: account.id,
+        expectedTokenVersion: account.tokenVersion,
+        failureCode: 'CREDENTIAL_DECRYPTION_FAILED',
+        errorSummary: 'Falha ao descriptografar credencial armazenada.',
+      });
+      throw new ConflictException('CREDENTIAL_DECRYPTION_FAILED');
     }
   }
 }
