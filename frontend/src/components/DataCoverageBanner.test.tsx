@@ -7,8 +7,7 @@ describe("DataCoverageBanner", () => {
       <DataCoverageBanner
         coverage={{
           status: "complete",
-          synchronizedFrom: "2026-07-04",
-          synchronizedTo: "2026-09-01",
+          synchronizedIntervals: [{ from: "2026-07-04", to: "2026-09-01" }],
           selectedPeriodComplete: true,
           comparisonPeriodComplete: true,
         }}
@@ -18,19 +17,20 @@ describe("DataCoverageBanner", () => {
     expect(screen.queryByRole("status")).not.toBeInTheDocument();
   });
 
-  it("warns when the account has never had a successful sync (unknown)", () => {
+  it("warns when no source has ever had a successful sync (unknown)", () => {
     render(
       <DataCoverageBanner
         coverage={{
           status: "unknown",
-          synchronizedFrom: null,
-          synchronizedTo: null,
+          synchronizedIntervals: [],
           selectedPeriodComplete: false,
           comparisonPeriodComplete: false,
         }}
       />,
     );
-    expect(screen.getByRole("status")).toHaveTextContent(/nunca há.*sincronização|não há nenhuma sincronização/i);
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /nenhuma sincronização concluída/i,
+    );
   });
 
   it("warns about a partial selected period without presenting it as complete", () => {
@@ -38,8 +38,7 @@ describe("DataCoverageBanner", () => {
       <DataCoverageBanner
         coverage={{
           status: "partial",
-          synchronizedFrom: "2026-08-20",
-          synchronizedTo: "2026-09-01",
+          synchronizedIntervals: [{ from: "2026-08-20", to: "2026-09-01" }],
           selectedPeriodComplete: false,
           comparisonPeriodComplete: true,
         }}
@@ -56,8 +55,7 @@ describe("DataCoverageBanner", () => {
       <DataCoverageBanner
         coverage={{
           status: "partial",
-          synchronizedFrom: "2026-08-20",
-          synchronizedTo: "2026-09-01",
+          synchronizedIntervals: [{ from: "2026-08-20", to: "2026-09-01" }],
           selectedPeriodComplete: true,
           comparisonPeriodComplete: false,
         }}
@@ -66,5 +64,28 @@ describe("DataCoverageBanner", () => {
     expect(screen.getByRole("status")).toHaveTextContent(
       /período de comparação não está totalmente sincronizado/i,
     );
+  });
+
+  it("describes two disjoint intervals separately — never as a single continuous range", () => {
+    render(
+      <DataCoverageBanner
+        coverage={{
+          status: "partial",
+          synchronizedIntervals: [
+            { from: "2026-07-02", to: "2026-07-10" },
+            { from: "2026-08-20", to: "2026-09-01" },
+          ],
+          selectedPeriodComplete: false,
+          comparisonPeriodComplete: false,
+        }}
+      />,
+    );
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent("02/07/2026");
+    expect(banner).toHaveTextContent("10/07/2026");
+    expect(banner).toHaveTextContent("20/08/2026");
+    expect(banner).toHaveTextContent("01/09/2026");
+    // Nunca deve sugerir um único período contínuo de julho a setembro.
+    expect(banner).not.toHaveTextContent("02/07/2026 a 01/09/2026");
   });
 });

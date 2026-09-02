@@ -1,8 +1,8 @@
 import { render, screen } from "@testing-library/react";
 import { AdditionalKpiCards } from "./AdditionalKpiCards";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type { AnalyticsComparison, AnalyticsSummary } from "@/types/marketplace-analytics";
 
-const baseSummary: MercadoLivreKpisDto["summary"] = {
+const baseSummary: AnalyticsSummary = {
   grossRevenue: "1000.00",
   orders: 8,
   units: 20,
@@ -14,7 +14,7 @@ const baseSummary: MercadoLivreKpisDto["summary"] = {
   avgUnitPrice: "50.00",
 };
 
-const baseComparison: MercadoLivreKpisDto["comparison"] = {
+const baseComparison: AnalyticsComparison = {
   grossRevenuePct: 10,
   ordersPct: 5,
   unitsPct: 8,

@@ -9,12 +9,10 @@ import { DataCoverageBanner } from "@/components/DataCoverageBanner";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
+import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { ProductRankingTabs } from "@/components/ProductRankingTabs";
-import {
-  fetchMarketplaceAccounts,
-  fetchMercadoLivreKpis,
-  syncMercadoLivreOrders,
-} from "@/lib/api";
+import { ScopeFilters } from "@/components/ScopeFilters";
+import { fetchMarketplaceAnalyticsKpis, syncMercadoLivreOrders } from "@/lib/api";
 import {
   DATE_RANGE_ERROR_MESSAGES,
   dateOnlyToString,
@@ -22,14 +20,18 @@ import {
   validateDateRangeStrings,
 } from "@/lib/date-range";
 import { formatDateTimeSaoPaulo } from "@/lib/kpi-format";
-import type { MarketplaceAccountDto } from "@/types/marketplace";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type {
+  AccountBreakdownEntry,
+  MarketplaceAnalyticsKpisDto,
+  MarketplaceFilter,
+} from "@/types/marketplace-analytics";
 
-function accountLabel(account: MarketplaceAccountDto): string {
-  if (account.nickname) return account.nickname;
-  if (account.externalSellerId) return `Conta ${account.externalSellerId}`;
-  return `Conta ${account.id.slice(0, 8)}`;
-}
+const MARKETPLACE_FILTER_VALUES: MarketplaceFilter[] = [
+  "ALL",
+  "MERCADO_LIVRE",
+  "AMAZON",
+  "SHOPEE",
+];
 
 function LoadingBlock({ label }: { label: string }) {
   return (
@@ -111,84 +113,141 @@ function resolveEffectivePeriod(period: PeriodState): {
   };
 }
 
+function defaultPeriodStrings(): { from: string; to: string } {
+  const range = resolvePreset("last30");
+  return { from: dateOnlyToString(range.from), to: dateOnlyToString(range.to) };
+}
+
+function readMarketplaceFromParams(searchParams: URLSearchParams): MarketplaceFilter {
+  const raw = searchParams.get("marketplace");
+  if (raw && (MARKETPLACE_FILTER_VALUES as string[]).includes(raw)) {
+    return raw as MarketplaceFilter;
+  }
+  // Seleção inválida (ou ausente) é tratada como o padrão, sem quebrar a tela.
+  return "ALL";
+}
+
+function readAccountIdFromParams(searchParams: URLSearchParams): string | null {
+  return searchParams.get("accountId") || null;
+}
+
+function scopeTitle(marketplace: MarketplaceFilter): string {
+  switch (marketplace) {
+    case "ALL":
+      return "Visão consolidada dos marketplaces";
+    case "MERCADO_LIVRE":
+      return "Desempenho do Mercado Livre";
+    case "AMAZON":
+      return "Desempenho da Amazon";
+    case "SHOPEE":
+      return "Desempenho da Shopee";
+  }
+}
+
+function accountDisplayLabel(account: AccountBreakdownEntry): string {
+  if (account.nickname) return account.nickname;
+  if (account.externalSellerId) return `Conta ${account.externalSellerId}`;
+  return `Conta ${account.accountId.slice(0, 8)}`;
+}
+
 function DashboardContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [accounts, setAccounts] = useState<MarketplaceAccountDto[] | null>(
-    null,
-  );
-  const [accountsError, setAccountsError] = useState(false);
-  const [manualAccountId, setManualAccountId] = useState<string | null>(null);
-  const [kpis, setKpis] = useState<MercadoLivreKpisDto | null>(null);
-  const [kpisError, setKpisError] = useState(false);
-  const [kpisRequestKey, setKpisRequestKey] = useState<string | null>(null);
+  const [scopeData, setScopeData] = useState<MarketplaceAnalyticsKpisDto | null>(null);
+  const [scopeError, setScopeError] = useState(false);
+  const [scopeRequestKey, setScopeRequestKey] = useState<string | null>(null);
+
+  const [accountScopedData, setAccountScopedData] =
+    useState<MarketplaceAnalyticsKpisDto | null>(null);
+  const [accountScopedError, setAccountScopedError] = useState(false);
+  const [accountScopedRequestKey, setAccountScopedRequestKey] = useState<
+    string | null
+  >(null);
+
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const syncingRef = useRef(false);
 
-  const loadAccounts = useCallback(async () => {
-    try {
-      const all = await fetchMarketplaceAccounts();
-      setAccounts(all);
-      setAccountsError(false);
-    } catch {
-      setAccountsError(true);
-    }
-  }, []);
-
-  useEffect(() => {
-    void (async () => {
-      await loadAccounts();
-    })();
-  }, [loadAccounts]);
-
-  const connectedAccounts = (accounts ?? []).filter(
-    (account) =>
-      account.marketplace === "MERCADO_LIVRE" && account.status === "CONNECTED",
-  );
-  const selectedAccountId =
-    manualAccountId &&
-    connectedAccounts.some((account) => account.id === manualAccountId)
-      ? manualAccountId
-      : (connectedAccounts[0]?.id ?? null);
-
   const period = readPeriodFromSearchParams(searchParams);
   const effectivePeriod = resolveEffectivePeriod(period);
-  const requestKey =
-    selectedAccountId && effectivePeriod
-      ? `${selectedAccountId}|${effectivePeriod.from}|${effectivePeriod.to}`
-      : null;
+  const effectiveFrom = effectivePeriod?.from ?? null;
+  const effectiveTo = effectivePeriod?.to ?? null;
+  const marketplace = readMarketplaceFromParams(searchParams);
+  const accountId = readAccountIdFromParams(searchParams);
 
-  const loadKpis = useCallback(
-    async (accountId: string, from: string, to: string) => {
-      const key = `${accountId}|${from}|${to}`;
+  const loadScope = useCallback(
+    async (from: string, to: string, mkt: MarketplaceFilter) => {
+      const key = `${mkt}|${from}|${to}`;
       try {
-        const data = await fetchMercadoLivreKpis(accountId, { from, to });
-        setKpis(data);
-        setKpisError(false);
+        const data = await fetchMarketplaceAnalyticsKpis({ from, to, marketplace: mkt });
+        setScopeData(data);
+        setScopeError(false);
       } catch {
-        setKpis(null);
-        setKpisError(true);
+        setScopeData(null);
+        setScopeError(true);
       } finally {
-        setKpisRequestKey(key);
+        setScopeRequestKey(key);
       }
     },
     [],
   );
 
-  const effectiveFrom = effectivePeriod?.from ?? null;
-  const effectiveTo = effectivePeriod?.to ?? null;
+  useEffect(() => {
+    // Primeira instrução é o `await` dentro de `loadScope` — nenhum
+    // `setState` roda de forma síncrona no corpo deste efeito.
+    if (!effectiveFrom || !effectiveTo) return;
+    void (async () => {
+      await loadScope(effectiveFrom, effectiveTo, marketplace);
+    })();
+  }, [effectiveFrom, effectiveTo, marketplace, loadScope]);
+
+  const loadAccountScoped = useCallback(
+    async (from: string, to: string, mkt: MarketplaceFilter, account: string) => {
+      const key = `${mkt}|${account}|${from}|${to}`;
+      try {
+        const data = await fetchMarketplaceAnalyticsKpis({
+          from,
+          to,
+          marketplace: mkt,
+          accountId: account,
+        });
+        setAccountScopedData(data);
+        setAccountScopedError(false);
+      } catch {
+        setAccountScopedData(null);
+        setAccountScopedError(true);
+      } finally {
+        setAccountScopedRequestKey(key);
+      }
+    },
+    [],
+  );
 
   useEffect(() => {
-    if (!selectedAccountId || !effectiveFrom || !effectiveTo) return;
+    if (!effectiveFrom || !effectiveTo || !accountId) return;
     void (async () => {
-      await loadKpis(selectedAccountId, effectiveFrom, effectiveTo);
+      await loadAccountScoped(effectiveFrom, effectiveTo, marketplace, accountId);
     })();
-  }, [selectedAccountId, effectiveFrom, effectiveTo, loadKpis]);
+  }, [effectiveFrom, effectiveTo, marketplace, accountId, loadAccountScoped]);
 
-  const kpisLoading = requestKey !== null && kpisRequestKey !== requestKey;
+  const scopeRequestExpectedKey =
+    effectiveFrom && effectiveTo ? `${marketplace}|${effectiveFrom}|${effectiveTo}` : null;
+  const scopeLoading =
+    scopeRequestExpectedKey !== null && scopeRequestKey !== scopeRequestExpectedKey;
+
+  const accountRequestExpectedKey =
+    effectiveFrom && effectiveTo && accountId
+      ? `${marketplace}|${accountId}|${effectiveFrom}|${effectiveTo}`
+      : null;
+  const accountScopedLoading =
+    accountRequestExpectedKey !== null &&
+    accountScopedRequestKey !== accountRequestExpectedKey;
+
+  const displayData = accountId ? accountScopedData : scopeData;
+  const displayLoading = accountId ? accountScopedLoading : scopeLoading;
+  const displayError = accountId ? accountScopedError : scopeError;
 
   function handlePeriodChange(range: { from: string; to: string }) {
     const params = new URLSearchParams(searchParams.toString());
@@ -197,16 +256,38 @@ function DashboardContent() {
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }
 
-  async function handleSync() {
-    if (!selectedAccountId || syncingRef.current) return;
+  function handleScopeChange(next: { marketplace: MarketplaceFilter; accountId: string | null }) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next.marketplace === "ALL") {
+      params.delete("marketplace");
+    } else {
+      params.set("marketplace", next.marketplace);
+    }
+    if (next.accountId) {
+      params.set("accountId", next.accountId);
+    } else {
+      params.delete("accountId");
+    }
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }
+
+  async function reloadCurrentScope() {
+    if (!effectiveFrom || !effectiveTo) return;
+    if (accountId) {
+      await loadAccountScoped(effectiveFrom, effectiveTo, marketplace, accountId);
+    } else {
+      await loadScope(effectiveFrom, effectiveTo, marketplace);
+    }
+  }
+
+  async function handleSync(mlAccountId: string) {
+    if (syncingRef.current) return;
     syncingRef.current = true;
     setSyncing(true);
     setSyncError(null);
     try {
-      await syncMercadoLivreOrders(selectedAccountId);
-      if (effectivePeriod) {
-        await loadKpis(selectedAccountId, effectivePeriod.from, effectivePeriod.to);
-      }
+      await syncMercadoLivreOrders(mlAccountId);
+      await reloadCurrentScope();
     } catch {
       setSyncError("Não foi possível sincronizar agora. Tente novamente.");
     } finally {
@@ -218,17 +299,17 @@ function DashboardContent() {
   const header = (
     <div>
       <h1 className="text-2xl font-semibold tracking-tight">
-        Central de Performance E-commerce
+        {scopeTitle(marketplace)}
       </h1>
       <p className="mt-1 text-sm text-foreground/60">
-        Visão geral consolidada dos seus marketplaces.
+        Central de Performance E-commerce.
       </p>
     </div>
   );
 
-  const accountsLoading = accounts === null && !accountsError;
+  const scopeInitialLoading = scopeData === null && !scopeError && scopeLoading;
 
-  if (accountsLoading) {
+  if (scopeInitialLoading) {
     return (
       <div className="flex flex-col gap-8">
         {header}
@@ -237,28 +318,35 @@ function DashboardContent() {
     );
   }
 
-  if (accountsError) {
+  if (scopeError && scopeData === null) {
     return (
       <div className="flex flex-col gap-8">
         {header}
         <ErrorBlock
-          message="Não foi possível carregar suas contas de marketplace. Tente novamente mais tarde."
-          onRetry={() => void loadAccounts()}
+          message="Não foi possível carregar os dados de marketplaces. Tente novamente mais tarde."
+          onRetry={() =>
+            effectiveFrom && effectiveTo && void loadScope(effectiveFrom, effectiveTo, marketplace)
+          }
         />
       </div>
     );
   }
 
-  if (connectedAccounts.length === 0) {
+  // Nada elegível em lugar nenhum do sistema (nenhuma conta conectada nem
+  // com histórico, para nenhum marketplace) — mesmo estado vazio de antes,
+  // agora derivado da disponibilidade do escopo ALL.
+  if (
+    scopeData &&
+    scopeData.scope.marketplace === "ALL" &&
+    scopeData.availability === "NOT_CONNECTED"
+  ) {
     return (
       <div className="flex flex-col gap-8">
         {header}
         <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-border-subtle bg-surface px-6 py-20 text-center">
           <EmptyStateIcon />
           <div className="flex flex-col gap-1">
-            <p className="text-base font-medium">
-              Nenhuma conta do Mercado Livre conectada
-            </p>
+            <p className="text-base font-medium">Nenhum marketplace conectado</p>
             <p className="text-sm text-foreground/60">
               Conecte uma conta para ver seus KPIs de vendas aqui.
             </p>
@@ -267,66 +355,51 @@ function DashboardContent() {
             href="/integracoes"
             className="rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5"
           >
-            Conectar Mercado Livre
+            Ir para integrações
           </Link>
         </div>
       </div>
     );
   }
 
-  const lastSyncLabel = kpis
-    ? (formatDateTimeSaoPaulo(kpis.lastSync) ?? "Nunca sincronizado")
+  const dropdownAccounts = scopeData?.breakdownByAccount ?? [];
+  const breakdownByMarketplace = displayData?.breakdownByMarketplace ?? [];
+  const activeMarketplaces = breakdownByMarketplace.filter(
+    (m) => m.availability !== "NOT_CONNECTED",
+  ).length;
+  const marketplacesWithData = breakdownByMarketplace.filter(
+    (m) => m.availability === "AVAILABLE",
+  ).length;
+
+  const scopedAccounts = displayData?.breakdownByAccount ?? [];
+  const connectedMlAccounts = scopedAccounts.filter(
+    (a) => a.marketplace === "MERCADO_LIVRE" && a.status === "CONNECTED",
+  );
+  const historicalAccounts = scopedAccounts.filter(
+    (a) => a.availability === "HISTORICAL_ONLY",
+  );
+
+  const lastSyncLabel = displayData
+    ? (formatDateTimeSaoPaulo(displayData.lastSync) ?? "Nunca sincronizado")
     : null;
 
   return (
     <div className="flex flex-col gap-8">
-      <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
-        {header}
+      {header}
 
-        {connectedAccounts.length > 1 ? (
-          <label className="flex flex-col gap-1 text-sm">
-            <span className="text-foreground/60">Conta do Mercado Livre</span>
-            <select
-              aria-label="Conta do Mercado Livre"
-              value={selectedAccountId ?? ""}
-              onChange={(event) => setManualAccountId(event.target.value)}
-              className="rounded-md border border-border-subtle bg-surface px-3 py-1.5"
-            >
-              {connectedAccounts.map((account) => (
-                <option key={account.id} value={account.id}>
-                  {accountLabel(account)}
-                </option>
-              ))}
-            </select>
-          </label>
-        ) : null}
-      </div>
+      <MarketplacePanel breakdown={breakdownByMarketplace} />
+      <p className="text-xs text-foreground/60">
+        {activeMarketplaces} de 3 marketplaces com integração ativa
+        {" · "}
+        {marketplacesWithData} de 3 com dados disponíveis
+      </p>
 
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border-subtle bg-surface px-5 py-4">
-        <p className="text-sm text-foreground/60">
-          Última sincronização:{" "}
-          <span className="font-medium text-foreground">
-            {lastSyncLabel ?? "—"}
-          </span>
-        </p>
-        <button
-          type="button"
-          onClick={() => void handleSync()}
-          disabled={syncing}
-          className="rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {syncing ? "Sincronizando..." : "Sincronizar agora"}
-        </button>
-      </div>
-
-      {syncError ? (
-        <div
-          role="alert"
-          className="rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-700"
-        >
-          {syncError}
-        </div>
-      ) : null}
+      <ScopeFilters
+        marketplace={marketplace}
+        accountId={accountId}
+        accounts={dropdownAccounts}
+        onChange={handleScopeChange}
+      />
 
       {effectivePeriod ? (
         <DateRangeFilter
@@ -350,58 +423,113 @@ function DashboardContent() {
             Voltar aos últimos 30 dias
           </button>
         </div>
-      ) : kpisLoading ? (
-        <LoadingBlock label="Carregando KPIs..." />
-      ) : kpisError ? (
-        <ErrorBlock
-          message="Não foi possível carregar os KPIs agora."
-          onRetry={() =>
-            selectedAccountId &&
-            effectivePeriod &&
-            void loadKpis(
-              selectedAccountId,
-              effectivePeriod.from,
-              effectivePeriod.to,
-            )
-          }
-        />
-      ) : kpis ? (
-        <div className="flex flex-col gap-6">
-          <DataCoverageBanner coverage={kpis.dataCoverage} />
-
-          <KpiSummaryCards summary={kpis.summary} comparison={kpis.comparison} />
-          <p className="text-xs text-foreground/50">
-            Faturamento bruto: soma dos pedidos pagos antes de tarifas,
-            fretes, reembolsos, impostos e Ads.
-          </p>
-
-          <AdditionalKpiCards
-            summary={kpis.summary}
-            comparison={kpis.comparison}
-            bestDay={kpis.bestDay}
-          />
-
-          <div className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">Faturamento diário</h2>
-            <DailyRevenueChart dailySeries={kpis.dailySeries} />
+      ) : (
+        <>
+          <div className="flex flex-wrap items-center justify-between gap-4 rounded-xl border border-border-subtle bg-surface px-5 py-4">
+            <p className="text-sm text-foreground/60">
+              Última sincronização:{" "}
+              <span className="font-medium text-foreground">
+                {lastSyncLabel ?? "—"}
+              </span>
+            </p>
+            {connectedMlAccounts.length === 1 ? (
+              <button
+                type="button"
+                onClick={() => void handleSync(connectedMlAccounts[0].accountId)}
+                disabled={syncing}
+                className="rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {syncing ? "Sincronizando..." : "Sincronizar agora"}
+              </button>
+            ) : connectedMlAccounts.length > 1 ? (
+              <Link
+                href="/sincronizacoes"
+                className="text-sm font-medium text-brand hover:underline"
+              >
+                Várias contas neste escopo — sincronize por lá
+              </Link>
+            ) : null}
           </div>
 
-          <div className="flex flex-col gap-3">
-            <h2 className="text-lg font-semibold">Ranking de produtos</h2>
-            <ProductRankingTabs
-              bySku={kpis.topProductsBySku}
-              byListing={kpis.topListings}
+          {syncError ? (
+            <div
+              role="alert"
+              className="rounded-md border border-red-500/40 bg-red-500/10 p-4 text-sm text-red-700"
+            >
+              {syncError}
+            </div>
+          ) : null}
+
+          {historicalAccounts.length > 0 ? (
+            <div
+              role="status"
+              className="flex flex-col gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
+            >
+              {historicalAccounts.map((account) => (
+                <p key={account.accountId}>
+                  A conexão da conta &quot;{accountDisplayLabel(account)}&quot; precisa de
+                  atenção — o histórico já sincronizado continua disponível abaixo.{" "}
+                  <Link href="/integracoes" className="font-medium underline">
+                    Reconectar
+                  </Link>
+                </p>
+              ))}
+            </div>
+          ) : null}
+
+          {displayLoading ? (
+            <LoadingBlock label="Carregando KPIs..." />
+          ) : displayError ? (
+            <ErrorBlock
+              message="Não foi possível carregar os KPIs agora."
+              onRetry={() => void reloadCurrentScope()}
             />
-          </div>
-        </div>
-      ) : null}
+          ) : displayData?.summary && displayData.comparison ? (
+            <div className="flex flex-col gap-6">
+              <DataCoverageBanner coverage={displayData.dataCoverage} />
+
+              <KpiSummaryCards
+                summary={displayData.summary}
+                comparison={displayData.comparison}
+              />
+              <p className="text-xs text-foreground/50">
+                Faturamento bruto: soma dos pedidos pagos antes de tarifas,
+                fretes, reembolsos, impostos e Ads.
+              </p>
+
+              <AdditionalKpiCards
+                summary={displayData.summary}
+                comparison={displayData.comparison}
+                bestDay={displayData.bestDay}
+              />
+
+              <div className="flex flex-col gap-3">
+                <h2 className="text-lg font-semibold">Faturamento diário</h2>
+                <DailyRevenueChart dailySeries={displayData.dailySeries} />
+              </div>
+
+              <div className="flex flex-col gap-3">
+                <h2 className="text-lg font-semibold">Ranking de produtos</h2>
+                <ProductRankingTabs
+                  bySku={displayData.topProductsBySku}
+                  byListing={displayData.topListings}
+                />
+              </div>
+            </div>
+          ) : displayData ? (
+            <div className="flex flex-col gap-4">
+              <DataCoverageBanner coverage={displayData.dataCoverage} />
+              <p className="text-sm text-foreground/60">
+                {displayData.availability === "NOT_CONNECTED"
+                  ? "Nenhuma conta elegível para este filtro."
+                  : "Esta conta ainda não tem nenhuma sincronização concluída — nenhum KPI para exibir ainda."}
+              </p>
+            </div>
+          ) : null}
+        </>
+      )}
     </div>
   );
-}
-
-function defaultPeriodStrings(): { from: string; to: string } {
-  const range = resolvePreset("last30");
-  return { from: dateOnlyToString(range.from), to: dateOnlyToString(range.to) };
 }
 
 export default function DashboardPage() {

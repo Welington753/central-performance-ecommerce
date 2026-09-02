@@ -5,12 +5,16 @@ import {
   formatPercent,
   formatPercentagePoints,
 } from "@/lib/kpi-format";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type {
+  AnalyticsBestDay,
+  AnalyticsComparison,
+  AnalyticsSummary,
+} from "@/types/marketplace-analytics";
 
 interface AdditionalKpiCardsProps {
-  summary: MercadoLivreKpisDto["summary"];
-  comparison: MercadoLivreKpisDto["comparison"];
-  bestDay: MercadoLivreKpisDto["bestDay"];
+  summary: AnalyticsSummary;
+  comparison: AnalyticsComparison;
+  bestDay: AnalyticsBestDay | null;
 }
 
 function ComparisonLine({ pct }: { pct: number | null }) {

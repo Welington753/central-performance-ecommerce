@@ -1,8 +1,8 @@
 import { formatBRL, formatCalendarDateShort } from "@/lib/kpi-format";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type { AnalyticsDailyPoint } from "@/types/marketplace-analytics";
 
 interface DailyRevenueChartProps {
-  dailySeries: MercadoLivreKpisDto["dailySeries"];
+  dailySeries: AnalyticsDailyPoint[];
 }
 
 const CHART_HEIGHT = 160;

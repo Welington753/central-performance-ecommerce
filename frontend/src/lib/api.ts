@@ -13,6 +13,10 @@ import type {
   MercadoLivreKpisDto,
   MercadoLivreSyncSummary,
 } from "@/types/mercado-livre-kpis";
+import type {
+  MarketplaceAnalyticsKpisDto,
+  MarketplaceFilter,
+} from "@/types/marketplace-analytics";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -111,6 +115,34 @@ export async function fetchMercadoLivreKpis(
     throw new ApiFetchError("Não foi possível carregar os KPIs agora.");
   }
   return (await response.json()) as MercadoLivreKpisDto;
+}
+
+export class InvalidAnalyticsFilterApiError extends ApiFetchError {}
+
+export interface MarketplaceAnalyticsQuery {
+  from: string;
+  to: string;
+  marketplace?: MarketplaceFilter;
+  accountId?: string;
+}
+
+export async function fetchMarketplaceAnalyticsKpis(
+  query: MarketplaceAnalyticsQuery,
+): Promise<MarketplaceAnalyticsKpisDto> {
+  const params = new URLSearchParams({ from: query.from, to: query.to });
+  if (query.marketplace && query.marketplace !== "ALL") {
+    params.set("marketplace", query.marketplace);
+  }
+  if (query.accountId) params.set("accountId", query.accountId);
+
+  const response = await apiFetch(`/marketplace-analytics/kpis?${params.toString()}`);
+  if (response.status === 400) {
+    throw new InvalidAnalyticsFilterApiError("Filtro inválido.");
+  }
+  if (!response.ok) {
+    throw new ApiFetchError("Não foi possível carregar os KPIs agora.");
+  }
+  return (await response.json()) as MarketplaceAnalyticsKpisDto;
 }
 
 export async function syncMercadoLivreOrders(

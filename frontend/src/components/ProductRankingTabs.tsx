@@ -3,11 +3,11 @@
 import { useMemo, useState } from "react";
 import { EmptyStateIcon } from "@/components/EmptyState";
 import { formatBRL, formatDecimal } from "@/lib/kpi-format";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type { AnalyticsTopListing, AnalyticsTopProductBySku } from "@/types/marketplace-analytics";
 
 interface ProductRankingTabsProps {
-  bySku: MercadoLivreKpisDto["topProductsBySku"];
-  byListing: MercadoLivreKpisDto["topListings"];
+  bySku: AnalyticsTopProductBySku[];
+  byListing: AnalyticsTopListing[];
 }
 
 type RankingTab = "sku" | "listing";
@@ -139,7 +139,7 @@ function EmptyRanking() {
 function SkuTable({
   rows,
 }: {
-  rows: MercadoLivreKpisDto["topProductsBySku"];
+  rows: AnalyticsTopProductBySku[];
 }) {
   if (rows.length === 0) return <EmptyRanking />;
 
@@ -195,7 +195,7 @@ function SkuTable({
 function ListingTable({
   rows,
 }: {
-  rows: MercadoLivreKpisDto["topListings"];
+  rows: AnalyticsTopListing[];
 }) {
   if (rows.length === 0) return <EmptyRanking />;
 

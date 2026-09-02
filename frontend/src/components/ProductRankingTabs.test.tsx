@@ -1,9 +1,9 @@
 import { render, screen, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { ProductRankingTabs } from "./ProductRankingTabs";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type { AnalyticsTopListing, AnalyticsTopProductBySku } from "@/types/marketplace-analytics";
 
-const bySku: MercadoLivreKpisDto["topProductsBySku"] = [
+const bySku: AnalyticsTopProductBySku[] = [
   {
     sku: "OPA300005PMA1",
     title: "Produto consolidado",
@@ -22,9 +22,25 @@ const bySku: MercadoLivreKpisDto["topProductsBySku"] = [
   },
 ];
 
-const byListing: MercadoLivreKpisDto["topListings"] = [
-  { listingId: "MLB1:V1", sku: "OPA300005PMA1", title: "Anúncio 1", units: 6, grossRevenue: "300.00" },
-  { listingId: "MLB2", sku: "OPA300005PMA1", title: "Anúncio 2", units: 4, grossRevenue: "200.00" },
+const byListing: AnalyticsTopListing[] = [
+  {
+    listingId: "MLB1:V1",
+    marketplace: "MERCADO_LIVRE",
+    accountId: "acc-1",
+    sku: "OPA300005PMA1",
+    title: "Anúncio 1",
+    units: 6,
+    grossRevenue: "300.00",
+  },
+  {
+    listingId: "MLB2",
+    marketplace: "MERCADO_LIVRE",
+    accountId: "acc-1",
+    sku: "OPA300005PMA1",
+    title: "Anúncio 2",
+    units: 4,
+    grossRevenue: "200.00",
+  },
 ];
 
 describe("ProductRankingTabs", () => {
@@ -66,7 +82,7 @@ describe("ProductRankingTabs", () => {
   });
 
   it("limits the visible rows to the selected Top N", async () => {
-    const manyRows: MercadoLivreKpisDto["topProductsBySku"] = Array.from(
+    const manyRows: AnalyticsTopProductBySku[] = Array.from(
       { length: 15 },
       (_, i) => ({
         sku: `SKU-${i}`,

@@ -1,9 +1,9 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { DailyRevenueChart } from "./DailyRevenueChart";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type { AnalyticsDailyPoint } from "@/types/marketplace-analytics";
 
-const series: MercadoLivreKpisDto["dailySeries"] = [
+const series: AnalyticsDailyPoint[] = [
   { date: "2026-08-01", grossRevenue: "0.00", paidOrders: 0, units: 0, cancelledOrders: 0 },
   { date: "2026-08-02", grossRevenue: "150.00", paidOrders: 2, units: 4, cancelledOrders: 1 },
 ];

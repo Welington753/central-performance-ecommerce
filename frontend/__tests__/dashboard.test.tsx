@@ -14,8 +14,11 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/(protegido)/dashboard/page";
 import * as api from "@/lib/api";
-import type { MarketplaceAccountDto } from "@/types/marketplace";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+import type {
+  AccountBreakdownEntry,
+  MarketplaceAnalyticsKpisDto,
+  MarketplaceBreakdownEntry,
+} from "@/types/marketplace-analytics";
 
 const { useSearchParams } = jest.requireMock("next/navigation") as {
   useSearchParams: jest.Mock;
@@ -25,26 +28,58 @@ function mockSearchParams(params: Record<string, string> = {}) {
   useSearchParams.mockReturnValue(new URLSearchParams(params));
 }
 
-function mlAccount(
-  overrides: Partial<MarketplaceAccountDto> = {},
-): MarketplaceAccountDto {
+function fullBreakdown(
+  overrides: Partial<MarketplaceBreakdownEntry>[] = [],
+): MarketplaceBreakdownEntry[] {
+  const base: MarketplaceBreakdownEntry[] = [
+    {
+      marketplace: "MERCADO_LIVRE",
+      availability: "AVAILABLE",
+      accountsIncluded: 1,
+      accountsTotal: 1,
+      summary: { grossRevenue: "1234.56", paidOrders: 10, units: 25 },
+      lastSync: "2026-09-01T15:00:00.000Z",
+    },
+    {
+      marketplace: "AMAZON",
+      availability: "NOT_CONNECTED",
+      accountsIncluded: 0,
+      accountsTotal: 0,
+      summary: null,
+      lastSync: null,
+    },
+    {
+      marketplace: "SHOPEE",
+      availability: "NOT_CONNECTED",
+      accountsIncluded: 0,
+      accountsTotal: 0,
+      summary: null,
+      lastSync: null,
+    },
+  ];
+  return base.map((entry, i) => ({ ...entry, ...overrides[i] }));
+}
+
+function account(overrides: Partial<AccountBreakdownEntry> = {}): AccountBreakdownEntry {
   return {
-    id: "acc-1",
+    accountId: "acc-1",
     marketplace: "MERCADO_LIVRE",
-    externalSellerId: "1548451374",
     nickname: "EZIEHOME",
+    externalSellerId: "1548451374",
     status: "CONNECTED",
-    tokenExpiresAt: null,
-    lastSuccessfulSyncAt: null,
-    createdAt: "2026-01-01T00:00:00.000Z",
-    updatedAt: "2026-01-01T00:00:00.000Z",
+    availability: "AVAILABLE",
+    summary: { grossRevenue: "1234.56", paidOrders: 10, units: 25 },
+    lastSync: "2026-09-01T15:00:00.000Z",
     ...overrides,
   };
 }
 
-function kpis(overrides: Partial<MercadoLivreKpisDto> = {}): MercadoLivreKpisDto {
+function analyticsDto(
+  overrides: Partial<MarketplaceAnalyticsKpisDto> = {},
+): MarketplaceAnalyticsKpisDto {
   return {
-    account: { id: "acc-1", externalSellerId: "1548451374", nickname: "EZIEHOME" },
+    scope: { marketplace: "ALL", accountId: null },
+    availability: "AVAILABLE",
     period: { days: 30, timeZone: "America/Sao_Paulo", from: "2026-08-03", to: "2026-09-01" },
     comparisonPeriod: { days: 30, from: "2026-07-04", to: "2026-08-02" },
     summary: {
@@ -68,48 +103,29 @@ function kpis(overrides: Partial<MercadoLivreKpisDto> = {}): MercadoLivreKpisDto
       distinctProductsPct: null,
       unitsPerOrderPct: null,
     },
-    bestDay: {
-      date: "2026-08-20",
-      grossRevenue: "500.00",
-      paidOrders: 3,
-      units: 6,
-    },
+    bestDay: { date: "2026-08-20", grossRevenue: "500.00", paidOrders: 3, units: 6 },
     dailySeries: [
       { date: "2026-08-03", grossRevenue: "0.00", paidOrders: 0, units: 0, cancelledOrders: 0 },
-      { date: "2026-08-04", grossRevenue: "100.00", paidOrders: 1, units: 2, cancelledOrders: 0 },
     ],
-    topProducts: [
-      { sku: "SKU-A", title: "Produto A", units: 5, grossRevenue: "300.00" },
-    ],
+    topProducts: [],
     topProductsBySku: [
-      {
-        sku: "SKU-A",
-        title: "Produto A",
-        distinctListings: 2,
-        units: 5,
-        grossRevenue: "300.00",
-        unitsSharePct: 20,
-      },
+      { sku: "SKU-A", title: "Produto A", distinctListings: 2, units: 5, grossRevenue: "300.00", unitsSharePct: 20 },
     ],
     topListings: [
-      {
-        listingId: "MLB1",
-        sku: "SKU-A",
-        title: "Produto A",
-        units: 3,
-        grossRevenue: "180.00",
-      },
+      { listingId: "MLB1", marketplace: "MERCADO_LIVRE", accountId: "acc-1", sku: "SKU-A", title: "Produto A", units: 3, grossRevenue: "180.00" },
     ],
+    breakdownByMarketplace: fullBreakdown(),
+    breakdownByAccount: [account()],
+    sources: [],
     dataCoverage: {
       status: "complete",
-      synchronizedFrom: "2026-07-04",
-      synchronizedTo: "2026-09-01",
+      synchronizedIntervals: [{ from: "2026-07-04", to: "2026-09-01" }],
       selectedPeriodComplete: true,
       comparisonPeriodComplete: true,
     },
     lastSync: "2026-09-01T15:00:00.000Z",
     ...overrides,
-  };
+  } as MarketplaceAnalyticsKpisDto;
 }
 
 beforeEach(() => {
@@ -119,368 +135,244 @@ beforeEach(() => {
 });
 
 describe("DashboardPage", () => {
-  it("shows a loading state while accounts are being fetched", () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockReturnValue(
-      new Promise(() => {}), // nunca resolve neste teste
-    );
-
+  it("shows a loading state while the marketplace scope is being fetched", () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockReturnValue(new Promise(() => {}));
     render(<DashboardPage />);
-
     expect(screen.getByText(/carregando/i)).toBeInTheDocument();
   });
 
-  it("shows a CTA to /integracoes when there is no CONNECTED Mercado Livre account", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ status: "DISCONNECTED" }),
-    ]);
-
+  it("defaults to marketplace=ALL and fetches without an accountId when the URL has no scope filters", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     render(<DashboardPage />);
+    await waitFor(() =>
+      expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith(
+        expect.objectContaining({ marketplace: "ALL" }),
+      ),
+    );
+    const [callArgs] = (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mock.calls[0] as [
+      { accountId?: string },
+    ];
+    expect(callArgs.accountId).toBeUndefined();
+  });
 
-    const link = await screen.findByRole("link", {
-      name: /conectar mercado livre|ir para integrações/i,
-    });
+  it("shows a CTA to /integracoes when nothing is connected anywhere (ALL, NOT_CONNECTED)", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        availability: "NOT_CONNECTED",
+        summary: null,
+        comparison: null,
+        bestDay: null,
+        dailySeries: [],
+        topProductsBySku: [],
+        topListings: [],
+        breakdownByAccount: [],
+        breakdownByMarketplace: fullBreakdown([{ availability: "NOT_CONNECTED", summary: null, accountsIncluded: 0 }]),
+        dataCoverage: { status: "unknown", synchronizedIntervals: [], selectedPeriodComplete: false, comparisonPeriodComplete: false },
+        lastSync: null,
+      }),
+    );
+    render(<DashboardPage />);
+    const link = await screen.findByRole("link", { name: /ir para integrações/i });
     expect(link).toHaveAttribute("href", "/integracoes");
   });
 
-  it("shows a load-error message with retry when fetching accounts fails", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockRejectedValue(
-      new Error("network down"),
-    );
-
+  it("shows a load-error message with retry when the fetch fails", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockRejectedValue(new Error("network down"));
     render(<DashboardPage />);
-
-    expect(
-      await screen.findByText(/não foi possível carregar/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /tentar novamente/i }),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/não foi possível carregar/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /tentar novamente/i })).toBeInTheDocument();
   });
 
-  it("automatically selects the CONNECTED account and fetches its KPIs with a default 30-day period", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "acc-1", status: "CONNECTED" }),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
+  it("renders the real consolidated aggregate for the ALL scope", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     render(<DashboardPage />);
-
-    await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith(
-        "acc-1",
-        expect.objectContaining({
-          from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-          to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
-        }),
-      ),
-    );
-  });
-
-  it("uses from/to already present in the URL instead of the default period", async () => {
-    mockSearchParams({ from: "2026-08-01", to: "2026-08-31" });
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
-    render(<DashboardPage />);
-
-    await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith("acc-1", {
-        from: "2026-08-01",
-        to: "2026-08-31",
-      }),
-    );
-  });
-
-  it("shows an invalid-period message and never calls the KPI API when the URL has an invalid range", async () => {
-    mockSearchParams({ from: "2026-08-31", to: "2026-08-01" });
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-
-    render(<DashboardPage />);
-
-    expect(
-      await screen.findByText(/período inválido na url/i),
-    ).toBeInTheDocument();
-    expect(api.fetchMercadoLivreKpis).not.toHaveBeenCalled();
-  });
-
-  it('offers a way back to the default 30-day period from an invalid URL', async () => {
-    mockSearchParams({ from: "2026-08-31", to: "2026-08-01" });
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-
-    const user = userEvent.setup();
-    render(<DashboardPage />);
-
-    const resetButton = await screen.findByRole("button", {
-      name: /voltar aos últimos 30 dias/i,
-    });
-    await user.click(resetButton);
-    expect(replaceMock).toHaveBeenCalled();
-  });
-
-  it("renders the four main KPI cards with real values from the API response", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount(),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
-    render(<DashboardPage />);
-
     const revenueCard = await screen.findByTestId("kpi-card-gross-revenue");
     expect(within(revenueCard).getByText(/R\$\s?1\.234,56/)).toBeInTheDocument();
-    expect(
-      within(screen.getByTestId("kpi-card-orders")).getByText("10"),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/visão consolidada dos marketplaces/i)).toBeInTheDocument();
   });
 
-  it("renders the additional KPI cards (cancelled orders, cancellation rate, distinct products, units per order, avg unit price, best day)", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
+  it('shows the "X de 3 marketplaces" indicator, distinguishing active integrations from marketplaces with data', async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     render(<DashboardPage />);
-
-    expect(await screen.findByTestId("kpi-card-cancelled-orders")).toHaveTextContent("2");
-    expect(screen.getByTestId("kpi-card-cancellation-rate")).toHaveTextContent("16,7%");
-    expect(screen.getByTestId("kpi-card-distinct-products")).toHaveTextContent("4");
-    expect(screen.getByTestId("kpi-card-units-per-order")).toHaveTextContent("2,5");
-    expect(screen.getByTestId("kpi-card-best-day")).toHaveTextContent("20/08/2026");
+    expect(
+      await screen.findByText(/1 de 3 marketplaces com integração ativa/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 de 3 com dados disponíveis/i)).toBeInTheDocument();
   });
 
-  it("shows the data coverage banner", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(
-      kpis({
-        dataCoverage: {
-          status: "partial",
-          synchronizedFrom: "2026-08-20",
-          synchronizedTo: "2026-09-01",
-          selectedPeriodComplete: false,
-          comparisonPeriodComplete: false,
-        },
+  it("shows Mercado Livre with real data and Amazon/Shopee as not connected, with no fabricated numbers", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
+    render(<DashboardPage />);
+    const ml = await screen.findByTestId("marketplace-panel-MERCADO_LIVRE");
+    expect(within(ml).getByText(/R\$\s?1\.234,56/)).toBeInTheDocument();
+    const amazon = screen.getByTestId("marketplace-panel-AMAZON");
+    expect(within(amazon).getByText(/não conectado/i)).toBeInTheDocument();
+    expect(amazon.textContent).not.toMatch(/R\$/);
+    const shopee = screen.getByTestId("marketplace-panel-SHOPEE");
+    expect(shopee.textContent).not.toMatch(/R\$/);
+  });
+
+  it("shows a connection-attention warning for a HISTORICAL_ONLY account without hiding its numbers", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        breakdownByAccount: [
+          account({ status: "TOKEN_EXPIRED", availability: "HISTORICAL_ONLY" }),
+        ],
       }),
     );
-
     render(<DashboardPage />);
-
-    expect(await screen.findByText(/cobertura parcial/i)).toBeInTheDocument();
+    expect(await screen.findByText(/precisa de atenção/i)).toBeInTheDocument();
+    expect(screen.getByTestId("kpi-card-gross-revenue")).toBeInTheDocument();
   });
 
-  it("renders the SKU ranking (consolidated) by default", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
-    render(<DashboardPage />);
-
-    expect(await screen.findByText("Produto A")).toBeInTheDocument();
-    expect(screen.getByText("SKU-A")).toBeInTheDocument();
-  });
-
-  it("shows the empty ranking state when there are no ranked products", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount(),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(
-      kpis({ topProductsBySku: [], topListings: [] }),
+  it("shows a 'connected, no sync yet' message instead of a fabricated zero when availability is CONNECTED_NO_DATA", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        availability: "CONNECTED_NO_DATA",
+        summary: null,
+        comparison: null,
+        bestDay: null,
+        dailySeries: [],
+        topProductsBySku: [],
+        topListings: [],
+        dataCoverage: { status: "unknown", synchronizedIntervals: [], selectedPeriodComplete: false, comparisonPeriodComplete: false },
+      }),
     );
-
     render(<DashboardPage />);
-
     expect(
-      await screen.findByText(/nenhum produto vendido no período/i),
+      await screen.findByText(/ainda não tem nenhuma sincronização concluída/i),
     ).toBeInTheDocument();
+    expect(screen.queryByTestId("kpi-card-gross-revenue")).not.toBeInTheDocument();
   });
 
-  it("shows the last sync time formatted in America/Sao_Paulo", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount(),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(
-      kpis({ lastSync: "2026-09-01T15:00:00.000Z" }),
+  it("persists marketplace and accountId already present in the URL, and forwards them to the fetch", async () => {
+    mockSearchParams({ marketplace: "MERCADO_LIVRE", accountId: "acc-1", from: "2026-08-01", to: "2026-08-31" });
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: "acc-1" } }),
     );
-
     render(<DashboardPage />);
-
-    expect(await screen.findByText(/01\/09\/2026, 12:00/)).toBeInTheDocument();
-  });
-
-  it("shows a 'never synced' message when lastSync is null", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount(),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(
-      kpis({ lastSync: null }),
+    await waitFor(() =>
+      expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith({
+        from: "2026-08-01",
+        to: "2026-08-31",
+        marketplace: "MERCADO_LIVRE",
+        accountId: "acc-1",
+      }),
     );
-
-    render(<DashboardPage />);
-
-    expect(
-      await screen.findByText(/nunca sincronizado/i),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/desempenho do mercado livre/i)).toBeInTheDocument();
   });
 
-  it("shows a sanitized error with retry when fetching KPIs fails", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount(),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockRejectedValue(
-      new Error("boom"),
-    );
-
-    render(<DashboardPage />);
-
-    expect(
-      await screen.findByText(/não foi possível carregar os kpis/i),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("button", { name: /tentar novamente/i }),
-    ).toBeInTheDocument();
-  });
-
-  it("clicking 'Sincronizar agora' calls syncMercadoLivreOrders for the selected account and refreshes KPIs", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "acc-1" }),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock)
-      .mockResolvedValueOnce(
-        kpis({
-          summary: {
-            grossRevenue: "0.00",
-            orders: 0,
-            units: 0,
-            averageTicket: "0.00",
-            cancelledOrders: 0,
-            cancellationRate: 0,
-            distinctProducts: 0,
-            unitsPerOrder: 0,
-            avgUnitPrice: "0.00",
-          },
-        }),
-      )
-      .mockResolvedValueOnce(kpis());
-    (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({
-      status: "SUCCESS",
-    });
-
+  it("changing the marketplace filter updates the URL without a full reload", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     const user = userEvent.setup();
     render(<DashboardPage />);
+    const select = await screen.findByLabelText("Marketplace");
+    await user.selectOptions(select, "AMAZON");
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringContaining("marketplace=AMAZON"),
+      { scroll: false },
+    );
+  });
 
-    const button = await screen.findByRole("button", {
-      name: /sincronizar agora/i,
-    });
+  it("never silently selects the first account when the scope is consolidated (ALL, no accountId)", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        breakdownByAccount: [account({ accountId: "acc-1" }), account({ accountId: "acc-2" })],
+      }),
+    );
+    render(<DashboardPage />);
+    await screen.findByTestId("kpi-card-gross-revenue");
+    const [callArgs] = (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mock.calls[0] as [
+      { accountId?: string },
+    ];
+    expect(callArgs.accountId).toBeUndefined();
+    expect(screen.getByLabelText("Conta")).toHaveValue("");
+  });
+
+  it("clicking 'Sincronizar agora' works when the scope has exactly one connected Mercado Livre account", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
+    (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({ status: "SUCCESS" });
+    const user = userEvent.setup();
+    render(<DashboardPage />);
+    const button = await screen.findByRole("button", { name: /sincronizar agora/i });
     await user.click(button);
-
-    await waitFor(() =>
-      expect(api.syncMercadoLivreOrders).toHaveBeenCalledWith("acc-1"),
-    );
-    await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledTimes(2),
-    );
+    await waitFor(() => expect(api.syncMercadoLivreOrders).toHaveBeenCalledWith("acc-1"));
   });
 
   it("prevents a double click on 'Sincronizar agora' from firing two sync requests", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "acc-1" }),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     let resolveSync!: (v: { status: "SUCCESS" }) => void;
     (api.syncMercadoLivreOrders as jest.Mock).mockReturnValue(
       new Promise((resolve) => {
         resolveSync = resolve;
       }),
     );
-
     const user = userEvent.setup();
     render(<DashboardPage />);
-
-    const button = await screen.findByRole("button", {
-      name: /sincronizar agora/i,
-    });
+    const button = await screen.findByRole("button", { name: /sincronizar agora/i });
     await user.click(button);
     await user.click(button);
-
     expect(api.syncMercadoLivreOrders).toHaveBeenCalledTimes(1);
-
     resolveSync({ status: "SUCCESS" });
     await waitFor(() => expect(button).not.toBeDisabled());
   });
 
-  it("shows a sanitized error when the sync request fails, without disabling the button forever", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "acc-1" }),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-    (api.syncMercadoLivreOrders as jest.Mock).mockRejectedValue(
-      new Error("SYNC_ALREADY_RUNNING"),
+  it("shows a link to /sincronizacoes instead of a button when the scope has more than one connected account", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        breakdownByAccount: [
+          account({ accountId: "acc-1" }),
+          account({ accountId: "acc-2", nickname: "Loja 2" }),
+        ],
+      }),
     );
+    render(<DashboardPage />);
+    await screen.findByTestId("kpi-card-gross-revenue");
+    expect(
+      screen.getByRole("link", { name: /sincronize por lá/i }),
+    ).toHaveAttribute("href", "/sincronizacoes");
+    expect(
+      screen.queryByRole("button", { name: /sincronizar agora/i }),
+    ).not.toBeInTheDocument();
+  });
 
+  it("shows a sanitized error when the sync request fails, without disabling the button forever", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
+    (api.syncMercadoLivreOrders as jest.Mock).mockRejectedValue(new Error("SYNC_ALREADY_RUNNING"));
     const user = userEvent.setup();
     render(<DashboardPage />);
-
-    const button = await screen.findByRole("button", {
-      name: /sincronizar agora/i,
-    });
+    const button = await screen.findByRole("button", { name: /sincronizar agora/i });
     await user.click(button);
-
-    expect(
-      await screen.findByText(/não foi possível sincronizar/i),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(/não foi possível sincronizar/i)).toBeInTheDocument();
     await waitFor(() => expect(button).not.toBeDisabled());
     expect(screen.queryByText("SYNC_ALREADY_RUNNING")).not.toBeInTheDocument();
   });
 
-  it("shows an account selector when more than one CONNECTED account exists, and switching refetches KPIs", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "acc-1", nickname: "Loja Principal" }),
-      mlAccount({ id: "acc-2", nickname: "Loja Secundária" }),
-    ]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
-    const user = userEvent.setup();
+  it("shows the last sync time formatted in America/Sao_Paulo", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({ lastSync: "2026-09-01T15:00:00.000Z" }),
+    );
     render(<DashboardPage />);
-
-    const select = await screen.findByRole("combobox", {
-      name: /conta do mercado livre/i,
-    });
-    await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith(
-        "acc-1",
-        expect.anything(),
-      ),
-    );
-
-    await user.selectOptions(select, "acc-2");
-
-    await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith(
-        "acc-2",
-        expect.anything(),
-      ),
-    );
+    expect(await screen.findByText(/01\/09\/2026, 12:00/)).toBeInTheDocument();
   });
 
-  it("never renders a monetary or percentage value while accounts are still loading", () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockReturnValue(
-      new Promise(() => {}),
-    );
-
+  it("shows an invalid-period message and never calls the API when the URL has an invalid range", async () => {
+    mockSearchParams({ from: "2026-08-31", to: "2026-08-01" });
     render(<DashboardPage />);
+    expect(await screen.findByText(/período inválido na url/i)).toBeInTheDocument();
+  });
 
+  it("never renders a monetary or percentage value while loading", () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockReturnValue(new Promise(() => {}));
+    render(<DashboardPage />);
     expect(screen.queryByText(/R\$\s?\d/)).not.toBeInTheDocument();
     expect(screen.queryByText(/\d+([.,]\d+)?\s?%/)).not.toBeInTheDocument();
   });
 
-  it("updates the URL (without a full reload) when a period shortcut is applied", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
-    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
-
-    const user = userEvent.setup();
+  it("scope filters have accessible labels", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     render(<DashboardPage />);
-
-    const todayButton = await screen.findByRole("button", { name: "Hoje" });
-    await user.click(todayButton);
-
-    expect(replaceMock).toHaveBeenCalledWith(
-      expect.stringMatching(/^\/dashboard\?from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}$/),
-      { scroll: false },
-    );
+    expect(await screen.findByLabelText("Marketplace")).toBeInTheDocument();
+    expect(screen.getByLabelText("Conta")).toBeInTheDocument();
   });
 });
