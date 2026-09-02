@@ -2,16 +2,16 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { Marketplace } from '../contracts/marketplace.enum';
-import { decimalStringToCents } from './money.util';
+import { decimalStringToCents } from '../marketplace-orders/money.util';
 import {
   CANCELLED_ORDER_STATUS,
   PAID_ORDER_STATUS,
-} from './mercado-livre-order-status';
+} from '../marketplace-orders/order-status';
 import {
   listDaysInWindow,
   type KpiWindows,
   type PeriodWindow,
-} from './period.util';
+} from '../marketplace-orders/period.util';
 import { computeDataCoverage, type DataCoverage } from './sync-coverage.util';
 
 const TOP_PRODUCTS_LIMIT = 10;

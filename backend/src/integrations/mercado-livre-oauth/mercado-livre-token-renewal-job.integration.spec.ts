@@ -5,7 +5,7 @@ import { createTestDataSource } from '../../test-utils/create-test-data-source';
 import { EncryptionService } from '../../common/encryption/encryption.service';
 import { MarketplaceAccount } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
-import { AdvisoryLockService } from './advisory-lock.service';
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { MercadoLivreOAuthCleanupService } from './mercado-livre-oauth-cleanup.service';
 import { MercadoLivreOAuthService } from './mercado-livre-oauth.service';
 import { MercadoLivreTokenRenewalJob } from './mercado-livre-token-renewal.job';

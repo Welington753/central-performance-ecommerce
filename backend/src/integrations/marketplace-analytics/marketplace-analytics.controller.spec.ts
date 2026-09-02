@@ -3,7 +3,7 @@ import { GUARDS_METADATA } from '@nestjs/common/constants';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
 import { MarketplaceAnalyticsController } from './marketplace-analytics.controller';
 import { MarketplaceAnalyticsFilterError } from './marketplace-filter.util';
-import { InvalidKpiPeriodError } from '../mercado-livre-orders/period.util';
+import { InvalidKpiPeriodError } from '../marketplace-orders/period.util';
 import type { MarketplaceAnalyticsAggregate } from './marketplace-analytics.service';
 
 function emptyAggregate(): MarketplaceAnalyticsAggregate {

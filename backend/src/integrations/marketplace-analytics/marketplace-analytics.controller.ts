@@ -7,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
-import { InvalidKpiPeriodError } from '../mercado-livre-orders/period.util';
+import { InvalidKpiPeriodError } from '../marketplace-orders/period.util';
 import {
   toMarketplaceAnalyticsResponse,
   type MarketplaceAnalyticsKpisResponseDto,

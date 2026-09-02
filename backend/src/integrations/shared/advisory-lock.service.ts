@@ -11,9 +11,13 @@ const POLL_INTERVAL_MS = 100;
 
 /**
  * Advisory lock por conta, coordenando callback e refresh mesmo com
- * múltiplas instâncias do backend (design §3). Uma conexão DEDICADA
- * (QueryRunner) é usada para adquirir e liberar o mesmo lock — nunca a
- * conexão compartilhada do pool de repositórios.
+ * múltiplas instâncias do backend (design §3, Mercado Livre OAuth) —
+ * genérico o bastante para ser reaproveitado por qualquer marketplace que
+ * precise serializar operações por `accountId` (Amazon inclusive, desde o
+ * Checkpoint 4-A). Movido para `integrations/shared/` no Checkpoint 4-B
+ * ("Commit 1") por não ter nenhuma dependência de negócio do Mercado Livre.
+ * Uma conexão DEDICADA (QueryRunner) é usada para adquirir e liberar o
+ * mesmo lock — nunca a conexão compartilhada do pool de repositórios.
  */
 @Injectable()
 export class AdvisoryLockService {

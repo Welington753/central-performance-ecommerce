@@ -7,16 +7,17 @@ import {
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
 import { SyncRun } from '../../sync/sync-run.entity';
-import type { MappedOrderRecord } from './mercado-livre-order.mapper';
+import type { MappedOrderRecord } from './mapped-order-record';
 import { MarketplaceOrder } from './marketplace-order.entity';
 import { MarketplaceOrderItem } from './marketplace-order-item.entity';
 import {
-  MercadoLivreOrdersPersistenceService,
+  MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
-} from './mercado-livre-orders-persistence.service';
+} from './marketplace-orders-persistence.service';
 
 interface SyncRunRow {
   status: string;
+  marketplace: string;
   error_code: string | null;
   error_summary: string | null;
 }
@@ -25,6 +26,11 @@ interface MarketplaceOrderRow {
   id: string;
   status: string;
   total_amount: string;
+  source_status: string | null;
+  fulfillment_channel: string | null;
+  external_marketplace_id: string | null;
+  marketplace_last_updated: Date | null;
+  updated_at: Date;
 }
 
 interface MarketplaceOrderItemRow {
@@ -62,9 +68,9 @@ function orderRecord(
   };
 }
 
-describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
+describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
   let dataSource: DataSource;
-  let service: MercadoLivreOrdersPersistenceService;
+  let service: MarketplaceOrdersPersistenceService;
   let accountId: string;
 
   beforeAll(async () => {
@@ -74,7 +80,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
       MarketplaceOrder,
       MarketplaceOrderItem,
     ]);
-    service = new MercadoLivreOrdersPersistenceService(dataSource);
+    service = new MarketplaceOrdersPersistenceService(dataSource);
   });
 
   afterAll(async () => {
@@ -102,6 +108,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
     it('blocks a second RUNNING sync for the same account with SyncAlreadyRunningError', async () => {
       await service.beginSyncRun({
         marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
         periodFrom: new Date('2026-07-01T00:00:00.000Z'),
         periodTo: new Date('2026-08-30T00:00:00.000Z'),
         startedAt: new Date(),
@@ -110,6 +117,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
       await expect(
         service.beginSyncRun({
           marketplaceAccountId: accountId,
+          marketplace: Marketplace.MERCADO_LIVRE,
           periodFrom: new Date('2026-07-01T00:00:00.000Z'),
           periodTo: new Date('2026-08-30T00:00:00.000Z'),
           startedAt: new Date(),
@@ -120,6 +128,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
     it('allows a new sync run after the previous one is finalized', async () => {
       const firstId = await service.beginSyncRun({
         marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
         periodFrom: new Date(),
         periodTo: new Date(),
         startedAt: new Date(),
@@ -138,6 +147,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
 
       const secondId = await service.beginSyncRun({
         marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
         periodFrom: new Date(),
         periodTo: new Date(),
         startedAt: new Date(),
@@ -148,6 +158,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
     it('also allows a new sync run after the previous one FAILED', async () => {
       const firstId = await service.beginSyncRun({
         marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
         periodFrom: new Date(),
         periodTo: new Date(),
         startedAt: new Date(),
@@ -162,6 +173,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
       await expect(
         service.beginSyncRun({
           marketplaceAccountId: accountId,
+          marketplace: Marketplace.MERCADO_LIVRE,
           periodFrom: new Date(),
           periodTo: new Date(),
           startedAt: new Date(),
@@ -172,6 +184,7 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
     it('never stores the raw failure message beyond the sanitized errorCode/summary passed in', async () => {
       const id = await service.beginSyncRun({
         marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
         periodFrom: new Date(),
         periodTo: new Date(),
         startedAt: new Date(),
@@ -192,6 +205,42 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
       expect(row.error_summary).toBe(
         'Falha inesperada durante a sincronização.',
       );
+    });
+
+    it('records the marketplace passed in — a MERCADO_LIVRE run and an AMAZON run for different accounts never collide', async () => {
+      const amazonAccount = await dataSource
+        .getRepository(MarketplaceAccount)
+        .save({
+          id: randomUUID(),
+          marketplace: Marketplace.AMAZON,
+          externalSellerId: 'A1SELLERPARTNERID',
+          status: MarketplaceAccountStatus.CONNECTED,
+          tokenVersion: 1,
+        });
+
+      const mlRunId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date(),
+        periodTo: new Date(),
+        startedAt: new Date(),
+      });
+      const amazonRunId = await service.beginSyncRun({
+        marketplaceAccountId: amazonAccount.id,
+        marketplace: Marketplace.AMAZON,
+        periodFrom: new Date(),
+        periodTo: new Date(),
+        startedAt: new Date(),
+      });
+
+      const rows = await dataSource.query<
+        Array<{ id: string; marketplace: string }>
+      >('SELECT id, marketplace FROM sync_runs WHERE id = ANY($1)', [
+        [mlRunId, amazonRunId],
+      ]);
+      const byId = new Map(rows.map((r) => [r.id, r.marketplace]));
+      expect(byId.get(mlRunId)).toBe('MERCADO_LIVRE');
+      expect(byId.get(amazonRunId)).toBe('AMAZON');
     });
   });
 
@@ -344,6 +393,161 @@ describe('MercadoLivreOrdersPersistenceService (Postgres real)', () => {
         ordersCreated: 0,
         ordersUpdated: 0,
         itemsPersisted: 0,
+      });
+    });
+
+    it('persists sourceStatus/fulfillmentChannel/externalMarketplaceId when provided (Amazon), leaving them null when omitted (Mercado Livre)', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: 'amz-1',
+          sourceStatus: 'UNSHIPPED',
+          fulfillmentChannel: 'AMAZON',
+          externalMarketplaceId: 'A2Q3Y263D00KWC',
+        }),
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: 'ml-1',
+        }),
+      ]);
+
+      const byExternalId = new Map(
+        (
+          await dataSource.query<
+            Array<MarketplaceOrderRow & { external_order_id: string }>
+          >(
+            `SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1`,
+            [accountId],
+          )
+        ).map((r) => [r.external_order_id, r]),
+      );
+
+      const amazon = byExternalId.get('amz-1')!;
+      expect(amazon.source_status).toBe('UNSHIPPED');
+      expect(amazon.fulfillment_channel).toBe('AMAZON');
+      expect(amazon.external_marketplace_id).toBe('A2Q3Y263D00KWC');
+
+      const ml = byExternalId.get('ml-1')!;
+      expect(ml.source_status).toBeNull();
+      expect(ml.fulfillment_channel).toBeNull();
+      expect(ml.external_marketplace_id).toBeNull();
+    });
+
+    it('never lets an older marketplaceLastUpdated overwrite a newer one already stored (stale event ignored)', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          totalAmount: '500.00',
+          status: 'paid',
+          marketplaceLastUpdated: new Date('2026-08-10T12:00:00.000Z'),
+        }),
+      ]);
+
+      // Evento atrasado: marketplaceLastUpdated ANTERIOR ao já armazenado.
+      const result = await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          totalAmount: '999.99',
+          status: 'cancelled',
+          marketplaceLastUpdated: new Date('2026-08-09T00:00:00.000Z'),
+        }),
+      ]);
+
+      expect(result).toEqual({
+        ordersCreated: 0,
+        ordersUpdated: 0,
+        itemsPersisted: 0,
+      });
+
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.total_amount).toBe('500.00');
+      expect(order.status).toBe('paid');
+
+      // Itens do pedido original permanecem intocados também.
+      const items = await dataSource.query<MarketplaceOrderItemRow[]>(
+        'SELECT * FROM marketplace_order_items WHERE order_id = $1',
+        [order.id],
+      );
+      expect(items).toHaveLength(1);
+    });
+
+    it('applies an update whose marketplaceLastUpdated is strictly newer than the stored one', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          status: 'paid',
+          marketplaceLastUpdated: new Date('2026-08-10T12:00:00.000Z'),
+        }),
+      ]);
+
+      const result = await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          status: 'cancelled',
+          marketplaceLastUpdated: new Date('2026-08-11T00:00:00.000Z'),
+        }),
+      ]);
+
+      expect(result.ordersUpdated).toBe(1);
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.status).toBe('cancelled');
+    });
+
+    it('applies an update with the EXACT same marketplaceLastUpdated (>= is inclusive, matches historical behavior)', async () => {
+      const sameInstant = new Date('2026-08-10T12:00:00.000Z');
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          status: 'paid',
+          marketplaceLastUpdated: sameInstant,
+        }),
+      ]);
+
+      const result = await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          status: 'cancelled',
+          marketplaceLastUpdated: sameInstant,
+        }),
+      ]);
+
+      expect(result.ordersUpdated).toBe(1);
+    });
+
+    it('when a batch mixes a stale order and a fresh one, only the fresh one is applied — the stale one never blocks the rest of the batch', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: 'stale-target',
+          status: 'paid',
+          marketplaceLastUpdated: new Date('2026-08-10T12:00:00.000Z'),
+        }),
+      ]);
+
+      const result = await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: 'stale-target',
+          status: 'cancelled',
+          marketplaceLastUpdated: new Date('2026-08-01T00:00:00.000Z'), // antigo
+        }),
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: 'fresh-new',
+          status: 'paid',
+        }),
+      ]);
+
+      expect(result).toEqual({
+        ordersCreated: 1,
+        ordersUpdated: 0,
+        itemsPersisted: 1,
       });
     });
   });

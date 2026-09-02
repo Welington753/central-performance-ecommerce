@@ -1,13 +1,13 @@
-import { percentChange } from '../../mercado-livre-orders/dto/mercado-livre-kpis-response.dto';
+import { percentChange } from '../../marketplace-orders/percent-change.util';
 import {
   centsToDecimalString,
   divideCents,
-} from '../../mercado-livre-orders/money.util';
+} from '../../marketplace-orders/money.util';
 import {
   SAO_PAULO_TIME_ZONE,
   listDaysInWindow,
   utcInstantToSaoPauloDateString,
-} from '../../mercado-livre-orders/period.util';
+} from '../../marketplace-orders/period.util';
 import type { Marketplace } from '../../contracts/marketplace.enum';
 import type { MarketplaceAccountStatus } from '../../marketplace-accounts/marketplace-account.entity';
 import { intervalsToDto } from '../consolidated-coverage.util';

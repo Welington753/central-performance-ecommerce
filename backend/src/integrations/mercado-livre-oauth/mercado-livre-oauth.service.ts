@@ -13,7 +13,7 @@ import { Marketplace } from '../contracts/marketplace.enum';
 import type { MarketplaceAccount } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
-import { AdvisoryLockService } from './advisory-lock.service';
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { buildAuthorizationUrl } from './build-authorization-url';
 import type { CallbackQuery } from './callback-params.validator';
 import { validateCallbackParams } from './callback-params.validator';

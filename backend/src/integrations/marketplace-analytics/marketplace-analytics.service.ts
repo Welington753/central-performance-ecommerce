@@ -6,15 +6,15 @@ import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-
 import {
   CANCELLED_ORDER_STATUS,
   PAID_ORDER_STATUS,
-} from '../mercado-livre-orders/mercado-livre-order-status';
-import { decimalStringToCents } from '../mercado-livre-orders/money.util';
+} from '../marketplace-orders/order-status';
+import { decimalStringToCents } from '../marketplace-orders/money.util';
 import {
   listDaysInWindow,
   resolveKpiPeriod,
   type KpiWindows,
   type PeriodWindow,
-} from '../mercado-livre-orders/period.util';
-import type { SyncedInterval } from '../mercado-livre-orders/sync-coverage.util';
+} from '../marketplace-orders/period.util';
+import type { SyncedInterval } from '../marketplace-orders/coverage-interval.util';
 import {
   computeConsolidatedCoverage,
   computeSourceCoverage,
@@ -134,14 +134,15 @@ export interface MarketplaceAnalyticsQuery {
 }
 
 /**
- * Camada de analytics multi-marketplace (Checkpoint 3, "Fundação"). Nunca
- * chama a rede e nunca escreve em `marketplace_accounts`/`sync_runs` — é uma
- * leitura pura sobre os dados já normalizados e persistidos por
- * `MercadoLivreOrdersSyncService`/`MercadoLivreOrdersPersistenceService`
- * (intocados por este módulo). Trabalha sobre uma LISTA de contas em vez de
- * uma única conta — a generalização multi-fonte de
- * `MercadoLivreOrdersKpiService` (Fase 3/Checkpoint 2), que continua
- * existindo e intocado para o endpoint legado.
+ * Camada de analytics multi-marketplace (Checkpoint 3, "Fundação"; Checkpoint
+ * 4-B: também alimentada por pedidos Amazon). Nunca chama a rede e nunca
+ * escreve em `marketplace_accounts`/`sync_runs` — é uma leitura pura sobre os
+ * dados já normalizados e persistidos por
+ * `MarketplaceOrdersPersistenceService` (genérico, `marketplace-orders/`,
+ * usado por QUALQUER marketplace — Mercado Livre e Amazon). Trabalha sobre
+ * uma LISTA de contas em vez de uma única conta — a generalização
+ * multi-fonte de `MercadoLivreOrdersKpiService` (Fase 3/Checkpoint 2), que
+ * continua existindo e intocado para o endpoint legado.
  */
 @Injectable()
 export class MarketplaceAnalyticsService {

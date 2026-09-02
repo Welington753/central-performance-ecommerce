@@ -1,12 +1,10 @@
 import { Module } from '@nestjs/common';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
-// Ver comentário em `amazon-auth.service.ts`: `AdvisoryLockService` é o
-// utilitário GENÉRICO de lock por accountId já usado pelo OAuth do Mercado
-// Livre — reaproveitado diretamente (não duplicado). Uma segunda instância
-// própria deste módulo é criada aqui (a classe não guarda estado entre
-// chamadas — cada `tryAcquire` abre sua própria conexão dedicada), evitando
-// qualquer alteração em `MercadoLivreOAuthModule`.
-import { AdvisoryLockService } from '../mercado-livre-oauth/advisory-lock.service';
+// `AdvisoryLockService` mora em `integrations/shared/` desde o Checkpoint
+// 4-B — uma instância própria deste módulo é criada aqui (a classe não
+// guarda estado entre chamadas — cada `tryAcquire` abre sua própria conexão
+// dedicada), sem depender de nenhum módulo do Mercado Livre.
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { AMAZON_FETCH, AmazonLwaClient } from './amazon-lwa.client';
 import { AmazonAuthService } from './amazon-auth.service';
 import { AmazonSpApiClient } from './amazon-sp-api.client';

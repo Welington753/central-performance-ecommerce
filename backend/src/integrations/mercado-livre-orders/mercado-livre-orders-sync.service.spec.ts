@@ -4,7 +4,7 @@ import {
   MarketplaceAccount,
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
-import { SyncAlreadyRunningError } from './mercado-livre-orders-persistence.service';
+import { SyncAlreadyRunningError } from '../marketplace-orders/marketplace-orders-persistence.service';
 import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.service';
 
 function account(

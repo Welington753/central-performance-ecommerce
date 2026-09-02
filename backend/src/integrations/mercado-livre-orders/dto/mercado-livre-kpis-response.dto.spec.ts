@@ -1,8 +1,5 @@
 import type { OrdersKpiAggregate } from '../mercado-livre-orders-kpi.service';
-import {
-  percentChange,
-  toMercadoLivreKpisResponse,
-} from './mercado-livre-kpis-response.dto';
+import { toMercadoLivreKpisResponse } from './mercado-livre-kpis-response.dto';
 
 function summary(overrides: Partial<OrdersKpiAggregate['current']> = {}) {
   return {
@@ -52,18 +49,9 @@ const account = {
   nickname: 'EZIEHOME',
 };
 
-describe('percentChange', () => {
-  it('returns null when the previous value is zero — never Infinity/NaN', () => {
-    expect(percentChange(100, 0)).toBeNull();
-    expect(percentChange(0, 0)).toBeNull();
-  });
-
-  it('computes a rounded one-decimal percentage change', () => {
-    expect(percentChange(150, 100)).toBe(50);
-    expect(percentChange(90, 100)).toBe(-10);
-    expect(percentChange(133, 100)).toBe(33);
-  });
-});
+// `percentChange` foi extraída para `marketplace-orders/
+// percent-change.util.spec.ts` (Checkpoint 4-B, "Commit 1") — coberta ali,
+// não duplicada aqui.
 
 describe('toMercadoLivreKpisResponse', () => {
   it('returns "0.00"/0 for every derived KPI with zero orders — no invalid division', () => {

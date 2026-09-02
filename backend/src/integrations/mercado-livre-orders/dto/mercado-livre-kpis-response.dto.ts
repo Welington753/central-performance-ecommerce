@@ -1,9 +1,13 @@
-import { centsToDecimalString, divideCents } from '../money.util';
+import {
+  centsToDecimalString,
+  divideCents,
+} from '../../marketplace-orders/money.util';
 import {
   SAO_PAULO_TIME_ZONE,
   listDaysInWindow,
   utcInstantToSaoPauloDateString,
-} from '../period.util';
+} from '../../marketplace-orders/period.util';
+import { percentChange } from '../../marketplace-orders/percent-change.util';
 import type { DataCoverage } from '../sync-coverage.util';
 import type {
   DailyPoint,
@@ -296,14 +300,8 @@ function dateBeforeExclusiveEnd(exclusiveEnd: Date): string {
   );
 }
 
-/**
- * `null` quando o período anterior é zero — nunca `Infinity`/`NaN`/um
- * percentual inventado (design "Comparação").
- */
-export function percentChange(
-  current: number,
-  previous: number,
-): number | null {
-  if (previous === 0) return null;
-  return Math.round(((current - previous) / previous) * 1000) / 10;
-}
+// `percentChange` foi extraída para
+// `marketplace-orders/percent-change.util.ts` (Checkpoint 4-B, "Commit 1")
+// — genérica, sem nenhuma dependência do Mercado Livre. Reexportada aqui
+// para preservar o caminho de import histórico deste arquivo.
+export { percentChange } from '../../marketplace-orders/percent-change.util';

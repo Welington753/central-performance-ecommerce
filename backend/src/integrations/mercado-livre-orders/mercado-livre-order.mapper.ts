@@ -1,36 +1,19 @@
 import type {
+  MappedOrderItemRecord,
+  MappedOrderRecord,
+} from '../marketplace-orders/mapped-order-record';
+import type {
   RawMercadoLivreOrder,
   RawMercadoLivreOrderItem,
 } from './mercado-livre-order-response';
 
-/**
- * Registro pronto para persistência — já sem nenhum campo de comprador,
- * mensagem, endereço ou payload bruto (a allowlist real acontece em
- * `mercado-livre-order-response.ts`; este mapper só converte tipos, nunca
- * usa spread do objeto bruto recebido da API).
- */
-export interface MappedOrderRecord {
-  marketplaceAccountId: string;
-  externalOrderId: string;
-  status: string;
-  currencyId: string;
-  totalAmount: string;
-  packId: string | null;
-  dateCreated: Date;
-  dateClosed: Date | null;
-  marketplaceLastUpdated: Date | null;
-  items: MappedOrderItemRecord[];
-}
+export type { MappedOrderItemRecord, MappedOrderRecord };
 
-export interface MappedOrderItemRecord {
-  externalItemId: string;
-  variationId: string | null;
-  sellerSku: string | null;
-  title: string;
-  quantity: number;
-  unitPrice: string;
-  currencyId: string;
-}
+// A allowlist real acontece em `mercado-livre-order-response.ts`; este
+// mapper só converte tipos, nunca usa spread do objeto bruto recebido da
+// API. Nunca define `sourceStatus`/`fulfillmentChannel`/
+// `externalMarketplaceId` (campos opcionais só usados pela Amazon) — ficam
+// `undefined`, persistidos como `NULL`.
 
 function toDateOrNull(value: string | null): Date | null {
   if (value === null) return null;

@@ -7,11 +7,11 @@ import {
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
-import { MarketplaceOrder } from '../mercado-livre-orders/marketplace-order.entity';
-import { MarketplaceOrderItem } from '../mercado-livre-orders/marketplace-order-item.entity';
+import { MarketplaceOrder } from '../marketplace-orders/marketplace-order.entity';
+import { MarketplaceOrderItem } from '../marketplace-orders/marketplace-order-item.entity';
 import { MercadoLivreOrdersKpiService } from '../mercado-livre-orders/mercado-livre-orders-kpi.service';
 import { toMercadoLivreKpisResponse } from '../mercado-livre-orders/dto/mercado-livre-kpis-response.dto';
-import { resolveKpiPeriod } from '../mercado-livre-orders/period.util';
+import { resolveKpiPeriod } from '../marketplace-orders/period.util';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
 import { MarketplaceAnalyticsService } from './marketplace-analytics.service';
 import { toMarketplaceAnalyticsResponse } from './dto/marketplace-analytics-response.dto';

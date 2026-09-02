@@ -1,13 +1,13 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../../auth/auth.module';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
+import { MarketplaceOrdersModule } from '../marketplace-orders/marketplace-orders.module';
 import { ML_FETCH } from '../mercado-livre-oauth/mercado-livre-http.client';
 import { MercadoLivreOAuthModule } from '../mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersSyncController } from './mercado-livre-orders-sync.controller';
 import { MercadoLivreOrdersKpisController } from './mercado-livre-orders-kpis.controller';
 import { MercadoLivreOrdersHttpClient } from './mercado-livre-orders-http.client';
 import { MercadoLivreOrdersKpiService } from './mercado-livre-orders-kpi.service';
-import { MercadoLivreOrdersPersistenceService } from './mercado-livre-orders-persistence.service';
 import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.service';
 
 /**
@@ -19,10 +19,17 @@ import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.servi
  * `MercadoLivreOrdersHttpClient` (declarado neste módulo) precisa do seu
  * próprio provider local para o mesmo token. `MercadoLivreOAuthModule` é
  * importado só para expor `MercadoLivreOAuthService.ensureValidAccessToken`,
- * o único jeito permitido de obter o access token aqui.
+ * o único jeito permitido de obter o access token aqui. `MarketplaceOrdersModule`
+ * (Checkpoint 4-B, "Commit 1") provê as entidades e o serviço de persistência
+ * genéricos — reaproveitados, nunca duplicados.
  */
 @Module({
-  imports: [MarketplaceAccountsModule, MercadoLivreOAuthModule, AuthModule],
+  imports: [
+    MarketplaceAccountsModule,
+    MarketplaceOrdersModule,
+    MercadoLivreOAuthModule,
+    AuthModule,
+  ],
   controllers: [
     MercadoLivreOrdersSyncController,
     MercadoLivreOrdersKpisController,
@@ -30,7 +37,6 @@ import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.servi
   providers: [
     { provide: ML_FETCH, useValue: fetch },
     MercadoLivreOrdersHttpClient,
-    MercadoLivreOrdersPersistenceService,
     MercadoLivreOrdersSyncService,
     MercadoLivreOrdersKpiService,
   ],

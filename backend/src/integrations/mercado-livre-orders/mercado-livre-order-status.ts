@@ -23,17 +23,13 @@ export type MercadoLivreOrderStatus =
   (typeof MERCADO_LIVRE_ORDER_STATUSES)[number];
 
 /**
- * Único status que representa uma venda paga para fins de KPI nesta
- * primeira versão (design da Fase 3, §"Definições dos KPIs").
+ * `PAID_ORDER_STATUS`/`CANCELLED_ORDER_STATUS` (usados por toda agregação
+ * de KPI) foram extraídos para `marketplace-orders/order-status.ts`
+ * (Checkpoint 4-B, "Commit 1") — genéricos, sem nenhuma dependência do
+ * Mercado Livre. Por coincidência de nomenclatura, dois dos valores brutos
+ * de `MERCADO_LIVRE_ORDER_STATUSES` acima (`paid`/`cancelled`) já SÃO os
+ * canônicos; os demais nunca entram em nenhum filtro de KPI.
  */
-export const PAID_ORDER_STATUS: MercadoLivreOrderStatus = 'paid';
-
-/**
- * Status usado para a contagem de cancelamentos (Checkpoint 2, "Pedidos
- * cancelados"/"Taxa de cancelamento") — nunca entra em faturamento/unidades.
- */
-export const CANCELLED_ORDER_STATUS: MercadoLivreOrderStatus = 'cancelled';
-
 export function isKnownOrderStatus(
   value: unknown,
 ): value is MercadoLivreOrderStatus {

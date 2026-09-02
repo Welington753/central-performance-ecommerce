@@ -15,10 +15,10 @@ import {
   MercadoLivreOrdersHttpClient,
 } from './mercado-livre-orders-http.client';
 import {
-  MercadoLivreOrdersPersistenceService,
+  MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
-} from './mercado-livre-orders-persistence.service';
-import { computeInitialSyncWindow } from './period.util';
+} from '../marketplace-orders/marketplace-orders-persistence.service';
+import { computeInitialSyncWindow } from '../marketplace-orders/period.util';
 
 export type SyncOrdersErrorCode =
   | 'ACCOUNT_NOT_CONNECTED'
@@ -71,7 +71,7 @@ export class MercadoLivreOrdersSyncService {
     private readonly marketplaceAccountsService: MarketplaceAccountsService,
     private readonly oauthService: MercadoLivreOAuthService,
     private readonly httpClient: MercadoLivreOrdersHttpClient,
-    private readonly persistence: MercadoLivreOrdersPersistenceService,
+    private readonly persistence: MarketplaceOrdersPersistenceService,
   ) {}
 
   async syncOrders(accountId: string): Promise<SyncOrdersSummary> {
@@ -97,6 +97,7 @@ export class MercadoLivreOrdersSyncService {
     try {
       syncRunId = await this.persistence.beginSyncRun({
         marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
         periodFrom,
         periodTo,
         startedAt,

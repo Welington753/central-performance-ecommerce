@@ -16,7 +16,7 @@ describe('deriveAdvisoryLockKey', () => {
   it('matches the documented algorithm: namespace + SHA-256 + first 8 bytes big-endian + signed 64-bit', () => {
     const id = '33333333-3333-3333-3333-333333333333';
     const digest = createHash('sha256')
-      .update(`central-performance:mercado-livre:account:${id}`)
+      .update(`central-performance:marketplace-account:${id}`)
       .digest();
     const unsigned = digest.subarray(0, 8).readBigUInt64BE(0);
     const expected = BigInt.asIntN(64, unsigned);

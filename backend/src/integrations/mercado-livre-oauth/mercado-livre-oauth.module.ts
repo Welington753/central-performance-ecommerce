@@ -1,7 +1,7 @@
 import { Module } from '@nestjs/common';
 import { AuthModule } from '../../auth/auth.module';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
-import { AdvisoryLockService } from './advisory-lock.service';
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { ML_FETCH, MercadoLivreHttpClient } from './mercado-livre-http.client';
 import { MercadoLivreOAuthCleanupService } from './mercado-livre-oauth-cleanup.service';
 import { MercadoLivreOAuthController } from './mercado-livre-oauth.controller';

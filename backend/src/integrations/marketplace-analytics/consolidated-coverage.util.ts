@@ -2,11 +2,11 @@ import {
   isFullyCovered,
   mergeIntervals,
   type SyncedInterval,
-} from '../mercado-livre-orders/sync-coverage.util';
+} from '../marketplace-orders/coverage-interval.util';
 import {
   utcInstantToSaoPauloDateString,
   type PeriodWindow,
-} from '../mercado-livre-orders/period.util';
+} from '../marketplace-orders/period.util';
 
 export type ConsolidatedCoverageStatus = 'complete' | 'partial' | 'unknown';
 

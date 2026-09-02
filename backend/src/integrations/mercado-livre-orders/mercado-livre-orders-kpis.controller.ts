@@ -15,7 +15,10 @@ import {
   type MercadoLivreKpisResponseDto,
 } from './dto/mercado-livre-kpis-response.dto';
 import { MercadoLivreOrdersKpiService } from './mercado-livre-orders-kpi.service';
-import { InvalidKpiPeriodError, resolveKpiPeriod } from './period.util';
+import {
+  InvalidKpiPeriodError,
+  resolveKpiPeriod,
+} from '../marketplace-orders/period.util';
 
 @ApiTags('mercado-livre-orders')
 @ApiCookieAuth()

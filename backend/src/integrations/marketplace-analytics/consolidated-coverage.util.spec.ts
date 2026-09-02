@@ -3,7 +3,7 @@ import {
   computeSourceCoverage,
   intervalsToDto,
 } from './consolidated-coverage.util';
-import type { PeriodWindow } from '../mercado-livre-orders/period.util';
+import type { PeriodWindow } from '../marketplace-orders/period.util';
 
 function window(from: string, to: string): PeriodWindow {
   return { from: new Date(from), to: new Date(to) };

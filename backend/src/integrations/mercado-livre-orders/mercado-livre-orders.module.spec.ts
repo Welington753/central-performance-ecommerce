@@ -10,6 +10,8 @@ import { CommonModule } from '../../common/common.module';
 import { User } from '../../users/user.entity';
 import { MarketplaceAccount } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
+import { MarketplaceOrder } from '../marketplace-orders/marketplace-order.entity';
+import { MarketplaceOrderItem } from '../marketplace-orders/marketplace-order-item.entity';
 import { ML_FETCH } from '../mercado-livre-oauth/mercado-livre-http.client';
 import { MercadoLivreOAuthModule } from '../mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersSyncController } from './mercado-livre-orders-sync.controller';
@@ -60,6 +62,10 @@ describe('MercadoLivreOrdersModule', () => {
       ],
     })
       .overrideProvider(getRepositoryToken(MarketplaceAccount))
+      .useValue({})
+      .overrideProvider(getRepositoryToken(MarketplaceOrder))
+      .useValue({})
+      .overrideProvider(getRepositoryToken(MarketplaceOrderItem))
       .useValue({})
       .overrideProvider(getRepositoryToken(UserSession))
       .useValue({})

@@ -7,9 +7,9 @@ import {
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
-import { MarketplaceOrder } from './marketplace-order.entity';
-import { MarketplaceOrderItem } from './marketplace-order-item.entity';
-import { resolveKpiPeriod } from './period.util';
+import { MarketplaceOrder } from '../marketplace-orders/marketplace-order.entity';
+import { MarketplaceOrderItem } from '../marketplace-orders/marketplace-order-item.entity';
+import { resolveKpiPeriod } from '../marketplace-orders/period.util';
 import { MercadoLivreOrdersKpiService } from './mercado-livre-orders-kpi.service';
 
 const REFERENCE_NOW = new Date('2026-09-01T12:00:00.000Z');

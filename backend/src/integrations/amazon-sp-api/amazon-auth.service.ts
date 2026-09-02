@@ -7,15 +7,10 @@ import {
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
-// `AdvisoryLockService` é um utilitário GENÉRICO de lock por accountId
-// (nenhum tipo/campo específico de marketplace na sua API) — vive hoje em
-// `mercado-livre-oauth/` só porque foi introduzido ali primeiro, não porque
-// seja um serviço de negócio do Mercado Livre. Reaproveitado diretamente
-// aqui em vez de duplicado, conforme a auditoria da Etapa 1; a proibição de
-// "não importar serviços internos do Mercado Livre" (Etapa 3) é sobre os
-// clients/serviços de NEGÓCIO específicos daquele marketplace — nunca
-// importados por este módulo, ver `amazon-architecture.spec.ts`.
-import { AdvisoryLockService } from '../mercado-livre-oauth/advisory-lock.service';
+// `AdvisoryLockService` (utilitário genérico de lock por accountId) mora em
+// `integrations/shared/` desde o Checkpoint 4-B ("Commit 1" — extraído de
+// `mercado-livre-oauth/`, que não é mais importado por este módulo).
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { loadAmazonConfig } from './amazon-config';
 import { AmazonLwaClient } from './amazon-lwa.client';
 

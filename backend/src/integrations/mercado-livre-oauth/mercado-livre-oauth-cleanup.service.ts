@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { AdvisoryLockService } from './advisory-lock.service';
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { OAuthAuthorizationRequestsService } from './oauth-authorization-requests.service';
 
 @Injectable()
