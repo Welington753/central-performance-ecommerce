@@ -364,11 +364,18 @@ function DashboardContent() {
 
   const dropdownAccounts = scopeData?.breakdownByAccount ?? [];
   const breakdownByMarketplace = displayData?.breakdownByMarketplace ?? [];
+  // "Integração ativa": a conexão em si está boa (com ou sem dado ainda) —
+  // HISTORICAL_ONLY fica de fora porque representa justamente uma conexão
+  // com problema (precisa de atenção), mesmo tendo dado histórico.
   const activeMarketplaces = breakdownByMarketplace.filter(
-    (m) => m.availability !== "NOT_CONNECTED",
+    (m) => m.availability === "AVAILABLE" || m.availability === "CONNECTED_NO_DATA",
   ).length;
+  // "Dados disponíveis": existe `summary` real para mostrar, independente
+  // do estado da conexão — inclui HISTORICAL_ONLY (histórico legível apesar
+  // da conexão precisar de atenção), nunca CONNECTED_NO_DATA (nunca haveria
+  // uma sincronização provando os números).
   const marketplacesWithData = breakdownByMarketplace.filter(
-    (m) => m.availability === "AVAILABLE",
+    (m) => m.summary !== null,
   ).length;
 
   const scopedAccounts = displayData?.breakdownByAccount ?? [];

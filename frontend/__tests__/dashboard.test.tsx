@@ -200,6 +200,84 @@ describe("DashboardPage", () => {
     expect(screen.getByText(/1 de 3 com dados disponíveis/i)).toBeInTheDocument();
   });
 
+  it("counts HISTORICAL_ONLY as data-available but NOT active-integration (connection needs attention)", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        breakdownByMarketplace: fullBreakdown([
+          {
+            availability: "HISTORICAL_ONLY",
+            summary: { grossRevenue: "1234.56", paidOrders: 10, units: 25 },
+          },
+        ]),
+      }),
+    );
+    render(<DashboardPage />);
+    expect(
+      await screen.findByText(/0 de 3 marketplaces com integração ativa/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 de 3 com dados disponíveis/i)).toBeInTheDocument();
+  });
+
+  it("counts CONNECTED_NO_DATA as active-integration but NOT data-available (never synced, nothing proven)", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        availability: "CONNECTED_NO_DATA",
+        summary: null,
+        comparison: null,
+        bestDay: null,
+        dailySeries: [],
+        topProductsBySku: [],
+        topListings: [],
+        dataCoverage: {
+          status: "unknown",
+          synchronizedIntervals: [],
+          selectedPeriodComplete: false,
+          comparisonPeriodComplete: false,
+        },
+        breakdownByMarketplace: fullBreakdown([
+          { availability: "CONNECTED_NO_DATA", summary: null },
+        ]),
+      }),
+    );
+    render(<DashboardPage />);
+    expect(
+      await screen.findByText(/1 de 3 marketplaces com integração ativa/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/0 de 3 com dados disponíveis/i)).toBeInTheDocument();
+  });
+
+  it("counts AVAILABLE as both active-integration and data-available", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({ breakdownByMarketplace: fullBreakdown([{ availability: "AVAILABLE" }]) }),
+    );
+    render(<DashboardPage />);
+    expect(
+      await screen.findByText(/1 de 3 marketplaces com integração ativa/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/1 de 3 com dados disponíveis/i)).toBeInTheDocument();
+  });
+
+  it("Amazon/Shopee remain NOT_CONNECTED with no numbers regardless of the Mercado Livre counter scenario", async () => {
+    (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+      analyticsDto({
+        breakdownByMarketplace: fullBreakdown([
+          {
+            availability: "HISTORICAL_ONLY",
+            summary: { grossRevenue: "1234.56", paidOrders: 10, units: 25 },
+          },
+        ]),
+      }),
+    );
+    render(<DashboardPage />);
+    await screen.findByText(/0 de 3 marketplaces com integração ativa/i);
+    const amazon = screen.getByTestId("marketplace-panel-AMAZON");
+    const shopee = screen.getByTestId("marketplace-panel-SHOPEE");
+    expect(within(amazon).getByText(/não conectado/i)).toBeInTheDocument();
+    expect(amazon.textContent).not.toMatch(/R\$/);
+    expect(within(shopee).getByText(/não conectado/i)).toBeInTheDocument();
+    expect(shopee.textContent).not.toMatch(/R\$/);
+  });
+
   it("shows Mercado Livre with real data and Amazon/Shopee as not connected, with no fabricated numbers", async () => {
     (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     render(<DashboardPage />);
