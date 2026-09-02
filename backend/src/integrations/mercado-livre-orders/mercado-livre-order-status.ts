@@ -28,6 +28,12 @@ export type MercadoLivreOrderStatus =
  */
 export const PAID_ORDER_STATUS: MercadoLivreOrderStatus = 'paid';
 
+/**
+ * Status usado para a contagem de cancelamentos (Checkpoint 2, "Pedidos
+ * cancelados"/"Taxa de cancelamento") — nunca entra em faturamento/unidades.
+ */
+export const CANCELLED_ORDER_STATUS: MercadoLivreOrderStatus = 'cancelled';
+
 export function isKnownOrderStatus(
   value: unknown,
 ): value is MercadoLivreOrderStatus {
