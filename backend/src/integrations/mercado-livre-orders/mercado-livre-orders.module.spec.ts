@@ -13,6 +13,7 @@ import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-a
 import { ML_FETCH } from '../mercado-livre-oauth/mercado-livre-http.client';
 import { MercadoLivreOAuthModule } from '../mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersSyncController } from './mercado-livre-orders-sync.controller';
+import { MercadoLivreOrdersKpisController } from './mercado-livre-orders-kpis.controller';
 import { MercadoLivreOrdersModule } from './mercado-livre-orders.module';
 
 // Mesmo padrão de `mercado-livre-oauth.module.spec.ts` (Fase 2): sem um
@@ -31,7 +32,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders.module';
 class FakeDataSourceModule {}
 
 describe('MercadoLivreOrdersModule', () => {
-  it('compiles the full dependency graph and registers the sync controller', async () => {
+  it('compiles the full dependency graph and registers the sync and kpis controllers', async () => {
     const moduleRef = await Test.createTestingModule({
       imports: [
         ConfigModule.forRoot({
@@ -76,6 +77,9 @@ describe('MercadoLivreOrdersModule', () => {
 
     expect(moduleRef.get(MercadoLivreOrdersSyncController)).toBeInstanceOf(
       MercadoLivreOrdersSyncController,
+    );
+    expect(moduleRef.get(MercadoLivreOrdersKpisController)).toBeInstanceOf(
+      MercadoLivreOrdersKpisController,
     );
   });
 });
