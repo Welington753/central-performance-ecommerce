@@ -3,12 +3,27 @@
 // compilados pelo SWC deste projeto).
 jest.mock("../src/lib/api");
 
+const replaceMock = jest.fn();
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: replaceMock, push: jest.fn() }),
+  usePathname: () => "/dashboard",
+  useSearchParams: jest.fn(),
+}));
+
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/(protegido)/dashboard/page";
 import * as api from "@/lib/api";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
+
+const { useSearchParams } = jest.requireMock("next/navigation") as {
+  useSearchParams: jest.Mock;
+};
+
+function mockSearchParams(params: Record<string, string> = {}) {
+  useSearchParams.mockReturnValue(new URLSearchParams(params));
+}
 
 function mlAccount(
   overrides: Partial<MarketplaceAccountDto> = {},
@@ -30,27 +45,68 @@ function mlAccount(
 function kpis(overrides: Partial<MercadoLivreKpisDto> = {}): MercadoLivreKpisDto {
   return {
     account: { id: "acc-1", externalSellerId: "1548451374", nickname: "EZIEHOME" },
-    period: {
-      days: 30,
-      timeZone: "America/Sao_Paulo",
-      from: "2026-08-02T12:00:00.000Z",
-      to: "2026-09-01T12:00:00.000Z",
-    },
+    period: { days: 30, timeZone: "America/Sao_Paulo", from: "2026-08-03", to: "2026-09-01" },
+    comparisonPeriod: { days: 30, from: "2026-07-04", to: "2026-08-02" },
     summary: {
       grossRevenue: "1234.56",
       orders: 10,
       units: 25,
       averageTicket: "123.46",
+      cancelledOrders: 2,
+      cancellationRate: 16.7,
+      distinctProducts: 4,
+      unitsPerOrder: 2.5,
+      avgUnitPrice: "49.38",
     },
     comparison: {
       grossRevenuePct: 12.3,
       ordersPct: -8,
       unitsPct: 0,
       averageTicketPct: null,
+      cancelledOrdersPct: null,
+      cancellationRateDiffPp: 3.2,
+      distinctProductsPct: null,
+      unitsPerOrderPct: null,
     },
+    bestDay: {
+      date: "2026-08-20",
+      grossRevenue: "500.00",
+      paidOrders: 3,
+      units: 6,
+    },
+    dailySeries: [
+      { date: "2026-08-03", grossRevenue: "0.00", paidOrders: 0, units: 0, cancelledOrders: 0 },
+      { date: "2026-08-04", grossRevenue: "100.00", paidOrders: 1, units: 2, cancelledOrders: 0 },
+    ],
     topProducts: [
       { sku: "SKU-A", title: "Produto A", units: 5, grossRevenue: "300.00" },
     ],
+    topProductsBySku: [
+      {
+        sku: "SKU-A",
+        title: "Produto A",
+        distinctListings: 2,
+        units: 5,
+        grossRevenue: "300.00",
+        unitsSharePct: 20,
+      },
+    ],
+    topListings: [
+      {
+        listingId: "MLB1",
+        sku: "SKU-A",
+        title: "Produto A",
+        units: 3,
+        grossRevenue: "180.00",
+      },
+    ],
+    dataCoverage: {
+      status: "complete",
+      synchronizedFrom: "2026-07-04",
+      synchronizedTo: "2026-09-01",
+      selectedPeriodComplete: true,
+      comparisonPeriodComplete: true,
+    },
     lastSync: "2026-09-01T15:00:00.000Z",
     ...overrides,
   };
@@ -58,6 +114,8 @@ function kpis(overrides: Partial<MercadoLivreKpisDto> = {}): MercadoLivreKpisDto
 
 beforeEach(() => {
   jest.resetAllMocks();
+  replaceMock.mockClear();
+  mockSearchParams();
 });
 
 describe("DashboardPage", () => {
@@ -99,7 +157,7 @@ describe("DashboardPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("automatically selects the CONNECTED account and fetches its KPIs", async () => {
+  it("automatically selects the CONNECTED account and fetches its KPIs with a default 30-day period", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "acc-1", status: "CONNECTED" }),
     ]);
@@ -108,11 +166,58 @@ describe("DashboardPage", () => {
     render(<DashboardPage />);
 
     await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith("acc-1"),
+      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith(
+        "acc-1",
+        expect.objectContaining({
+          from: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+          to: expect.stringMatching(/^\d{4}-\d{2}-\d{2}$/),
+        }),
+      ),
     );
   });
 
-  it("renders the four KPI cards with real values from the API response", async () => {
+  it("uses from/to already present in the URL instead of the default period", async () => {
+    mockSearchParams({ from: "2026-08-01", to: "2026-08-31" });
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
+    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
+
+    render(<DashboardPage />);
+
+    await waitFor(() =>
+      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith("acc-1", {
+        from: "2026-08-01",
+        to: "2026-08-31",
+      }),
+    );
+  });
+
+  it("shows an invalid-period message and never calls the KPI API when the URL has an invalid range", async () => {
+    mockSearchParams({ from: "2026-08-31", to: "2026-08-01" });
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
+
+    render(<DashboardPage />);
+
+    expect(
+      await screen.findByText(/período inválido na url/i),
+    ).toBeInTheDocument();
+    expect(api.fetchMercadoLivreKpis).not.toHaveBeenCalled();
+  });
+
+  it('offers a way back to the default 30-day period from an invalid URL', async () => {
+    mockSearchParams({ from: "2026-08-31", to: "2026-08-01" });
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
+
+    const user = userEvent.setup();
+    render(<DashboardPage />);
+
+    const resetButton = await screen.findByRole("button", {
+      name: /voltar aos últimos 30 dias/i,
+    });
+    await user.click(resetButton);
+    expect(replaceMock).toHaveBeenCalled();
+  });
+
+  it("renders the four main KPI cards with real values from the API response", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount(),
     ]);
@@ -127,10 +232,40 @@ describe("DashboardPage", () => {
     ).toBeInTheDocument();
   });
 
-  it("renders the top products ranking from the API response", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount(),
-    ]);
+  it("renders the additional KPI cards (cancelled orders, cancellation rate, distinct products, units per order, avg unit price, best day)", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
+    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
+
+    render(<DashboardPage />);
+
+    expect(await screen.findByTestId("kpi-card-cancelled-orders")).toHaveTextContent("2");
+    expect(screen.getByTestId("kpi-card-cancellation-rate")).toHaveTextContent("16,7%");
+    expect(screen.getByTestId("kpi-card-distinct-products")).toHaveTextContent("4");
+    expect(screen.getByTestId("kpi-card-units-per-order")).toHaveTextContent("2,5");
+    expect(screen.getByTestId("kpi-card-best-day")).toHaveTextContent("20/08/2026");
+  });
+
+  it("shows the data coverage banner", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
+    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(
+      kpis({
+        dataCoverage: {
+          status: "partial",
+          synchronizedFrom: "2026-08-20",
+          synchronizedTo: "2026-09-01",
+          selectedPeriodComplete: false,
+          comparisonPeriodComplete: false,
+        },
+      }),
+    );
+
+    render(<DashboardPage />);
+
+    expect(await screen.findByText(/cobertura parcial/i)).toBeInTheDocument();
+  });
+
+  it("renders the SKU ranking (consolidated) by default", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
     (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
 
     render(<DashboardPage />);
@@ -139,18 +274,18 @@ describe("DashboardPage", () => {
     expect(screen.getByText("SKU-A")).toBeInTheDocument();
   });
 
-  it("shows the empty ranking state when there are no top products", async () => {
+  it("shows the empty ranking state when there are no ranked products", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount(),
     ]);
     (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(
-      kpis({ topProducts: [] }),
+      kpis({ topProductsBySku: [], topListings: [] }),
     );
 
     render(<DashboardPage />);
 
     expect(
-      await screen.findByText("Nenhum produto vendido no período."),
+      await screen.findByText(/nenhum produto vendido no período/i),
     ).toBeInTheDocument();
   });
 
@@ -205,7 +340,21 @@ describe("DashboardPage", () => {
       mlAccount({ id: "acc-1" }),
     ]);
     (api.fetchMercadoLivreKpis as jest.Mock)
-      .mockResolvedValueOnce(kpis({ summary: { grossRevenue: "0.00", orders: 0, units: 0, averageTicket: "0.00" } }))
+      .mockResolvedValueOnce(
+        kpis({
+          summary: {
+            grossRevenue: "0.00",
+            orders: 0,
+            units: 0,
+            averageTicket: "0.00",
+            cancelledOrders: 0,
+            cancellationRate: 0,
+            distinctProducts: 0,
+            unitsPerOrder: 0,
+            avgUnitPrice: "0.00",
+          },
+        }),
+      )
       .mockResolvedValueOnce(kpis());
     (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({
       status: "SUCCESS",
@@ -292,13 +441,19 @@ describe("DashboardPage", () => {
       name: /conta do mercado livre/i,
     });
     await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith("acc-1"),
+      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith(
+        "acc-1",
+        expect.anything(),
+      ),
     );
 
     await user.selectOptions(select, "acc-2");
 
     await waitFor(() =>
-      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith("acc-2"),
+      expect(api.fetchMercadoLivreKpis).toHaveBeenCalledWith(
+        "acc-2",
+        expect.anything(),
+      ),
     );
   });
 
@@ -311,5 +466,21 @@ describe("DashboardPage", () => {
 
     expect(screen.queryByText(/R\$\s?\d/)).not.toBeInTheDocument();
     expect(screen.queryByText(/\d+([.,]\d+)?\s?%/)).not.toBeInTheDocument();
+  });
+
+  it("updates the URL (without a full reload) when a period shortcut is applied", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([mlAccount()]);
+    (api.fetchMercadoLivreKpis as jest.Mock).mockResolvedValue(kpis());
+
+    const user = userEvent.setup();
+    render(<DashboardPage />);
+
+    const todayButton = await screen.findByRole("button", { name: "Hoje" });
+    await user.click(todayButton);
+
+    expect(replaceMock).toHaveBeenCalledWith(
+      expect.stringMatching(/^\/dashboard\?from=\d{4}-\d{2}-\d{2}&to=\d{4}-\d{2}-\d{2}$/),
+      { scroll: false },
+    );
   });
 });

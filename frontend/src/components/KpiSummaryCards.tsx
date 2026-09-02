@@ -1,9 +1,18 @@
 import { formatBRL, formatPercent } from "@/lib/kpi-format";
-import type { MercadoLivreKpisDto } from "@/types/mercado-livre-kpis";
 
 interface KpiSummaryCardsProps {
-  summary: MercadoLivreKpisDto["summary"];
-  comparison: MercadoLivreKpisDto["comparison"];
+  summary: {
+    grossRevenue: string;
+    orders: number;
+    units: number;
+    averageTicket: string;
+  };
+  comparison: {
+    grossRevenuePct: number | null;
+    ordersPct: number | null;
+    unitsPct: number | null;
+    averageTicketPct: number | null;
+  };
 }
 
 interface CardSpec {

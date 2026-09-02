@@ -92,12 +92,21 @@ export async function connectMercadoLivre(
   return (await response.json()) as { authorizationUrl: string };
 }
 
+export class InvalidKpiPeriodApiError extends ApiFetchError {}
+
 export async function fetchMercadoLivreKpis(
   accountId: string,
+  period?: { from: string; to: string },
 ): Promise<MercadoLivreKpisDto> {
+  const query = period
+    ? `?from=${encodeURIComponent(period.from)}&to=${encodeURIComponent(period.to)}`
+    : "";
   const response = await apiFetch(
-    `/marketplace-accounts/${accountId}/mercado-livre/kpis`,
+    `/marketplace-accounts/${accountId}/mercado-livre/kpis${query}`,
   );
+  if (response.status === 400) {
+    throw new InvalidKpiPeriodApiError("Período inválido.");
+  }
   if (!response.ok) {
     throw new ApiFetchError("Não foi possível carregar os KPIs agora.");
   }

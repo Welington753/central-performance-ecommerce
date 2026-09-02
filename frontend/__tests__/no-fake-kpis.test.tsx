@@ -3,6 +3,12 @@
 // "Cannot redefine property" nos exports ESM compilados pelo SWC).
 jest.mock("../src/lib/api");
 
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: jest.fn(), push: jest.fn() }),
+  usePathname: () => "/dashboard",
+  useSearchParams: () => new URLSearchParams(),
+}));
+
 import { render, screen, waitFor } from "@testing-library/react";
 import DashboardPage from "@/app/(protegido)/dashboard/page";
 import SincronizacoesPage from "@/app/(protegido)/sincronizacoes/page";
