@@ -47,6 +47,7 @@ function fullAggregate() {
       status: 'unknown' as const,
       synchronizedFrom: null,
       synchronizedTo: null,
+      synchronizedIntervals: [],
       selectedPeriodComplete: false,
       comparisonPeriodComplete: false,
     },

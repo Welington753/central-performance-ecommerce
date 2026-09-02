@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConnectorsModule } from './connectors/connectors.module';
 import { MarketplaceAccountsModule } from './marketplace-accounts/marketplace-accounts.module';
+import { MarketplaceAnalyticsModule } from './marketplace-analytics/marketplace-analytics.module';
 import { MercadoLivreOAuthModule } from './mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-orders.module';
 
@@ -16,12 +17,14 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     MarketplaceAccountsModule,
     MercadoLivreOAuthModule,
     MercadoLivreOrdersModule,
+    MarketplaceAnalyticsModule,
   ],
   exports: [
     ConnectorsModule,
     MarketplaceAccountsModule,
     MercadoLivreOAuthModule,
     MercadoLivreOrdersModule,
+    MarketplaceAnalyticsModule,
   ],
 })
 export class IntegrationsModule {}

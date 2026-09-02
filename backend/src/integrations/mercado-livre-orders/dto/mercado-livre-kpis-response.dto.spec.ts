@@ -39,6 +39,7 @@ function aggregate(
       status: 'unknown',
       synchronizedFrom: null,
       synchronizedTo: null,
+      synchronizedIntervals: [],
       selectedPeriodComplete: false,
       comparisonPeriodComplete: false,
     },
@@ -397,6 +398,7 @@ describe('toMercadoLivreKpisResponse', () => {
       status: 'partial' as const,
       synchronizedFrom: '2026-07-04',
       synchronizedTo: '2026-09-02',
+      synchronizedIntervals: [{ from: '2026-07-04', to: '2026-08-01' }],
       selectedPeriodComplete: true,
       comparisonPeriodComplete: false,
     };
