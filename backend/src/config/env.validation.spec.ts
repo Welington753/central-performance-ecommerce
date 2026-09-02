@@ -228,4 +228,34 @@ describe('envValidationSchema', () => {
 
     expect(error).toBeUndefined();
   });
+
+  it('accepts a fully valid environment with NO Amazon variable set — the backend must boot without them (Fase 4, Etapa 2)', () => {
+    const { error } = envValidationSchema.validate(VALID_ENV, {
+      abortEarly: false,
+    });
+    expect(error).toBeUndefined();
+  });
+
+  it('accepts a fully valid environment WITH all five Amazon variables set', () => {
+    const { error } = envValidationSchema.validate(
+      {
+        ...VALID_ENV,
+        AMAZON_SP_API_APP_ID: 'amzn1.sp.solution.example',
+        AMAZON_LWA_CLIENT_ID: 'amzn1.application-oa2-client.example',
+        AMAZON_LWA_CLIENT_SECRET: 'lwa-secret-example',
+        AMAZON_SP_API_ENDPOINT: 'https://sellingpartnerapi-na.amazon.com',
+        AMAZON_SP_API_USER_AGENT: 'CentralPerformance/1.0',
+      },
+      { abortEarly: false },
+    );
+    expect(error).toBeUndefined();
+  });
+
+  it('rejects AMAZON_SP_API_ENDPOINT when it is not a well-formed URI', () => {
+    const { error } = envValidationSchema.validate(
+      { ...VALID_ENV, AMAZON_SP_API_ENDPOINT: 'not-a-uri' },
+      { abortEarly: false },
+    );
+    expect(error?.message).toMatch(/AMAZON_SP_API_ENDPOINT/);
+  });
 });

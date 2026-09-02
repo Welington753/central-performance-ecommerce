@@ -154,6 +154,55 @@ export class MarketplaceAccountsService {
     }
   }
 
+  /**
+   * CAS genérico para o provisionamento interno de credenciais obtidas fora
+   * do fluxo OAuth-callback (ex.: refresh token colado manualmente após a
+   * autoautorização de uma aplicação privada — Fase 4, Amazon SP-API).
+   * Diferente de `applySuccessfulConnection`, aceita `encryptedAccessToken`
+   * ausente: o provisionamento normalmente só recebe um refresh token, nunca
+   * um access token (que só existe após a primeira troca real com o
+   * provedor) — por isso ele e `token_expires_at` são sempre zerados aqui,
+   * forçando a próxima leitura a renovar via o fluxo normal de token.
+   */
+  async provisionCredentials(input: {
+    id: string;
+    expectedTokenVersion: number;
+    externalSellerId: string;
+    encryptedRefreshToken: string;
+    connectedByUserId: string | null;
+  }): Promise<ApplySuccessfulConnectionOutcome> {
+    try {
+      const rows = await this.queryReturning<{ id: string }>(
+        `UPDATE marketplace_accounts
+            SET external_seller_id = $1,
+                encrypted_refresh_token = $2,
+                encrypted_access_token = NULL,
+                token_expires_at = NULL,
+                status = 'CONNECTED',
+                error_summary = NULL,
+                failure_code = NULL,
+                connected_by_user_id = $3,
+                token_version = token_version + 1,
+                updated_at = now()
+          WHERE id = $4 AND token_version = $5
+          RETURNING id`,
+        [
+          input.externalSellerId,
+          input.encryptedRefreshToken,
+          input.connectedByUserId,
+          input.id,
+          input.expectedTokenVersion,
+        ],
+      );
+      return rows.length > 0 ? 'applied' : 'version_conflict';
+    } catch (error) {
+      if (this.isUniqueSellerIdViolation(error)) {
+        return 'external_seller_conflict';
+      }
+      throw error;
+    }
+  }
+
   async markError(input: {
     id: string;
     expectedTokenVersion: number;

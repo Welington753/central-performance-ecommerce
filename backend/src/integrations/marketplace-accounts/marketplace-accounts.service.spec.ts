@@ -213,9 +213,10 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
     const id = randomUUID();
     await dataSource.query(
       `INSERT INTO marketplace_accounts (id, marketplace, status, token_version, external_seller_id)
-       VALUES ($1, 'MERCADO_LIVRE', $2, $3, $4)`,
+       VALUES ($1, $2, $3, $4, $5)`,
       [
         id,
+        overrides.marketplace ?? 'MERCADO_LIVRE',
         overrides.status ?? 'DISCONNECTED',
         overrides.tokenVersion ?? 0,
         overrides.externalSellerId ?? null,
@@ -398,6 +399,90 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
       );
     expect(afterRollback[0].status).toBe('DISCONNECTED');
     expect(afterRollback[0].token_version).toBe(0);
+  });
+
+  it('provisionCredentials applies when tokenVersion matches: sets CONNECTED, stores the refresh token, and clears access token/expiry (Fase 4, Amazon)', async () => {
+    const id = await seedAccount({ marketplace: 'AMAZON' });
+
+    const outcome = await service.provisionCredentials({
+      id,
+      expectedTokenVersion: 0,
+      externalSellerId: 'A1SELLERPARTNERID',
+      encryptedRefreshToken: 'iv:tag:amazon-refresh',
+      connectedByUserId: userId,
+    });
+
+    expect(outcome).toBe('applied');
+
+    const rows: Array<{
+      status: string;
+      token_version: number;
+      external_seller_id: string | null;
+      encrypted_refresh_token: string | null;
+      encrypted_access_token: string | null;
+      token_expires_at: Date | null;
+    }> = await dataSource.query(
+      `SELECT status, token_version, external_seller_id, encrypted_refresh_token, encrypted_access_token, token_expires_at
+         FROM marketplace_accounts WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0].status).toBe('CONNECTED');
+    expect(rows[0].token_version).toBe(1);
+    expect(rows[0].external_seller_id).toBe('A1SELLERPARTNERID');
+    expect(rows[0].encrypted_refresh_token).toBe('iv:tag:amazon-refresh');
+    // Nunca escreve um access token no provisionamento: só existe após a
+    // primeira renovação real via AmazonAuthService.ensureValidAccessToken.
+    expect(rows[0].encrypted_access_token).toBeNull();
+    expect(rows[0].token_expires_at).toBeNull();
+  });
+
+  it('provisionCredentials returns version_conflict and writes nothing when tokenVersion is stale', async () => {
+    const id = await seedAccount({ marketplace: 'AMAZON', tokenVersion: 3 });
+
+    const outcome = await service.provisionCredentials({
+      id,
+      expectedTokenVersion: 0,
+      externalSellerId: 'A1SELLERPARTNERID',
+      encryptedRefreshToken: 'iv:tag:amazon-refresh',
+      connectedByUserId: userId,
+    });
+
+    expect(outcome).toBe('version_conflict');
+    const rows: Array<{ status: string; token_version: number }> =
+      await dataSource.query(
+        'SELECT status, token_version FROM marketplace_accounts WHERE id = $1',
+        [id],
+      );
+    expect(rows[0].status).toBe('DISCONNECTED');
+    expect(rows[0].token_version).toBe(3);
+  });
+
+  it('provisionCredentials returns external_seller_conflict and preserves the winning account when externalSellerId is already taken', async () => {
+    await seedAccount({
+      marketplace: 'AMAZON',
+      status: 'CONNECTED',
+      externalSellerId: 'taken-seller-partner-id',
+    });
+    const losingId = await seedAccount({ marketplace: 'AMAZON' });
+
+    const outcome = await service.provisionCredentials({
+      id: losingId,
+      expectedTokenVersion: 0,
+      externalSellerId: 'taken-seller-partner-id',
+      encryptedRefreshToken: 'iv:tag:amazon-refresh',
+      connectedByUserId: userId,
+    });
+
+    expect(outcome).toBe('external_seller_conflict');
+    const losingRow: Array<{
+      status: string;
+      external_seller_id: string | null;
+    }> = await dataSource.query(
+      'SELECT status, external_seller_id FROM marketplace_accounts WHERE id = $1',
+      [losingId],
+    );
+    expect(losingRow[0].status).toBe('DISCONNECTED');
+    expect(losingRow[0].external_seller_id).toBeNull();
   });
 
   it('markError applies only when tokenVersion matches, and is a no-op otherwise', async () => {

@@ -107,6 +107,18 @@ export const envValidationSchema = Joi.object({
     }, 'ML_OAUTH_PROCESSING_STALE_AFTER_MS safety margin'),
   ML_TOKEN_REFRESH_LEEWAY_MS: Joi.number().integer().min(1).default(900000),
 
+  // --- Amazon SP-API (Fase 4, fundação de autenticação) ------------------
+  // Nenhuma tem `.required()` nem valor padrão: a ausência de qualquer uma
+  // delas NUNCA pode impedir o backend de subir. Só uma operação Amazon
+  // específica (AmazonAuthService.ensureValidAccessToken) falha, em
+  // runtime, com o erro fechado AMAZON_NOT_CONFIGURED (ver amazon-config.ts
+  // em integrations/amazon-sp-api/).
+  AMAZON_SP_API_APP_ID: Joi.string().optional(),
+  AMAZON_LWA_CLIENT_ID: Joi.string().optional(),
+  AMAZON_LWA_CLIENT_SECRET: Joi.string().optional(),
+  AMAZON_SP_API_ENDPOINT: Joi.string().uri().optional(),
+  AMAZON_SP_API_USER_AGENT: Joi.string().optional(),
+
   // Origem única do frontend, usada para CORS com credentials: true.
   FRONTEND_URL: Joi.string().uri().required(),
 
