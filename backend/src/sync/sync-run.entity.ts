@@ -24,10 +24,10 @@ export enum SyncRunStatus {
 }
 
 /**
- * Registro de uma execução de sincronização (ainda não implementada nesta
- * fase — nenhuma sincronização real acontece). Esta entidade existe como
- * contrato de dados para que futuras fases tenham onde registrar o
- * histórico e o resultado de cada execução, por marketplace e por conta.
+ * Registro de uma execução de sincronização, por marketplace e por conta.
+ * Desde a Fase 3, populada por sincronizações reais de pedidos do Mercado
+ * Livre (ver `mercado-livre-orders-sync.service.ts`); o contrato de dados
+ * segue genérico para acomodar futuras fases e marketplaces.
  */
 @Entity({ name: 'sync_runs' })
 export class SyncRun {
@@ -76,6 +76,18 @@ export class SyncRun {
 
   @Column({ type: 'varchar', nullable: true })
   errorCode!: string | null;
+
+  /**
+   * Fase 3 (Mercado Livre — sincronização de pedidos): quantas páginas de
+   * `orders/search` foram consultadas e quantos itens de pedido foram
+   * persistidos nesta execução. `0` por padrão para todo tipo de sync run
+   * que não os usa (ex.: `ADS`, futuras fases).
+   */
+  @Column({ type: 'int', default: 0 })
+  pagesFetched!: number;
+
+  @Column({ type: 'int', default: 0 })
+  itemsPersisted!: number;
 
   /**
    * Resumo de erro amigável, apenas para diagnóstico interno.
