@@ -9,6 +9,10 @@
  */
 
 import type { MarketplaceAccountDto } from "@/types/marketplace";
+import type {
+  MercadoLivreKpisDto,
+  MercadoLivreSyncSummary,
+} from "@/types/mercado-livre-kpis";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -86,6 +90,31 @@ export async function connectMercadoLivre(
     );
   }
   return (await response.json()) as { authorizationUrl: string };
+}
+
+export async function fetchMercadoLivreKpis(
+  accountId: string,
+): Promise<MercadoLivreKpisDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/mercado-livre/kpis`,
+  );
+  if (!response.ok) {
+    throw new ApiFetchError("Não foi possível carregar os KPIs agora.");
+  }
+  return (await response.json()) as MercadoLivreKpisDto;
+}
+
+export async function syncMercadoLivreOrders(
+  accountId: string,
+): Promise<MercadoLivreSyncSummary> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/mercado-livre/sync-orders`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError("Não foi possível sincronizar agora. Tente novamente.");
+  }
+  return (await response.json()) as MercadoLivreSyncSummary;
 }
 
 /**
