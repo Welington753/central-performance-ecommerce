@@ -39,6 +39,19 @@ import {
 
 const TOP_RANKING_LIMIT = 50;
 
+/**
+ * Checkpoint 4-B: nunca soma `total_amount` de pedidos pagos com moedas
+ * diferentes no mesmo agregado — o escopo (Mercado Livre sempre BRL até
+ * aqui; Amazon configurada via `AMAZON_MARKETPLACE_IDS`) deve ser
+ * internamente consistente. A mensagem É o código fechado.
+ */
+export class MarketplaceAnalyticsCurrencyMismatchError extends Error {
+  readonly code = 'CURRENCY_MISMATCH';
+  constructor() {
+    super('CURRENCY_MISMATCH');
+  }
+}
+
 export interface AnalyticsPeriodTotals {
   grossRevenueCents: bigint;
   orders: number;
@@ -416,6 +429,8 @@ export class MarketplaceAnalyticsService {
   ): Promise<AnalyticsPeriodTotals> {
     if (accountIds.length === 0) return zeroPeriodTotals();
 
+    await this.assertSingleCurrencyOrThrow(accountIds, window);
+
     const [orderRow] = await this.dataSource.query<
       Array<{ gross_revenue: string; orders: string; cancelled_orders: string }>
     >(
@@ -473,6 +488,33 @@ export class MarketplaceAnalyticsService {
       ),
       distinctProducts: Number(itemRow.distinct_products),
     };
+  }
+
+  /**
+   * Checkpoint 4-B: lança `MarketplaceAnalyticsCurrencyMismatchError` quando
+   * o escopo (contas + janela) inclui pedidos pagos em MAIS de uma moeda —
+   * nunca soma valores de moedas diferentes como se fossem a mesma. Sem
+   * pedidos pagos no escopo, ou com uma única moeda, é um no-op.
+   */
+  private async assertSingleCurrencyOrThrow(
+    accountIds: string[],
+    window: PeriodWindow,
+  ): Promise<void> {
+    if (accountIds.length === 0) return;
+
+    const rows = await this.dataSource.query<Array<{ currency_id: string }>>(
+      `SELECT DISTINCT currency_id
+        FROM marketplace_orders
+        WHERE marketplace_account_id = ANY($1)
+          AND status = $2
+          AND date_created >= $3::timestamptz
+          AND date_created < $4::timestamptz`,
+      [accountIds, PAID_ORDER_STATUS, window.from, window.to],
+    );
+
+    if (rows.length > 1) {
+      throw new MarketplaceAnalyticsCurrencyMismatchError();
+    }
   }
 
   /**

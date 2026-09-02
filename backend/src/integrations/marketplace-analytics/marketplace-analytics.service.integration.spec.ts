@@ -550,4 +550,578 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
     expect(dto.availability).toBe('CONNECTED_NO_DATA');
     expect(dto.summary).toBeNull();
   });
+
+  // -------------------------------------------------------------------
+  // Checkpoint 4-B: coexistência Mercado Livre x Amazon no endpoint
+  // genérico (10 cenários exigidos).
+  // -------------------------------------------------------------------
+  describe('Amazon (Checkpoint 4-B)', () => {
+    interface SeedAmazonOrderInput {
+      accountId: string;
+      externalOrderId: string;
+      status: string;
+      totalAmount: string;
+      currencyId?: string;
+      dateCreated: Date;
+      sourceStatus?: string | null;
+      fulfillmentChannel?: string | null;
+      externalMarketplaceId?: string | null;
+      items: SeedOrderItemInput[];
+    }
+
+    async function seedOrderExtended(
+      input: SeedAmazonOrderInput,
+    ): Promise<void> {
+      const currencyId = input.currencyId ?? 'BRL';
+      const [order] = await dataSource.query<Array<{ id: string }>>(
+        `INSERT INTO marketplace_orders
+            (marketplace_account_id, external_order_id, status, currency_id,
+             total_amount, date_created, source_status, fulfillment_channel,
+             external_marketplace_id)
+          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+          RETURNING id`,
+        [
+          input.accountId,
+          input.externalOrderId,
+          input.status,
+          currencyId,
+          input.totalAmount,
+          input.dateCreated,
+          input.sourceStatus ?? null,
+          input.fulfillmentChannel ?? null,
+          input.externalMarketplaceId ?? null,
+        ],
+      );
+
+      for (const item of input.items) {
+        await dataSource.query(
+          `INSERT INTO marketplace_order_items
+              (order_id, external_item_id, variation_id, seller_sku, title, quantity, unit_price, currency_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [
+            order.id,
+            item.externalItemId,
+            item.variationId ?? null,
+            item.sellerSku,
+            item.title,
+            item.quantity,
+            item.unitPrice,
+            currencyId,
+          ],
+        );
+      }
+    }
+
+    async function seedSuccessfulSyncRunFor(
+      accountId: string,
+      marketplace: Marketplace,
+      dateFrom: Date,
+      dateTo: Date,
+    ): Promise<void> {
+      await dataSource.query(
+        `INSERT INTO sync_runs
+            (marketplace_account_id, marketplace, type, status, started_at, finished_at, date_from, date_to)
+          VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
+        [
+          accountId,
+          marketplace,
+          SyncRunType.MANUAL,
+          SyncRunStatus.SUCCESS,
+          new Date(),
+          dateFrom,
+          dateTo,
+        ],
+      );
+    }
+
+    it('1. Mercado Livre and Amazon coexist — both appear with their own numbers', async () => {
+      const mlAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedSuccessfulSyncRunFor(
+        mlAccount,
+        Marketplace.MERCADO_LIVRE,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedSuccessfulSyncRunFor(
+        amazonAccount,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: 'ml-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-ML',
+            title: 'ML',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        sourceStatus: 'SHIPPED',
+        fulfillmentChannel: 'AMAZON',
+        externalMarketplaceId: 'A2Q3Y263D00KWC',
+        items: [
+          {
+            externalItemId: 'amz-item-1',
+            sellerSku: 'SKU-AMZ',
+            title: 'AMZ',
+            quantity: 1,
+            unitPrice: '50.00',
+          },
+        ],
+      });
+
+      const ml = await analyticsService.getAggregate(
+        { accountId: mlAccount },
+        REFERENCE_NOW,
+      );
+      const amazon = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+
+      expect(ml.current?.grossRevenueCents).toBe(10000n);
+      expect(amazon.current?.grossRevenueCents).toBe(5000n);
+    });
+
+    it('2. ALL sums Mercado Livre and Amazon when both are in BRL', async () => {
+      const mlAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedSuccessfulSyncRunFor(
+        mlAccount,
+        Marketplace.MERCADO_LIVRE,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedSuccessfulSyncRunFor(
+        amazonAccount,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: 'ml-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-ML',
+            title: 'ML',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'amz-item-1',
+            sellerSku: 'SKU-AMZ',
+            title: 'AMZ',
+            quantity: 1,
+            unitPrice: '50.00',
+          },
+        ],
+      });
+
+      const all = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      expect(all.current?.grossRevenueCents).toBe(15000n);
+      expect(all.current?.orders).toBe(2);
+    });
+
+    it('3. filtering by marketplace=AMAZON isolates Amazon data — Mercado Livre never leaks in', async () => {
+      const mlAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedSuccessfulSyncRunFor(
+        mlAccount,
+        Marketplace.MERCADO_LIVRE,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedSuccessfulSyncRunFor(
+        amazonAccount,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: 'ml-1',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-ML',
+            title: 'ML',
+            quantity: 1,
+            unitPrice: '999.00',
+          },
+        ],
+      });
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'amz-item-1',
+            sellerSku: 'SKU-AMZ',
+            title: 'AMZ',
+            quantity: 1,
+            unitPrice: '50.00',
+          },
+        ],
+      });
+
+      const amazonOnly = await analyticsService.getAggregate(
+        { marketplace: 'AMAZON' },
+        REFERENCE_NOW,
+      );
+      expect(amazonOnly.current?.grossRevenueCents).toBe(5000n);
+      expect(amazonOnly.current?.orders).toBe(1);
+    });
+
+    it('4. filtering by accountId isolates one Amazon account from another', async () => {
+      const amazonA = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+        externalSellerId: 'AMZ-A',
+      });
+      const amazonB = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+        externalSellerId: 'AMZ-B',
+      });
+      await seedSuccessfulSyncRunFor(
+        amazonA,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedSuccessfulSyncRunFor(
+        amazonB,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedOrderExtended({
+        accountId: amazonA,
+        externalOrderId: 'a-1',
+        status: 'paid',
+        totalAmount: '70.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'a-item',
+            sellerSku: 'SKU-A',
+            title: 'A',
+            quantity: 1,
+            unitPrice: '70.00',
+          },
+        ],
+      });
+      await seedOrderExtended({
+        accountId: amazonB,
+        externalOrderId: 'b-1',
+        status: 'paid',
+        totalAmount: '30.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'b-item',
+            sellerSku: 'SKU-B',
+            title: 'B',
+            quantity: 1,
+            unitPrice: '30.00',
+          },
+        ],
+      });
+
+      const scopedToA = await analyticsService.getAggregate(
+        { accountId: amazonA },
+        REFERENCE_NOW,
+      );
+      expect(scopedToA.current?.grossRevenueCents).toBe(7000n);
+      expect(scopedToA.current?.orders).toBe(1);
+    });
+
+    it('5. FBA (fulfillmentChannel=AMAZON) and FBM (MERCHANT) are both preserved in persistence and readable back', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'fba-1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        fulfillmentChannel: 'AMAZON',
+        items: [
+          {
+            externalItemId: 'i1',
+            sellerSku: 'S1',
+            title: 'X',
+            quantity: 1,
+            unitPrice: '10.00',
+          },
+        ],
+      });
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'fbm-1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        fulfillmentChannel: 'MERCHANT',
+        items: [
+          {
+            externalItemId: 'i2',
+            sellerSku: 'S2',
+            title: 'Y',
+            quantity: 1,
+            unitPrice: '10.00',
+          },
+        ],
+      });
+
+      const rows = await dataSource.query<
+        Array<{ external_order_id: string; fulfillment_channel: string }>
+      >(
+        'SELECT external_order_id, fulfillment_channel FROM marketplace_orders WHERE marketplace_account_id = $1 ORDER BY external_order_id',
+        [amazonAccount],
+      );
+      expect(rows).toEqual([
+        { external_order_id: 'fba-1', fulfillment_channel: 'AMAZON' },
+        { external_order_id: 'fbm-1', fulfillment_channel: 'MERCHANT' },
+      ]);
+    });
+
+    it('6. a pending order never enters the revenue/paid-orders totals', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedSuccessfulSyncRunFor(
+        amazonAccount,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'pending-1',
+        status: 'pending',
+        totalAmount: '999.00',
+        dateCreated: IN_CURRENT,
+        sourceStatus: 'PENDING',
+        items: [
+          {
+            externalItemId: 'i1',
+            sellerSku: 'S1',
+            title: 'X',
+            quantity: 1,
+            unitPrice: '999.00',
+          },
+        ],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+      expect(aggregate.current?.grossRevenueCents).toBe(0n);
+      expect(aggregate.current?.orders).toBe(0);
+    });
+
+    it('7. a cancelled order enters only the cancellation indicator, never revenue', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedSuccessfulSyncRunFor(
+        amazonAccount,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'cancelled-1',
+        status: 'cancelled',
+        totalAmount: '0.00',
+        dateCreated: IN_CURRENT,
+        sourceStatus: 'CANCELLED',
+        items: [
+          {
+            externalItemId: 'i1',
+            sellerSku: 'S1',
+            title: 'X',
+            quantity: 1,
+            unitPrice: '0.00',
+          },
+        ],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+      expect(aggregate.current?.grossRevenueCents).toBe(0n);
+      expect(aggregate.current?.orders).toBe(0);
+      expect(aggregate.current?.cancelledOrders).toBe(1);
+    });
+
+    it('8. a CONNECTED Amazon account without any data never fabricates a zero summary', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+        status: MarketplaceAccountStatus.CONNECTED,
+      });
+      const aggregate = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+      expect(dto.availability).toBe('CONNECTED_NO_DATA');
+      expect(dto.summary).toBeNull();
+    });
+
+    it('9. persisting Amazon orders never alters any Mercado Livre record', async () => {
+      const mlAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: 'ml-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-ML',
+            title: 'ML',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      const [before] = await dataSource.query<
+        Array<{ status: string; total_amount: string }>
+      >(
+        'SELECT status, total_amount FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [mlAccount],
+      );
+
+      await seedOrderExtended({
+        accountId: amazonAccount,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '999.99',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'amz-item-1',
+            sellerSku: 'SKU-AMZ',
+            title: 'AMZ',
+            quantity: 1,
+            unitPrice: '999.99',
+          },
+        ],
+      });
+
+      const [after] = await dataSource.query<
+        Array<{ status: string; total_amount: string }>
+      >(
+        'SELECT status, total_amount FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [mlAccount],
+      );
+      expect(after).toEqual(before);
+    });
+
+    it('10. incompatible currencies in the same scope are never silently summed — the aggregate throws instead', async () => {
+      const amazonA = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+        externalSellerId: 'AMZ-A',
+      });
+      const amazonB = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+        externalSellerId: 'AMZ-B',
+      });
+      await seedOrderExtended({
+        accountId: amazonA,
+        externalOrderId: 'a-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        currencyId: 'BRL',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'a-item',
+            sellerSku: 'SKU-A',
+            title: 'A',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrderExtended({
+        accountId: amazonB,
+        externalOrderId: 'b-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        currencyId: 'USD',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: 'b-item',
+            sellerSku: 'SKU-B',
+            title: 'B',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+
+      await expect(
+        analyticsService.getAggregate({ marketplace: 'AMAZON' }, REFERENCE_NOW),
+      ).rejects.toThrow('CURRENCY_MISMATCH');
+    });
+  });
 });

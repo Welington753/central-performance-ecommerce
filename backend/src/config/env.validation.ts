@@ -118,6 +118,10 @@ export const envValidationSchema = Joi.object({
   AMAZON_LWA_CLIENT_SECRET: Joi.string().optional(),
   AMAZON_SP_API_ENDPOINT: Joi.string().uri().optional(),
   AMAZON_SP_API_USER_AGENT: Joi.string().optional(),
+  // Lista separada por vírgulas dos marketplaceIds Amazon aceitos
+  // (Checkpoint 4-B) — nunca hardcoded no código, nunca um valor real neste
+  // schema. Sem valor padrão: também opcional, mesma regra de boot acima.
+  AMAZON_MARKETPLACE_IDS: Joi.string().optional(),
 
   // Origem única do frontend, usada para CORS com credentials: true.
   FRONTEND_URL: Joi.string().uri().required(),

@@ -258,4 +258,19 @@ describe('envValidationSchema', () => {
     );
     expect(error?.message).toMatch(/AMAZON_SP_API_ENDPOINT/);
   });
+
+  it('accepts a fully valid environment with NO AMAZON_MARKETPLACE_IDS set — the backend must boot without it (Fase 4-B)', () => {
+    const { error } = envValidationSchema.validate(VALID_ENV, {
+      abortEarly: false,
+    });
+    expect(error).toBeUndefined();
+  });
+
+  it('accepts AMAZON_MARKETPLACE_IDS as a comma-separated string', () => {
+    const { error } = envValidationSchema.validate(
+      { ...VALID_ENV, AMAZON_MARKETPLACE_IDS: 'A2Q3Y263D00KWC,ABC123' },
+      { abortEarly: false },
+    );
+    expect(error).toBeUndefined();
+  });
 });
