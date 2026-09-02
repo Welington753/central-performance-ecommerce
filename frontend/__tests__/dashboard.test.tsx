@@ -453,4 +453,125 @@ describe("DashboardPage", () => {
     expect(await screen.findByLabelText("Marketplace")).toBeInTheDocument();
     expect(screen.getByLabelText("Conta")).toBeInTheDocument();
   });
+
+  describe("proteção contra requisições obsoletas (corrida entre respostas assíncronas)", () => {
+    it("a stale marketplace-scope response never overwrites a newer one, and never leaves the dashboard stuck loading", async () => {
+      let resolveA!: (value: MarketplaceAnalyticsKpisDto) => void;
+      let resolveB!: (value: MarketplaceAnalyticsKpisDto) => void;
+
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { marketplace?: string }) => {
+          if (!query.marketplace || query.marketplace === "ALL") {
+            return new Promise<MarketplaceAnalyticsKpisDto>((resolve) => {
+              resolveA = resolve;
+            });
+          }
+          return new Promise<MarketplaceAnalyticsKpisDto>((resolve) => {
+            resolveB = resolve;
+          });
+        },
+      );
+
+      // Requisição A começa (marketplace=ALL, o padrão).
+      mockSearchParams({});
+      const { rerender } = render(<DashboardPage />);
+      await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(1));
+
+      // Usuário troca o filtro antes de A terminar — requisição B começa.
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      rerender(<DashboardPage />);
+      await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
+
+      // B termina primeiro.
+      resolveB(
+        analyticsDto({
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null },
+          summary: { ...analyticsDto().summary!, grossRevenue: "222.00" },
+        }),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00"),
+      );
+
+      // A termina depois (mais devagar) — nunca pode substituir B.
+      resolveA(
+        analyticsDto({
+          scope: { marketplace: "ALL", accountId: null },
+          summary: { ...analyticsDto().summary!, grossRevenue: "111.00" },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00");
+      expect(screen.queryByText(/carregando kpis/i)).not.toBeInTheDocument();
+    });
+
+    it("a stale account-scoped response never overwrites a newer one, and never leaves the dashboard stuck loading", async () => {
+      let resolveScope!: (value: MarketplaceAnalyticsKpisDto) => void;
+      let resolveAcc1!: (value: MarketplaceAnalyticsKpisDto) => void;
+      let resolveAcc2!: (value: MarketplaceAnalyticsKpisDto) => void;
+
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { accountId?: string }) => {
+          if (!query.accountId) {
+            return new Promise<MarketplaceAnalyticsKpisDto>((resolve) => {
+              resolveScope = resolve;
+            });
+          }
+          if (query.accountId === "acc-1") {
+            return new Promise<MarketplaceAnalyticsKpisDto>((resolve) => {
+              resolveAcc1 = resolve;
+            });
+          }
+          return new Promise<MarketplaceAnalyticsKpisDto>((resolve) => {
+            resolveAcc2 = resolve;
+          });
+        },
+      );
+
+      // Requisição A (conta acc-1) começa.
+      mockSearchParams({ accountId: "acc-1" });
+      const { rerender } = render(<DashboardPage />);
+      await waitFor(() =>
+        expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith(
+          expect.objectContaining({ accountId: "acc-1" }),
+        ),
+      );
+      resolveScope(analyticsDto());
+
+      // Usuário troca para a conta acc-2 antes de A terminar — B começa.
+      mockSearchParams({ accountId: "acc-2" });
+      rerender(<DashboardPage />);
+      await waitFor(() =>
+        expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith(
+          expect.objectContaining({ accountId: "acc-2" }),
+        ),
+      );
+
+      // B (acc-2) termina primeiro.
+      resolveAcc2(
+        analyticsDto({
+          scope: { marketplace: "ALL", accountId: "acc-2" },
+          summary: { ...analyticsDto().summary!, grossRevenue: "222.00" },
+        }),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00"),
+      );
+
+      // A (acc-1) termina depois — nunca pode substituir B.
+      resolveAcc1(
+        analyticsDto({
+          scope: { marketplace: "ALL", accountId: "acc-1" },
+          summary: { ...analyticsDto().summary!, grossRevenue: "111.00" },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00");
+      expect(screen.queryByText(/carregando kpis/i)).not.toBeInTheDocument();
+    });
+  });
 });

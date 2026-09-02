@@ -170,6 +170,17 @@ function DashboardContent() {
   const [syncError, setSyncError] = useState<string | null>(null);
   const syncingRef = useRef(false);
 
+  // Proteção contra corrida entre requisições (geração monotônica): cada
+  // chamada a `loadScope`/`loadAccountScoped` incrementa seu próprio
+  // contador antes do `fetch` e só aplica `setState` se, quando a resposta
+  // chega, nenhuma chamada mais nova já foi iniciada. Sem isso, trocar
+  // marketplace/conta/período rapidamente permite que uma resposta antiga
+  // (que demorou mais) sobrescreva uma resposta mais nova que já chegou —
+  // tanto com dado stale quanto travando a tela em "Carregando" para sempre
+  // se a mais nova nunca "vencer" a comparação de chave.
+  const scopeRequestSeqRef = useRef(0);
+  const accountScopedRequestSeqRef = useRef(0);
+
   const period = readPeriodFromSearchParams(searchParams);
   const effectivePeriod = resolveEffectivePeriod(period);
   const effectiveFrom = effectivePeriod?.from ?? null;
@@ -179,16 +190,24 @@ function DashboardContent() {
 
   const loadScope = useCallback(
     async (from: string, to: string, mkt: MarketplaceFilter) => {
+      const seq = ++scopeRequestSeqRef.current;
       const key = `${mkt}|${from}|${to}`;
       try {
         const data = await fetchMarketplaceAnalyticsKpis({ from, to, marketplace: mkt });
+        // Uma requisição mais nova já começou enquanto esta estava em voo —
+        // esta resposta chegou tarde demais e nunca pode substituir o
+        // escopo atual (nem sucesso, nem erro, nem a chave de carregamento).
+        if (scopeRequestSeqRef.current !== seq) return;
         setScopeData(data);
         setScopeError(false);
       } catch {
+        if (scopeRequestSeqRef.current !== seq) return;
         setScopeData(null);
         setScopeError(true);
       } finally {
-        setScopeRequestKey(key);
+        if (scopeRequestSeqRef.current === seq) {
+          setScopeRequestKey(key);
+        }
       }
     },
     [],
@@ -205,6 +224,7 @@ function DashboardContent() {
 
   const loadAccountScoped = useCallback(
     async (from: string, to: string, mkt: MarketplaceFilter, account: string) => {
+      const seq = ++accountScopedRequestSeqRef.current;
       const key = `${mkt}|${account}|${from}|${to}`;
       try {
         const data = await fetchMarketplaceAnalyticsKpis({
@@ -213,13 +233,17 @@ function DashboardContent() {
           marketplace: mkt,
           accountId: account,
         });
+        if (accountScopedRequestSeqRef.current !== seq) return;
         setAccountScopedData(data);
         setAccountScopedError(false);
       } catch {
+        if (accountScopedRequestSeqRef.current !== seq) return;
         setAccountScopedData(null);
         setAccountScopedError(true);
       } finally {
-        setAccountScopedRequestKey(key);
+        if (accountScopedRequestSeqRef.current === seq) {
+          setAccountScopedRequestKey(key);
+        }
       }
     },
     [],

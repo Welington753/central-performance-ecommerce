@@ -77,7 +77,6 @@ export interface MercadoLivreKpisDto {
     status: "complete" | "partial" | "unknown";
     synchronizedFrom: string | null;
     synchronizedTo: string | null;
-    synchronizedIntervals: Array<{ from: string; to: string }>;
     selectedPeriodComplete: boolean;
     comparisonPeriodComplete: boolean;
   };

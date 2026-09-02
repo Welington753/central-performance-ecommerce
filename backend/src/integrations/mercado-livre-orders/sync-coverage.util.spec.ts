@@ -103,7 +103,6 @@ describe('computeDataCoverage', () => {
       status: 'unknown',
       synchronizedFrom: null,
       synchronizedTo: null,
-      synchronizedIntervals: [],
       selectedPeriodComplete: false,
       comparisonPeriodComplete: false,
     });
@@ -124,36 +123,6 @@ describe('computeDataCoverage', () => {
     expect(coverage.selectedPeriodComplete).toBe(true);
     expect(coverage.comparisonPeriodComplete).toBe(true);
     expect(coverage.synchronizedFrom).toBe('2026-06-30');
-    expect(coverage.synchronizedTo).toBe('2026-09-01');
-    expect(coverage.synchronizedIntervals).toEqual([
-      { from: '2026-06-30', to: '2026-09-01' },
-    ]);
-  });
-
-  it('preserves separate merged intervals — never presents two disjoint syncs as one continuous range', () => {
-    const coverage = computeDataCoverage(
-      [
-        {
-          from: new Date('2026-07-02T03:00:00Z'),
-          to: new Date('2026-07-10T03:00:00Z'),
-        },
-        {
-          from: new Date('2026-08-25T03:00:00Z'),
-          to: new Date('2026-09-01T12:00:00Z'),
-        },
-      ],
-      current,
-      previous,
-    );
-    expect(coverage.status).toBe('partial');
-    expect(coverage.synchronizedIntervals).toHaveLength(2);
-    expect(coverage.synchronizedIntervals).toEqual([
-      { from: '2026-07-02', to: '2026-07-10' },
-      { from: '2026-08-25', to: '2026-09-01' },
-    ]);
-    // A leitura ingênua de synchronizedFrom/synchronizedTo sozinhos
-    // sugeriria (erradamente) um único período contínuo de 02/07 a 01/09.
-    expect(coverage.synchronizedFrom).toBe('2026-07-02');
     expect(coverage.synchronizedTo).toBe('2026-09-01');
   });
 

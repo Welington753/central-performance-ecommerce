@@ -39,7 +39,6 @@ function aggregate(
       status: 'unknown',
       synchronizedFrom: null,
       synchronizedTo: null,
-      synchronizedIntervals: [],
       selectedPeriodComplete: false,
       comparisonPeriodComplete: false,
     },
@@ -398,7 +397,6 @@ describe('toMercadoLivreKpisResponse', () => {
       status: 'partial' as const,
       synchronizedFrom: '2026-07-04',
       synchronizedTo: '2026-09-02',
-      synchronizedIntervals: [{ from: '2026-07-04', to: '2026-08-01' }],
       selectedPeriodComplete: true,
       comparisonPeriodComplete: false,
     };
@@ -408,6 +406,27 @@ describe('toMercadoLivreKpisResponse', () => {
       lastSync: null,
     });
     expect(dto.dataCoverage).toEqual(coverage);
+  });
+
+  it('regression (CP3-R1): dataCoverage keeps EXACTLY its pre-Checkpoint-3 shape — never leaks synchronizedIntervals from the generic contract', () => {
+    const dto = toMercadoLivreKpisResponse({
+      account,
+      aggregate: aggregate(),
+      lastSync: null,
+    });
+    expect(Object.keys(dto.dataCoverage).sort()).toEqual(
+      [
+        'status',
+        'synchronizedFrom',
+        'synchronizedTo',
+        'selectedPeriodComplete',
+        'comparisonPeriodComplete',
+      ].sort(),
+    );
+    expect(dto.dataCoverage).not.toHaveProperty('synchronizedIntervals');
+    expect(JSON.stringify(dto.dataCoverage)).not.toContain(
+      'synchronizedIntervals',
+    );
   });
 
   it('never includes any sensitive/internal field — fixed allowlist at every level', () => {

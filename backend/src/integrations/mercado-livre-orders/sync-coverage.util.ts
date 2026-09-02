@@ -3,24 +3,10 @@ import { utcInstantToSaoPauloDateString } from './period.util';
 
 export type DataCoverageStatus = 'complete' | 'partial' | 'unknown';
 
-export interface SynchronizedIntervalDto {
-  from: string;
-  to: string;
-}
-
 export interface DataCoverage {
   status: DataCoverageStatus;
   synchronizedFrom: string | null;
   synchronizedTo: string | null;
-  /**
-   * Checkpoint 3 (achado #3, "Cobertura potencialmente enganosa") — os
-   * intervalos REALMENTE fundidos, em ordem crescente. `synchronizedFrom`/
-   * `synchronizedTo` continuam existindo por compatibilidade (menor/maior
-   * data entre todas as execuções), mas NUNCA devem ser lidos como prova de
-   * um único período contínuo — só este array prova isso. Vazio quando
-   * `status` é `unknown`.
-   */
-  synchronizedIntervals: SynchronizedIntervalDto[];
   selectedPeriodComplete: boolean;
   comparisonPeriodComplete: boolean;
 }
@@ -96,7 +82,6 @@ export function computeDataCoverage(
       status: 'unknown',
       synchronizedFrom: null,
       synchronizedTo: null,
-      synchronizedIntervals: [],
       selectedPeriodComplete: false,
       comparisonPeriodComplete: false,
     };
@@ -122,10 +107,6 @@ export function computeDataCoverage(
         : 'partial',
     synchronizedFrom: utcInstantToSaoPauloDateString(synchronizedFrom),
     synchronizedTo: utcInstantToSaoPauloDateString(synchronizedTo),
-    synchronizedIntervals: merged.map((interval) => ({
-      from: utcInstantToSaoPauloDateString(interval.from),
-      to: utcInstantToSaoPauloDateString(interval.to),
-    })),
     selectedPeriodComplete,
     comparisonPeriodComplete,
   };
