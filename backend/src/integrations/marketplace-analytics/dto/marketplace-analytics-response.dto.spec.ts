@@ -13,6 +13,11 @@ function totals(
     cancelledOrders: 0,
     distinctProducts: 0,
     itemsGrossRevenueCents: 0n,
+    grossSalesRevenueCents: 0n,
+    grossSalesOrders: 0,
+    grossSalesUnits: 0,
+    cancelledUnits: 0,
+    cancelledRevenueCents: 0n,
     ...overrides,
   };
 }
@@ -95,6 +100,46 @@ describe('toMarketplaceAnalyticsResponse', () => {
       }),
     );
     expect(dto.comparison?.cancellationRateDiffPp).toBe(10);
+  });
+
+  it('computes gross sales (paid + cancelled) and its averages from the shared totals, never dividing by zero', () => {
+    const dto = toMarketplaceAnalyticsResponse(
+      aggregate({
+        current: totals({
+          grossRevenueCents: 663279n,
+          orders: 25,
+          units: 28,
+          cancelledOrders: 1,
+          cancelledUnits: 1,
+          cancelledRevenueCents: 57900n,
+          grossSalesRevenueCents: 721179n,
+          grossSalesOrders: 26,
+          grossSalesUnits: 29,
+        }),
+        previous: totals(),
+      }),
+    );
+    expect(dto.summary?.grossSalesRevenue).toBe('7211.79');
+    expect(dto.summary?.grossSalesOrders).toBe(26);
+    expect(dto.summary?.grossSalesUnits).toBe(29);
+    expect(dto.summary?.grossSalesAverageTicket).toBe('277.38');
+    expect(dto.summary?.grossSalesAvgUnitPrice).toBe('248.68');
+    expect(dto.summary?.cancelledUnits).toBe(1);
+    expect(dto.summary?.cancelledRevenue).toBe('579.00');
+    // Sem base no período anterior (tudo zero) — nunca NaN/Infinity, sempre null.
+    expect(dto.comparison?.grossSalesRevenuePct).toBeNull();
+    expect(dto.comparison?.grossSalesAverageTicketPct).toBeNull();
+    expect(dto.comparison?.grossSalesAvgUnitPricePct).toBeNull();
+    expect(dto.comparison?.cancelledUnitsPct).toBeNull();
+    expect(dto.comparison?.cancelledRevenuePct).toBeNull();
+  });
+
+  it('never divides by zero for gross-sales averages when there are zero gross-sales orders/units', () => {
+    const dto = toMarketplaceAnalyticsResponse(aggregate());
+    expect(dto.summary?.grossSalesAverageTicket).toBe('0.00');
+    expect(dto.summary?.grossSalesAvgUnitPrice).toBe('0.00');
+    expect(dto.summary?.grossSalesOrders).toBe(0);
+    expect(dto.summary?.grossSalesUnits).toBe(0);
   });
 
   it('maps the best day and daily series with decimal-string revenue', () => {

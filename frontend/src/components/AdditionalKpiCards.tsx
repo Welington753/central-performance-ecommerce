@@ -3,7 +3,6 @@ import {
   formatCalendarDate,
   formatDecimal,
   formatPercent,
-  formatPercentagePoints,
 } from "@/lib/kpi-format";
 import type {
   AnalyticsBestDay,
@@ -69,25 +68,6 @@ export function AdditionalKpiCards({
   return (
     <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
       <Card
-        testId="cancelled-orders"
-        label="Pedidos cancelados"
-        value={String(summary.cancelledOrders)}
-      >
-        <ComparisonLine pct={comparison.cancelledOrdersPct} />
-      </Card>
-
-      <Card
-        testId="cancellation-rate"
-        label="Taxa de cancelamento"
-        value={`${formatDecimal(summary.cancellationRate)}%`}
-      >
-        <p className="text-xs font-medium text-foreground/60">
-          {formatPercentagePoints(comparison.cancellationRateDiffPp)} vs.
-          período anterior
-        </p>
-      </Card>
-
-      <Card
         testId="distinct-products"
         label="Produtos distintos"
         value={String(summary.distinctProducts)}
@@ -105,8 +85,8 @@ export function AdditionalKpiCards({
 
       <Card
         testId="avg-unit-price"
-        label="Preço médio por unidade"
-        value={formatBRL(summary.avgUnitPrice)}
+        label="Preço médio por unidade bruta"
+        value={formatBRL(summary.grossSalesAvgUnitPrice)}
       >
         <p className="text-xs text-foreground/40">
           Valor bruto, não representa o valor líquido.

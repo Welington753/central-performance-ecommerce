@@ -3,16 +3,16 @@ import { KpiSummaryCards } from "./KpiSummaryCards";
 
 const BASE_PROPS = {
   summary: {
-    grossRevenue: "1234.56",
-    orders: 10,
-    units: 25,
-    averageTicket: "123.46",
+    grossSalesRevenue: "1234.56",
+    grossSalesOrders: 10,
+    grossSalesUnits: 25,
+    grossSalesAverageTicket: "123.46",
   },
   comparison: {
-    grossRevenuePct: 12.3,
-    ordersPct: -8,
-    unitsPct: 0,
-    averageTicketPct: null,
+    grossSalesRevenuePct: 12.3,
+    grossSalesOrdersPct: -8,
+    grossSalesUnitsPct: 0,
+    grossSalesAverageTicketPct: null,
   },
 };
 
@@ -21,11 +21,11 @@ describe("KpiSummaryCards", () => {
     render(<KpiSummaryCards {...BASE_PROPS} />);
 
     const revenue = screen.getByTestId("kpi-card-gross-revenue");
-    expect(within(revenue).getByText("Faturamento bruto")).toBeInTheDocument();
+    expect(within(revenue).getByText("Vendas brutas")).toBeInTheDocument();
     expect(within(revenue).getByText(/R\$\s?1\.234,56/)).toBeInTheDocument();
 
     const orders = screen.getByTestId("kpi-card-orders");
-    expect(within(orders).getByText("Pedidos pagos")).toBeInTheDocument();
+    expect(within(orders).getByText("Vendas")).toBeInTheDocument();
     expect(within(orders).getByText("10")).toBeInTheDocument();
 
     const units = screen.getByTestId("kpi-card-units");
@@ -65,16 +65,16 @@ describe("KpiSummaryCards", () => {
     render(
       <KpiSummaryCards
         summary={{
-          grossRevenue: "0.00",
-          orders: 0,
-          units: 0,
-          averageTicket: "0.00",
+          grossSalesRevenue: "0.00",
+          grossSalesOrders: 0,
+          grossSalesUnits: 0,
+          grossSalesAverageTicket: "0.00",
         }}
         comparison={{
-          grossRevenuePct: null,
-          ordersPct: null,
-          unitsPct: null,
-          averageTicketPct: null,
+          grossSalesRevenuePct: null,
+          grossSalesOrdersPct: null,
+          grossSalesUnitsPct: null,
+          grossSalesAverageTicketPct: null,
         }}
       />,
     );

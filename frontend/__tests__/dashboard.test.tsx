@@ -92,6 +92,13 @@ function analyticsDto(
       distinctProducts: 4,
       unitsPerOrder: 2.5,
       avgUnitPrice: "49.38",
+      grossSalesRevenue: "1234.56",
+      grossSalesOrders: 12,
+      grossSalesUnits: 27,
+      grossSalesAverageTicket: "102.88",
+      grossSalesAvgUnitPrice: "45.72",
+      cancelledUnits: 2,
+      cancelledRevenue: "65.44",
     },
     comparison: {
       grossRevenuePct: 12.3,
@@ -102,6 +109,13 @@ function analyticsDto(
       cancellationRateDiffPp: 3.2,
       distinctProductsPct: null,
       unitsPerOrderPct: null,
+      grossSalesRevenuePct: 12.3,
+      grossSalesOrdersPct: null,
+      grossSalesUnitsPct: null,
+      grossSalesAverageTicketPct: null,
+      grossSalesAvgUnitPricePct: null,
+      cancelledUnitsPct: null,
+      cancelledRevenuePct: null,
     },
     bestDay: { date: "2026-08-20", grossRevenue: "500.00", paidOrders: 3, units: 6 },
     dailySeries: [
@@ -486,7 +500,11 @@ describe("DashboardPage", () => {
       resolveB(
         analyticsDto({
           scope: { marketplace: "MERCADO_LIVRE", accountId: null },
-          summary: { ...analyticsDto().summary!, grossRevenue: "222.00" },
+          summary: {
+            ...analyticsDto().summary!,
+            grossRevenue: "222.00",
+            grossSalesRevenue: "222.00",
+          },
         }),
       );
       await waitFor(() =>
@@ -497,7 +515,11 @@ describe("DashboardPage", () => {
       resolveA(
         analyticsDto({
           scope: { marketplace: "ALL", accountId: null },
-          summary: { ...analyticsDto().summary!, grossRevenue: "111.00" },
+          summary: {
+            ...analyticsDto().summary!,
+            grossRevenue: "111.00",
+            grossSalesRevenue: "111.00",
+          },
         }),
       );
       await new Promise((resolve) => setTimeout(resolve, 0));
@@ -553,7 +575,11 @@ describe("DashboardPage", () => {
       resolveAcc2(
         analyticsDto({
           scope: { marketplace: "ALL", accountId: "acc-2" },
-          summary: { ...analyticsDto().summary!, grossRevenue: "222.00" },
+          summary: {
+            ...analyticsDto().summary!,
+            grossRevenue: "222.00",
+            grossSalesRevenue: "222.00",
+          },
         }),
       );
       await waitFor(() =>
@@ -564,7 +590,11 @@ describe("DashboardPage", () => {
       resolveAcc1(
         analyticsDto({
           scope: { marketplace: "ALL", accountId: "acc-1" },
-          summary: { ...analyticsDto().summary!, grossRevenue: "111.00" },
+          summary: {
+            ...analyticsDto().summary!,
+            grossRevenue: "111.00",
+            grossSalesRevenue: "111.00",
+          },
         }),
       );
       await new Promise((resolve) => setTimeout(resolve, 0));

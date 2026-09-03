@@ -555,6 +555,133 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
   });
 
   // -------------------------------------------------------------------
+  // fix(kpis): reconcile gross sales and cancellations — "vendas brutas"
+  // (pedidos pagos + cancelados com valor válido) equivalente ao indicador
+  // do marketplace, e o painel de cancelamentos (todos os cancelados, sem
+  // o filtro de valor válido).
+  // -------------------------------------------------------------------
+  it('gross sales reconcile paid + cancelled-with-value orders, mirroring the real-world discrepancy reported for 2026-08-04', async () => {
+    const accountId = await seedAccount({ externalSellerId: '1548451374' });
+
+    for (let i = 1; i <= 25; i += 1) {
+      await seedOrder({
+        accountId,
+        externalOrderId: `paid-${i}`,
+        status: 'paid',
+        totalAmount: '265.31',
+        dateCreated: IN_CURRENT,
+        items: [
+          {
+            externalItemId: `MLB-${i}`,
+            sellerSku: `SKU-${i}`,
+            title: 'Produto',
+            quantity: i === 1 ? 4 : 1,
+            unitPrice: i === 1 ? '66.33' : '265.31',
+          },
+        ],
+      });
+    }
+    await seedOrder({
+      accountId,
+      externalOrderId: 'cancelled-with-value',
+      status: 'cancelled',
+      totalAmount: '579.00',
+      dateCreated: IN_CURRENT,
+      items: [
+        {
+          externalItemId: 'MLB-CANC',
+          sellerSku: 'SKU-CANC',
+          title: 'Produto cancelado',
+          quantity: 1,
+          unitPrice: '579.00',
+        },
+      ],
+    });
+
+    const aggregate = await analyticsService.getAggregate(
+      { accountId },
+      REFERENCE_NOW,
+    );
+    const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+    // Operacional (pedidos pagos apenas) — nunca inclui o cancelado.
+    expect(dto.summary?.grossRevenue).toBe('6632.75');
+    expect(dto.summary?.orders).toBe(25);
+    expect(dto.summary?.units).toBe(28);
+
+    // Vendas brutas (equivalente ao marketplace) — paga + cancelada com valor.
+    expect(dto.summary?.grossSalesRevenue).toBe('7211.75');
+    expect(dto.summary?.grossSalesOrders).toBe(26);
+    expect(dto.summary?.grossSalesUnits).toBe(29);
+
+    // Painel de cancelamentos.
+    expect(dto.summary?.cancelledOrders).toBe(1);
+    expect(dto.summary?.cancelledUnits).toBe(1);
+    expect(dto.summary?.cancelledRevenue).toBe('579.00');
+  });
+
+  it('excludes a cancelled order with zero value from gross sales, but still counts it in the cancellations panel', async () => {
+    const accountId = await seedAccount();
+    await seedOrder({
+      accountId,
+      externalOrderId: 'paid-1',
+      status: 'paid',
+      totalAmount: '100.00',
+      dateCreated: IN_CURRENT,
+      items: [
+        {
+          externalItemId: 'X1',
+          sellerSku: 'SKU-1',
+          title: 'P1',
+          quantity: 1,
+          unitPrice: '100.00',
+        },
+      ],
+    });
+    await seedOrder({
+      accountId,
+      externalOrderId: 'cancelled-zero-value',
+      status: 'cancelled',
+      totalAmount: '0.00',
+      dateCreated: IN_CURRENT,
+      items: [
+        {
+          externalItemId: 'X2',
+          sellerSku: 'SKU-2',
+          title: 'P2',
+          quantity: 1,
+          unitPrice: '0.00',
+        },
+      ],
+    });
+
+    const aggregate = await analyticsService.getAggregate(
+      { accountId },
+      REFERENCE_NOW,
+    );
+    const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+    expect(dto.summary?.grossSalesOrders).toBe(1);
+    expect(dto.summary?.grossSalesUnits).toBe(1);
+    expect(dto.summary?.grossSalesRevenue).toBe('100.00');
+    expect(dto.summary?.cancelledOrders).toBe(1);
+    expect(dto.summary?.cancelledUnits).toBe(1);
+    expect(dto.summary?.cancelledRevenue).toBe('0.00');
+  });
+
+  it('never divides by zero for gross-sales averages/comparisons when the scope has no data at all', async () => {
+    const accountId = await seedAccount();
+    const aggregate = await analyticsService.getAggregate(
+      { accountId },
+      REFERENCE_NOW,
+    );
+    expect(aggregate.availability).toBe('CONNECTED_NO_DATA');
+    const dto = toMarketplaceAnalyticsResponse(aggregate);
+    expect(dto.summary).toBeNull();
+    expect(dto.comparison).toBeNull();
+  });
+
+  // -------------------------------------------------------------------
   // Checkpoint 4-B: coexistência Mercado Livre x Amazon no endpoint
   // genérico (10 cenários exigidos).
   // -------------------------------------------------------------------

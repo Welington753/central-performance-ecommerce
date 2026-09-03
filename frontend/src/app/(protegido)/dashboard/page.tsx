@@ -4,12 +4,14 @@ import { Suspense, useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AdditionalKpiCards } from "@/components/AdditionalKpiCards";
+import { CancellationsPanel } from "@/components/CancellationsPanel";
 import { DailyRevenueChart } from "@/components/DailyRevenueChart";
 import { DataCoverageBanner } from "@/components/DataCoverageBanner";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
 import { MarketplacePanel } from "@/components/MarketplacePanel";
+import { OperationalKpiCards } from "@/components/OperationalKpiCards";
 import { ProductRankingTabs } from "@/components/ProductRankingTabs";
 import { ScopeFilters } from "@/components/ScopeFilters";
 import {
@@ -560,14 +562,24 @@ function DashboardContent() {
                 comparison={displayData.comparison}
               />
               <p className="text-xs text-foreground/50">
-                Faturamento bruto: soma dos pedidos pagos antes de tarifas,
-                fretes, reembolsos, impostos e Ads.
+                Vendas brutas: pedidos pagos + pedidos cancelados com valor
+                válido, equivalente ao indicador do marketplace.
               </p>
+
+              <OperationalKpiCards
+                summary={displayData.summary}
+                comparison={displayData.comparison}
+              />
 
               <AdditionalKpiCards
                 summary={displayData.summary}
                 comparison={displayData.comparison}
                 bestDay={displayData.bestDay}
+              />
+
+              <CancellationsPanel
+                summary={displayData.summary}
+                comparison={displayData.comparison}
               />
 
               <div className="flex flex-col gap-3">

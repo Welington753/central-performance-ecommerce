@@ -2,16 +2,16 @@ import { formatBRL, formatPercent } from "@/lib/kpi-format";
 
 interface KpiSummaryCardsProps {
   summary: {
-    grossRevenue: string;
-    orders: number;
-    units: number;
-    averageTicket: string;
+    grossSalesRevenue: string;
+    grossSalesOrders: number;
+    grossSalesUnits: number;
+    grossSalesAverageTicket: string;
   };
   comparison: {
-    grossRevenuePct: number | null;
-    ordersPct: number | null;
-    unitsPct: number | null;
-    averageTicketPct: number | null;
+    grossSalesRevenuePct: number | null;
+    grossSalesOrdersPct: number | null;
+    grossSalesUnitsPct: number | null;
+    grossSalesAverageTicketPct: number | null;
   };
 }
 
@@ -22,31 +22,36 @@ interface CardSpec {
   comparisonPct: number | null;
 }
 
+/**
+ * Indicadores equivalentes ao marketplace ("vendas brutas"): pedidos pagos +
+ * cancelados com valor válido — nunca só pedidos pagos (isso vive em
+ * `OperationalKpiCards`, separado e nunca chamado de "líquido").
+ */
 export function KpiSummaryCards({ summary, comparison }: KpiSummaryCardsProps) {
   const cards: CardSpec[] = [
     {
       key: "gross-revenue",
-      label: "Faturamento bruto",
-      value: formatBRL(summary.grossRevenue),
-      comparisonPct: comparison.grossRevenuePct,
+      label: "Vendas brutas",
+      value: formatBRL(summary.grossSalesRevenue),
+      comparisonPct: comparison.grossSalesRevenuePct,
     },
     {
       key: "orders",
-      label: "Pedidos pagos",
-      value: String(summary.orders),
-      comparisonPct: comparison.ordersPct,
+      label: "Vendas",
+      value: String(summary.grossSalesOrders),
+      comparisonPct: comparison.grossSalesOrdersPct,
     },
     {
       key: "units",
       label: "Unidades vendidas",
-      value: String(summary.units),
-      comparisonPct: comparison.unitsPct,
+      value: String(summary.grossSalesUnits),
+      comparisonPct: comparison.grossSalesUnitsPct,
     },
     {
       key: "average-ticket",
       label: "Ticket médio",
-      value: formatBRL(summary.averageTicket),
-      comparisonPct: comparison.averageTicketPct,
+      value: formatBRL(summary.grossSalesAverageTicket),
+      comparisonPct: comparison.grossSalesAverageTicketPct,
     },
   ];
 

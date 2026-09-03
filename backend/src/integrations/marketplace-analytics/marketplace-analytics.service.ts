@@ -59,6 +59,22 @@ export interface AnalyticsPeriodTotals {
   cancelledOrders: number;
   distinctProducts: number;
   itemsGrossRevenueCents: bigint;
+  /**
+   * "Vendas brutas" (equivalente ao indicador do marketplace): pedidos pagos
+   * + pedidos cancelados com valor válido (`total_amount > 0`) — nunca
+   * pendentes/`unfulfillable`. Ver `fetchPeriodTotals`.
+   */
+  grossSalesRevenueCents: bigint;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  /**
+   * Cancelamentos (painel "Ver cancelamentos") — TODOS os pedidos cancelados
+   * do período, sem o filtro de valor válido usado em `grossSales*` acima;
+   * definição própria, deliberadamente distinta da regra de cancelamento do
+   * marketplace (ver tooltip do painel no frontend).
+   */
+  cancelledUnits: number;
+  cancelledRevenueCents: bigint;
 }
 
 export interface AnalyticsAccountTotals {
@@ -432,12 +448,26 @@ export class MarketplaceAnalyticsService {
     await this.assertSingleCurrencyOrThrow(accountIds, window);
 
     const [orderRow] = await this.dataSource.query<
-      Array<{ gross_revenue: string; orders: string; cancelled_orders: string }>
+      Array<{
+        gross_revenue: string;
+        orders: string;
+        cancelled_orders: string;
+        cancelled_revenue: string;
+        gross_sales_revenue: string;
+        gross_sales_orders: string;
+      }>
     >(
       `SELECT
           COALESCE(SUM(total_amount) FILTER (WHERE status = $3), 0)::text AS gross_revenue,
           COUNT(*) FILTER (WHERE status = $3)::text AS orders,
-          COUNT(*) FILTER (WHERE status = $4)::text AS cancelled_orders
+          COUNT(*) FILTER (WHERE status = $4)::text AS cancelled_orders,
+          COALESCE(SUM(total_amount) FILTER (WHERE status = $4), 0)::text AS cancelled_revenue,
+          COALESCE(SUM(total_amount) FILTER (
+            WHERE status = $3 OR (status = $4 AND total_amount > 0)
+          ), 0)::text AS gross_sales_revenue,
+          COUNT(*) FILTER (
+            WHERE status = $3 OR (status = $4 AND total_amount > 0)
+          )::text AS gross_sales_orders
         FROM marketplace_orders
         WHERE marketplace_account_id = ANY($1)
           AND date_created >= $2::timestamptz
@@ -456,26 +486,38 @@ export class MarketplaceAnalyticsService {
         units: string;
         items_gross_revenue: string;
         distinct_products: string;
+        cancelled_units: string;
+        gross_sales_units: string;
       }>
     >(
       `SELECT
-          COALESCE(SUM(oi.quantity), 0)::text AS units,
-          COALESCE(SUM(oi.quantity * oi.unit_price), 0)::text AS items_gross_revenue,
-          COUNT(DISTINCT
+          COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = $2), 0)::text AS units,
+          COALESCE(SUM(oi.quantity * oi.unit_price) FILTER (WHERE o.status = $2), 0)::text AS items_gross_revenue,
+          (COUNT(DISTINCT
             CASE WHEN NULLIF(UPPER(TRIM(oi.seller_sku)), '') IS NOT NULL
                  THEN 'sku:' || UPPER(TRIM(oi.seller_sku))
                  ELSE 'fallback:' || ma.marketplace || ':' || o.marketplace_account_id || ':' ||
                       oi.external_item_id || ':' || COALESCE(oi.variation_id, '')
             END
-          )::text AS distinct_products
+          ) FILTER (WHERE o.status = $2))::text AS distinct_products,
+          COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = $5), 0)::text AS cancelled_units,
+          COALESCE(SUM(oi.quantity) FILTER (
+            WHERE o.status = $2 OR (o.status = $5 AND o.total_amount > 0)
+          ), 0)::text AS gross_sales_units
         FROM marketplace_order_items oi
         INNER JOIN marketplace_orders o ON o.id = oi.order_id
         INNER JOIN marketplace_accounts ma ON ma.id = o.marketplace_account_id
         WHERE o.marketplace_account_id = ANY($1)
-          AND o.status = $2
+          AND o.status IN ($2, $5)
           AND o.date_created >= $3::timestamptz
           AND o.date_created < $4::timestamptz`,
-      [accountIds, PAID_ORDER_STATUS, window.from, window.to],
+      [
+        accountIds,
+        PAID_ORDER_STATUS,
+        window.from,
+        window.to,
+        CANCELLED_ORDER_STATUS,
+      ],
     );
 
     return {
@@ -487,6 +529,13 @@ export class MarketplaceAnalyticsService {
         itemRow.items_gross_revenue,
       ),
       distinctProducts: Number(itemRow.distinct_products),
+      grossSalesRevenueCents: decimalCurrencyToCents(
+        orderRow.gross_sales_revenue,
+      ),
+      grossSalesOrders: Number(orderRow.gross_sales_orders),
+      grossSalesUnits: Number(itemRow.gross_sales_units),
+      cancelledUnits: Number(itemRow.cancelled_units),
+      cancelledRevenueCents: decimalCurrencyToCents(orderRow.cancelled_revenue),
     };
   }
 
@@ -778,6 +827,11 @@ function zeroPeriodTotals(): AnalyticsPeriodTotals {
     cancelledOrders: 0,
     distinctProducts: 0,
     itemsGrossRevenueCents: 0n,
+    grossSalesRevenueCents: 0n,
+    grossSalesOrders: 0,
+    grossSalesUnits: 0,
+    cancelledUnits: 0,
+    cancelledRevenueCents: 0n,
   };
 }
 

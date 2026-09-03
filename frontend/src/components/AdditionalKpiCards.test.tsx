@@ -12,6 +12,13 @@ const baseSummary: AnalyticsSummary = {
   distinctProducts: 5,
   unitsPerOrder: 2.5,
   avgUnitPrice: "50.00",
+  grossSalesRevenue: "1050.00",
+  grossSalesOrders: 9,
+  grossSalesUnits: 21,
+  grossSalesAverageTicket: "116.67",
+  grossSalesAvgUnitPrice: "52.50",
+  cancelledUnits: 1,
+  cancelledRevenue: "50.00",
 };
 
 const baseComparison: AnalyticsComparison = {
@@ -23,22 +30,22 @@ const baseComparison: AnalyticsComparison = {
   cancellationRateDiffPp: 5.5,
   distinctProductsPct: null,
   unitsPerOrderPct: null,
+  grossSalesRevenuePct: 9,
+  grossSalesOrdersPct: 4,
+  grossSalesUnitsPct: 7,
+  grossSalesAverageTicketPct: null,
+  grossSalesAvgUnitPricePct: null,
+  cancelledUnitsPct: null,
+  cancelledRevenuePct: null,
 };
 
 describe("AdditionalKpiCards", () => {
-  it("renders cancelled orders and cancellation rate", () => {
+  it("never renders the cancellation cards — they live in the collapsible CancellationsPanel now", () => {
     render(
       <AdditionalKpiCards summary={baseSummary} comparison={baseComparison} bestDay={null} />,
     );
-    expect(screen.getByTestId("kpi-card-cancelled-orders")).toHaveTextContent("2");
-    expect(screen.getByTestId("kpi-card-cancellation-rate")).toHaveTextContent("20,0%");
-  });
-
-  it("shows the cancellation rate comparison in percentage points (p.p.), never as a plain percentage", () => {
-    render(
-      <AdditionalKpiCards summary={baseSummary} comparison={baseComparison} bestDay={null} />,
-    );
-    expect(screen.getByTestId("kpi-card-cancellation-rate")).toHaveTextContent("p.p.");
+    expect(screen.queryByTestId("kpi-card-cancelled-orders")).not.toBeInTheDocument();
+    expect(screen.queryByTestId("kpi-card-cancellation-rate")).not.toBeInTheDocument();
   });
 
   it('shows "Sem base no período anterior" instead of null/NaN/Infinity when the comparison is unavailable', () => {
@@ -56,6 +63,15 @@ describe("AdditionalKpiCards", () => {
     );
     expect(screen.getByTestId("kpi-card-units-per-order")).toHaveTextContent("2,5");
     expect(screen.getByTestId("kpi-card-avg-unit-price")).toHaveTextContent(/não representa o valor líquido/i);
+  });
+
+  it("shows the GROSS-sales average unit price (paid + cancelled with value), not the paid-only one", () => {
+    render(
+      <AdditionalKpiCards summary={baseSummary} comparison={baseComparison} bestDay={null} />,
+    );
+    const card = screen.getByTestId("kpi-card-avg-unit-price");
+    expect(card).toHaveTextContent(/R\$\s?52,50/);
+    expect(card.textContent).not.toMatch(/R\$\s?50,00/);
   });
 
   it("shows best day details when present", () => {

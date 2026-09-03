@@ -25,6 +25,7 @@ import type {
 } from '../marketplace-analytics.service';
 
 export interface AnalyticsKpiSummary {
+  /** Faturamento de PEDIDOS PAGOS, antes de tarifas/frete/impostos/Ads — indicador operacional, nunca chamado de "líquido". */
   grossRevenue: string;
   orders: number;
   units: number;
@@ -34,6 +35,18 @@ export interface AnalyticsKpiSummary {
   distinctProducts: number;
   unitsPerOrder: number;
   avgUnitPrice: string;
+  /**
+   * "Vendas brutas" — equivalente ao indicador do marketplace: pedidos
+   * pagos + cancelados com valor válido. Nunca inclui pendentes/`unfulfillable`.
+   */
+  grossSalesRevenue: string;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  grossSalesAverageTicket: string;
+  grossSalesAvgUnitPrice: string;
+  /** Painel "Ver cancelamentos" — todos os pedidos cancelados do período (ver `cancelledOrders`/`cancellationRate` acima para contagem/taxa). */
+  cancelledUnits: number;
+  cancelledRevenue: string;
 }
 
 export interface AnalyticsKpiComparison {
@@ -45,6 +58,13 @@ export interface AnalyticsKpiComparison {
   cancellationRateDiffPp: number;
   distinctProductsPct: number | null;
   unitsPerOrderPct: number | null;
+  grossSalesRevenuePct: number | null;
+  grossSalesOrdersPct: number | null;
+  grossSalesUnitsPct: number | null;
+  grossSalesAverageTicketPct: number | null;
+  grossSalesAvgUnitPricePct: number | null;
+  cancelledUnitsPct: number | null;
+  cancelledRevenuePct: number | null;
 }
 
 export interface AnalyticsBestDay {
@@ -246,6 +266,19 @@ function toSummary(totals: AnalyticsPeriodTotals): AnalyticsKpiSummary {
       totals.itemsGrossRevenueCents,
       BigInt(totals.units),
     ),
+    grossSalesRevenue: centsToDecimalString(totals.grossSalesRevenueCents),
+    grossSalesOrders: totals.grossSalesOrders,
+    grossSalesUnits: totals.grossSalesUnits,
+    grossSalesAverageTicket: divideCents(
+      totals.grossSalesRevenueCents,
+      BigInt(totals.grossSalesOrders),
+    ),
+    grossSalesAvgUnitPrice: divideCents(
+      totals.grossSalesRevenueCents,
+      BigInt(totals.grossSalesUnits),
+    ),
+    cancelledUnits: totals.cancelledUnits,
+    cancelledRevenue: centsToDecimalString(totals.cancelledRevenueCents),
   };
 }
 
@@ -280,6 +313,34 @@ function toComparison(
       unitsPerOrderApprox(current),
       unitsPerOrderApprox(previous),
     ),
+    grossSalesRevenuePct: percentChange(
+      Number(current.grossSalesRevenueCents),
+      Number(previous.grossSalesRevenueCents),
+    ),
+    grossSalesOrdersPct: percentChange(
+      current.grossSalesOrders,
+      previous.grossSalesOrders,
+    ),
+    grossSalesUnitsPct: percentChange(
+      current.grossSalesUnits,
+      previous.grossSalesUnits,
+    ),
+    grossSalesAverageTicketPct: percentChange(
+      grossSalesAverageTicketApprox(current),
+      grossSalesAverageTicketApprox(previous),
+    ),
+    grossSalesAvgUnitPricePct: percentChange(
+      grossSalesAvgUnitPriceApprox(current),
+      grossSalesAvgUnitPriceApprox(previous),
+    ),
+    cancelledUnitsPct: percentChange(
+      current.cancelledUnits,
+      previous.cancelledUnits,
+    ),
+    cancelledRevenuePct: percentChange(
+      Number(current.cancelledRevenueCents),
+      Number(previous.cancelledRevenueCents),
+    ),
   };
 }
 
@@ -297,6 +358,16 @@ function unitsPerOrderApprox(totals: AnalyticsPeriodTotals): number {
 function averageTicketApprox(totals: AnalyticsPeriodTotals): number {
   if (totals.orders === 0) return 0;
   return Number(totals.grossRevenueCents) / totals.orders;
+}
+
+function grossSalesAverageTicketApprox(totals: AnalyticsPeriodTotals): number {
+  if (totals.grossSalesOrders === 0) return 0;
+  return Number(totals.grossSalesRevenueCents) / totals.grossSalesOrders;
+}
+
+function grossSalesAvgUnitPriceApprox(totals: AnalyticsPeriodTotals): number {
+  if (totals.grossSalesUnits === 0) return 0;
+  return Number(totals.grossSalesRevenueCents) / totals.grossSalesUnits;
 }
 
 function toBestDay(point: AnalyticsDailyPointRaw): AnalyticsBestDay {

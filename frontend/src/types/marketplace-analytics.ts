@@ -21,6 +21,7 @@ export type SourceAvailability =
 export type AccountAvailability = Exclude<SourceAvailability, "NOT_CONNECTED">;
 
 export interface AnalyticsSummary {
+  /** Faturamento de PEDIDOS PAGOS, antes de tarifas/frete/impostos/Ads — indicador operacional, nunca "líquido". */
   grossRevenue: string;
   orders: number;
   units: number;
@@ -30,6 +31,15 @@ export interface AnalyticsSummary {
   distinctProducts: number;
   unitsPerOrder: number;
   avgUnitPrice: string;
+  /** "Vendas brutas" — equivalente ao indicador do marketplace: pedidos pagos + cancelados com valor válido. */
+  grossSalesRevenue: string;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  grossSalesAverageTicket: string;
+  grossSalesAvgUnitPrice: string;
+  /** Painel "Ver cancelamentos" — todos os pedidos cancelados do período. */
+  cancelledUnits: number;
+  cancelledRevenue: string;
 }
 
 export interface AnalyticsComparison {
@@ -41,6 +51,13 @@ export interface AnalyticsComparison {
   cancellationRateDiffPp: number;
   distinctProductsPct: number | null;
   unitsPerOrderPct: number | null;
+  grossSalesRevenuePct: number | null;
+  grossSalesOrdersPct: number | null;
+  grossSalesUnitsPct: number | null;
+  grossSalesAverageTicketPct: number | null;
+  grossSalesAvgUnitPricePct: number | null;
+  cancelledUnitsPct: number | null;
+  cancelledRevenuePct: number | null;
 }
 
 export interface AnalyticsBestDay {
