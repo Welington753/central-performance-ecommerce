@@ -9,6 +9,14 @@ export interface MarketplaceCardData {
     tooltip?: string;
     onClick?: () => void;
   };
+  // Ação secundária opcional (Checkpoint 4-C) — ex.: "Reconfigurar
+  // credenciais" ao lado de "Sincronizar agora" numa conta Amazon
+  // conectada. Nunca usado pelo Mercado Livre — retrocompatível.
+  secondaryCta?: {
+    label: string;
+    disabled: boolean;
+    onClick?: () => void;
+  };
 }
 
 // Espelha MarketplaceAccountResponseDto (Task 14) exatamente — sem

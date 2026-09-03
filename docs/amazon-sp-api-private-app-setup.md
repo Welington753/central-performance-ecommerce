@@ -48,22 +48,24 @@ preparadas em `backend/.env.example`:
 | Application ID | `AMAZON_SP_API_APP_ID` |
 | LWA Client ID | `AMAZON_LWA_CLIENT_ID` |
 | LWA Client Secret | `AMAZON_LWA_CLIENT_SECRET` |
-| Selling Partner ID | (provisionado internamente — Etapa 6, nunca por variável de ambiente) |
-| Refresh Token (da autoautorização) | (provisionado internamente — Etapa 6, nunca por variável de ambiente) |
+| Selling Partner ID | inserido pela tela `/integracoes` (nunca por variável de ambiente) |
+| Refresh Token (da autoautorização) | inserido pela tela `/integracoes` (nunca por variável de ambiente) |
 
 `AMAZON_SP_API_ENDPOINT` e `AMAZON_SP_API_USER_AGENT` **não** vêm do Seller
 Central — já estão documentados com o valor correto (o endpoint regional
 oficial da conta, ex. América do Norte) em `backend/.env.example`.
 
 O **Selling Partner ID** e o **Refresh Token** são credenciais de **conta**,
-não de aplicação — nunca são colocados em variável de ambiente. Eles entram
-no sistema através do método interno de provisionamento
-(`AmazonAuthService.provisionAccount`, Checkpoint 4-A, Etapa 6), que
-criptografa o refresh token imediatamente antes de qualquer persistência. A
-forma final de transporte desse valor (ex.: um comando administrativo
-único, executado localmente) será definida quando o usuário principal
-estiver com a autoautorização em mãos — **não existe, nesta fase, nenhum
-formulário ou endpoint HTTP para colar esses valores.**
+não de aplicação — nunca são colocados em variável de ambiente. Desde o
+Checkpoint 4-C, eles são inseridos pela tela `/integracoes` (assistente
+"Configurar Amazon"), que chama
+`POST /marketplace-accounts/:id/amazon/provision` — o mesmo
+`AmazonAuthService.provisionAccount` desta fundação, agora exposto por um
+controller autenticado, que continua criptografando o refresh token
+imediatamente antes de qualquer persistência. Ver
+`docs/amazon-connection-readiness.md` para o passo a passo completo (o que
+já está pronto, o que pedir ao usuário principal, e como testar/sincronizar
+sem usar credenciais reais).
 
 ## 5. Papéis (roles) a verificar durante a autoautorização
 
@@ -97,7 +99,9 @@ canal interno seguro definido pela própria empresa.
 
 Depois que o usuário principal tiver a aplicação privada criada e
 autoautorizada (com Application ID, LWA Client ID, LWA Client Secret,
-Selling Partner ID e Refresh Token em mãos), a próxima etapa é: preencher
-as três primeiras variáveis de ambiente, provisionar a conta internamente
-com o Selling Partner ID e o Refresh Token, e então executar a homologação
-real (fora do escopo deste checkpoint) — nunca antes disso.
+Selling Partner ID e Refresh Token em mãos), a próxima etapa é o
+passo a passo operacional completo em
+`docs/amazon-connection-readiness.md`: preencher as variáveis de ambiente,
+abrir `/integracoes`, cadastrar o Selling Partner ID e o Refresh Token pela
+tela, testar a conexão e só então executar a primeira sincronização real —
+nunca antes disso.

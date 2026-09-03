@@ -36,6 +36,17 @@ export function MarketplaceCard({ card }: { card: MarketplaceCardData }) {
           ) : null}
         </div>
       ) : null}
+
+      {card.secondaryCta ? (
+        <button
+          type="button"
+          disabled={card.secondaryCta.disabled}
+          onClick={card.secondaryCta.onClick}
+          className="w-full rounded-md border border-border-subtle px-4 py-2 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {card.secondaryCta.label}
+        </button>
+      ) : null}
     </div>
   );
 }

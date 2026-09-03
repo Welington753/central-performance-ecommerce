@@ -17,6 +17,10 @@ import type {
   MarketplaceAnalyticsKpisDto,
   MarketplaceFilter,
 } from "@/types/marketplace-analytics";
+import type {
+  AmazonSetupStatusDto,
+  AmazonVerifyConnectionDto,
+} from "@/types/amazon-connection";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -70,10 +74,13 @@ export async function fetchMarketplaceAccounts(): Promise<
 
 export async function createMarketplaceAccount(
   marketplace: MarketplaceAccountDto["marketplace"],
+  nickname?: string,
 ): Promise<MarketplaceAccountDto> {
   const response = await apiFetch("/marketplace-accounts", {
     method: "POST",
-    body: JSON.stringify({ marketplace }),
+    body: JSON.stringify(
+      nickname ? { marketplace, nickname } : { marketplace },
+    ),
   });
   if (!response.ok) {
     throw new ApiFetchError("Não foi possível criar a conta de marketplace.");
@@ -143,6 +150,78 @@ export async function fetchMarketplaceAnalyticsKpis(
     throw new ApiFetchError("Não foi possível carregar os KPIs agora.");
   }
   return (await response.json()) as MarketplaceAnalyticsKpisDto;
+}
+
+export async function fetchAmazonSetupStatus(): Promise<AmazonSetupStatusDto> {
+  const response = await apiFetch("/integrations/amazon/setup-status");
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível carregar o status da configuração Amazon.",
+    );
+  }
+  return (await response.json()) as AmazonSetupStatusDto;
+}
+
+/**
+ * Envia o Selling Partner ID e o refresh token para o backend, que os
+ * criptografa imediatamente (Checkpoint 4-C). Nunca inclui o LWA Client
+ * Secret — essa credencial de aplicação nunca sai do `.env` do backend.
+ */
+export async function provisionAmazonAccount(
+  accountId: string,
+  credentials: { sellingPartnerId: string; refreshToken: string },
+): Promise<MarketplaceAccountDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/amazon/provision`,
+    { method: "POST", body: JSON.stringify(credentials) },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível salvar as credenciais da conta Amazon.",
+    );
+  }
+  return (await response.json()) as MarketplaceAccountDto;
+}
+
+export async function verifyAmazonConnection(
+  accountId: string,
+): Promise<AmazonVerifyConnectionDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/amazon/verify`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível testar a conexão com a Amazon agora.",
+    );
+  }
+  return (await response.json()) as AmazonVerifyConnectionDto;
+}
+
+export interface AmazonSyncSummary {
+  syncRunId: string;
+  status: "SUCCESS";
+  dateFrom: string;
+  dateTo: string;
+  pagesFetched: number;
+  ordersFetched: number;
+  ordersUpserted: number;
+  itemsUpserted: number;
+}
+
+export async function syncAmazonOrders(
+  accountId: string,
+): Promise<AmazonSyncSummary> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/amazon/orders/sync`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível sincronizar agora. Tente novamente.",
+    );
+  }
+  return (await response.json()) as AmazonSyncSummary;
 }
 
 export async function syncMercadoLivreOrders(

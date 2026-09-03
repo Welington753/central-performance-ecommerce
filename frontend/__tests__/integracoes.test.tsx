@@ -17,6 +17,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import IntegracoesPage from "@/app/(protegido)/integracoes/page";
 import * as api from "@/lib/api";
+import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 
 jest.mock("next/navigation", () => ({
@@ -48,30 +49,51 @@ function mlAccount(
   };
 }
 
+function amazonAccount(
+  overrides: Partial<MarketplaceAccountDto> = {},
+): MarketplaceAccountDto {
+  return {
+    id: "amz-1",
+    marketplace: "AMAZON",
+    externalSellerId: null,
+    nickname: null,
+    status: "DISCONNECTED",
+    tokenExpiresAt: null,
+    lastSuccessfulSyncAt: null,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-01T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+function amazonSetupStatus(
+  overrides: Partial<AmazonSetupStatusDto> = {},
+): AmazonSetupStatusDto {
+  return {
+    applicationConfigured: true,
+    missingConfigurationKeys: [],
+    hasAccount: false,
+    accounts: [],
+    canProvision: true,
+    canVerify: false,
+    canSynchronize: false,
+    ...overrides,
+  };
+}
+
 beforeEach(() => {
   jest.resetAllMocks();
   mockSearchParams();
   (api.redirectTo as jest.Mock).mockImplementation(() => {});
+  // Default: aplicação configurada, sem conta Amazon ainda — testes de
+  // Mercado Livre que não se importam com Amazon usam este default e
+  // nunca precisam configurá-lo explicitamente.
+  (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+    amazonSetupStatus(),
+  );
 });
 
 describe("IntegracoesPage", () => {
-  it("renders Amazon and Shopee as static placeholders", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
-
-    render(<IntegracoesPage />);
-
-    expect(await screen.findByText("Amazon")).toBeInTheDocument();
-    expect(screen.getByText("Shopee")).toBeInTheDocument();
-    // Divergência mínima do plano: `MarketplaceCard` renderiza
-    // `Status: {statusLabel}` como um único elemento (design/convenção já
-    // usada em todas as outras asserções deste arquivo) — o texto
-    // completo inclui o prefixo "Status: ", então o matcher precisa dele
-    // também para casar com o `textContent` real do elemento.
-    expect(
-      screen.getAllByText("Status: Disponível futuramente"),
-    ).toHaveLength(2);
-  });
-
   it("shows an empty state with a 'Conectar Mercado Livre' button when no account exists yet", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
 
@@ -297,5 +319,289 @@ describe("IntegracoesPage", () => {
     expect(
       screen.queryByText("Conta do Mercado Livre conectada com sucesso."),
     ).not.toBeInTheDocument();
+  });
+});
+
+describe("IntegracoesPage — Amazon (Checkpoint 4-C)", () => {
+  it("Amazon never shows 'Disponível futuramente' anymore — Shopee still does", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+
+    render(<IntegracoesPage />);
+
+    await screen.findByText("Amazon");
+    expect(screen.getByText("Shopee")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Status: Disponível futuramente"),
+    ).toBeInTheDocument(); // só Shopee
+    expect(
+      screen.getAllByText("Status: Disponível futuramente"),
+    ).toHaveLength(1);
+  });
+
+  it("shows a 'Configurar Amazon' button and 'Conta Amazon ainda não configurada' when the app is configured but no account exists", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({ applicationConfigured: true, accounts: [] }),
+    );
+
+    render(<IntegracoesPage />);
+
+    expect(
+      await screen.findByText("Status: Conta Amazon ainda não configurada"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /configurar amazon/i }),
+    ).toBeEnabled();
+  });
+
+  it("shows 'Configuração do servidor pendente' with the missing variable NAMES (never a value) and never offers a Client Secret field", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        applicationConfigured: false,
+        missingConfigurationKeys: [
+          "AMAZON_LWA_CLIENT_SECRET",
+          "AMAZON_MARKETPLACE_IDS",
+        ],
+      }),
+    );
+
+    render(<IntegracoesPage />);
+
+    expect(
+      await screen.findByText(/configuração do servidor pendente/i),
+    ).toBeInTheDocument();
+    expect(screen.getByText(/AMAZON_LWA_CLIENT_SECRET/)).toBeInTheDocument();
+    expect(screen.getByText(/AMAZON_MARKETPLACE_IDS/)).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /configurar amazon/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText(/client secret/i)).not.toBeInTheDocument();
+  });
+
+  it("a DISCONNECTED account shows 'Aguardando credenciais' and 'Continuar configuração'", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        accounts: [amazonAccount({ status: "DISCONNECTED" })],
+      }),
+    );
+
+    render(<IntegracoesPage />);
+
+    expect(
+      await screen.findByText("Status: Aguardando credenciais"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /continuar configuração/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking 'Continuar configuração' opens the credentials modal for that account", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        accounts: [amazonAccount({ id: "amz-1", status: "DISCONNECTED" })],
+      }),
+    );
+
+    render(<IntegracoesPage />);
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: /continuar configuração/i }),
+    );
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    // Modo "credentials": sem campo de apelido.
+    expect(
+      screen.queryByLabelText(/apelido da conta/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("a CONNECTED account shows 'Conectado', the Selling Partner ID/nickname, 'Sincronizar agora' AND 'Reconfigurar credenciais'", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        canVerify: true,
+        canSynchronize: true,
+        accounts: [
+          amazonAccount({
+            status: "CONNECTED",
+            externalSellerId: "A1SELLERPARTNERID",
+            nickname: "Amazon principal",
+          }),
+        ],
+      }),
+    );
+
+    render(<IntegracoesPage />);
+
+    expect(await screen.findByText("Status: Conectado")).toBeInTheDocument();
+    expect(screen.getByText(/amazon principal/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /^sincronizar agora$/i }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /reconfigurar credenciais/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking 'Sincronizar agora' calls the EXISTING Amazon sync endpoint — never a duplicated sync implementation", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        canSynchronize: true,
+        accounts: [
+          amazonAccount({ id: "amz-1", status: "CONNECTED" }),
+        ],
+      }),
+    );
+    (api.syncAmazonOrders as jest.Mock).mockResolvedValue({
+      syncRunId: "run-1",
+      status: "SUCCESS",
+      dateFrom: "2026-07-01T00:00:00.000Z",
+      dateTo: "2026-09-01T00:00:00.000Z",
+      pagesFetched: 1,
+      ordersFetched: 0,
+      ordersUpserted: 0,
+      itemsUpserted: 0,
+    });
+
+    render(<IntegracoesPage />);
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: /^sincronizar agora$/i }),
+    );
+
+    await waitFor(() =>
+      expect(api.syncAmazonOrders).toHaveBeenCalledWith("amz-1"),
+    );
+  });
+
+  it("a sync failure shows a sanitized error message — never a raw exception", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        canSynchronize: true,
+        accounts: [amazonAccount({ id: "amz-1", status: "CONNECTED" })],
+      }),
+    );
+    (api.syncAmazonOrders as jest.Mock).mockRejectedValue(
+      new Error("PROVIDER_UNAVAILABLE"),
+    );
+
+    render(<IntegracoesPage />);
+    const user = userEvent.setup();
+    await user.click(
+      await screen.findByRole("button", { name: /^sincronizar agora$/i }),
+    );
+
+    expect(
+      await screen.findByText(/não foi possível sincronizar agora/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("PROVIDER_UNAVAILABLE")).not.toBeInTheDocument();
+  });
+
+  it.each([["TOKEN_EXPIRED"], ["ERROR"]] as const)(
+    "a %s account shows a sanitized error status and a 'Reconfigurar' button",
+    async (status) => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+      (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+        amazonSetupStatus({
+          hasAccount: true,
+          canVerify: true,
+          accounts: [amazonAccount({ status })],
+        }),
+      );
+
+      render(<IntegracoesPage />);
+
+      expect(
+        await screen.findByText("Status: Erro — reconexão necessária"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: /^reconfigurar$/i }),
+      ).toBeInTheDocument();
+    },
+  );
+
+  it("'Adicionar outra conta' (Amazon) is absent when there is no account yet", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({ accounts: [] }),
+    );
+
+    render(<IntegracoesPage />);
+    await screen.findByText("Status: Conta Amazon ainda não configurada");
+
+    expect(
+      screen.queryByRole("button", { name: /adicionar outra conta/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("'Adicionar outra conta' (Amazon) appears once at least one Amazon account already exists, and opens the create-mode modal", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        canSynchronize: true,
+        accounts: [amazonAccount({ status: "CONNECTED" })],
+      }),
+    );
+
+    render(<IntegracoesPage />);
+    const user = userEvent.setup();
+    const addButton = await screen.findByRole("button", {
+      name: /adicionar outra conta/i,
+    });
+    await user.click(addButton);
+
+    expect(screen.getByRole("dialog")).toBeInTheDocument();
+    expect(screen.getByLabelText(/apelido da conta/i)).toBeInTheDocument();
+  });
+
+  it("a load error for the Amazon status shows a dedicated message — never a false empty/disconnected card", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockRejectedValue(
+      new Error("network down"),
+    );
+
+    render(<IntegracoesPage />);
+
+    expect(
+      await screen.findByText(
+        /não foi possível carregar o status da configuração amazon/i,
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Status: Conta Amazon ainda não configurada"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("Mercado Livre keeps working exactly as before, unaffected by the Amazon section", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({ id: "acc-1", status: "CONNECTED", nickname: "Loja ML" }),
+    ]);
+    (api.fetchAmazonSetupStatus as jest.Mock).mockResolvedValue(
+      amazonSetupStatus({
+        hasAccount: true,
+        canSynchronize: true,
+        accounts: [amazonAccount({ status: "CONNECTED" })],
+      }),
+    );
+
+    render(<IntegracoesPage />);
+
+    const mlCard = await screen.findByTestId("marketplace-account-acc-1");
+    expect(within(mlCard).getByText(/loja ml/i)).toBeInTheDocument();
+    expect(within(mlCard).getByText("Status: Conectado")).toBeInTheDocument();
+    expect(
+      within(mlCard).getByRole("button", { name: /reconectar/i }),
+    ).toBeInTheDocument();
   });
 });
