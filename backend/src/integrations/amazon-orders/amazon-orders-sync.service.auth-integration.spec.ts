@@ -147,6 +147,11 @@ describe('AmazonOrdersSyncService + real AmazonAuthService — forced renewal af
         ordersUpdated: 0,
         itemsPersisted: 0,
       }),
+      getAccountSyncCoverage: jest.fn().mockResolvedValue({
+        intervals: [],
+        oldestFrom: null,
+        oldestRunRecordsRead: null,
+      }),
     };
     const sleep = jest.fn().mockResolvedValue(undefined);
     const clock = () => new Date('2026-08-20T15:00:00.000Z');

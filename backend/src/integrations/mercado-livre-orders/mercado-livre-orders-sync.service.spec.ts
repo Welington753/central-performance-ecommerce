@@ -93,6 +93,15 @@ function buildService(
       itemsPersisted: 0,
     }),
     markAccountSynced: jest.fn().mockResolvedValue(undefined),
+    // Sem cobertura prévia por padrão: os testes que não mexem com janela
+    // continuam exercitando o mesmo caminho de sempre (primeira
+    // sincronização = janela inicial de 60 dias via
+    // `computeIncrementalSyncWindow([], now)`).
+    getAccountSyncCoverage: jest.fn().mockResolvedValue({
+      intervals: [],
+      oldestFrom: null,
+      oldestRunRecordsRead: null,
+    }),
     ...overrides.persistence,
   };
 
@@ -373,5 +382,78 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
       'acc-1',
       expect.any(Date),
     );
+  });
+
+  describe('incremental window (Fase 4, "Histórico completo")', () => {
+    it('uses the full 60-day initial window on the very first sync (no prior coverage)', async () => {
+      let captured: { periodFrom: Date; periodTo: Date } | undefined;
+      const { service } = buildService({
+        persistence: {
+          beginSyncRun: jest.fn((input: typeof captured) => {
+            captured = input;
+            return Promise.resolve('run-1');
+          }),
+        },
+      });
+
+      await service.syncOrders('acc-1');
+
+      const spanDays = Math.round(
+        (captured!.periodTo.getTime() - captured!.periodFrom.getTime()) /
+          (24 * 60 * 60 * 1000),
+      );
+      expect(spanDays).toBe(60);
+    });
+
+    it('continues from the last covered edge on a recurring sync — never the full 60 days again', async () => {
+      let captured: { periodFrom: Date } | undefined;
+      const { service } = buildService({
+        persistence: {
+          beginSyncRun: jest.fn((input: typeof captured) => {
+            captured = input;
+            return Promise.resolve('run-1');
+          }),
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [
+              {
+                from: new Date('2026-07-01T00:00:00.000Z'),
+                to: new Date('2026-08-30T00:00:00.000Z'),
+              },
+            ],
+            oldestFrom: new Date('2026-07-01T00:00:00.000Z'),
+            oldestRunRecordsRead: 10,
+          }),
+        },
+      });
+
+      await service.syncOrders('acc-1');
+
+      expect(captured!.periodFrom.toISOString()).toBe(
+        '2026-08-29T00:00:00.000Z',
+      );
+    });
+
+    it('accepts an explicit windowOverride and type — reused by the historical backfill', async () => {
+      const { service, persistence } = buildService();
+      const windowOverride = {
+        from: new Date('2025-01-01T00:00:00.000Z'),
+        to: new Date('2025-02-01T00:00:00.000Z'),
+      };
+
+      await service.syncOrders('acc-1', {
+        windowOverride,
+        type: 'INITIAL' as never,
+      });
+
+      expect(persistence.beginSyncRun).toHaveBeenCalledWith(
+        expect.objectContaining({
+          periodFrom: windowOverride.from,
+          periodTo: windowOverride.to,
+          type: 'INITIAL',
+        }),
+      );
+      // Nunca consulta a cobertura quando a janela já veio explícita.
+      expect(persistence.getAccountSyncCoverage).not.toHaveBeenCalled();
+    });
   });
 });

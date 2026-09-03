@@ -223,14 +223,14 @@ export class MarketplaceOrdersPersistenceService {
    * operação normal.
    */
   async recoverStaleRunningRuns(staleAfterMs: number): Promise<number> {
-    const [rows] = (await this.dataSource.query(
+    const [rows] = await this.dataSource.query<[Array<{ id: string }>, number]>(
       `UPDATE sync_runs
           SET status = 'FAILED', finished_at = now(), error_code = 'STALE_RUN_RECOVERED',
               error_summary = 'Execução interrompida (processo reiniciado ou travado) — recuperada automaticamente.'
         WHERE status = 'RUNNING' AND started_at < now() - ($1 || ' milliseconds')::interval
         RETURNING id`,
       [staleAfterMs],
-    )) as [Array<{ id: string }>, number];
+    );
     return rows.length;
   }
 

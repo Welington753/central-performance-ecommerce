@@ -22,7 +22,11 @@ import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
-import { computeInitialSyncWindow } from '../marketplace-orders/period.util';
+import {
+  computeIncrementalSyncWindow,
+  type PeriodWindow,
+} from '../marketplace-orders/period.util';
+import { SyncRunType } from '../../sync/sync-run.entity';
 
 export type SyncOrdersErrorCode =
   | 'ACCOUNT_NOT_CONNECTED'
@@ -105,7 +109,22 @@ export class MercadoLivreOrdersSyncService {
     private readonly persistence: MarketplaceOrdersPersistenceService,
   ) {}
 
-  async syncOrders(accountId: string): Promise<SyncOrdersSummary> {
+  /**
+   * `windowOverride`/`type` (Fase 4, "Histórico completo") existem só para o
+   * backfill histórico (`MarketplaceBackfillService`) reaproveitar esta MESMA
+   * implementação — nenhum caminho de negócio novo, nenhuma cópia de
+   * `fetchAllPages`/persistência. Sem `windowOverride` (botão manual
+   * "Sincronizar agora" e o ciclo automático), a janela é sempre INCREMENTAL:
+   * continua de onde a última sincronização bem-sucedida parou (com 1 dia de
+   * sobreposição de segurança), nunca os últimos 60 dias inteiros de novo —
+   * a única exceção é a primeiríssima sincronização desta conta, que ainda
+   * usa os 60 dias iniciais (via `computeIncrementalSyncWindow` sem
+   * cobertura prévia).
+   */
+  async syncOrders(
+    accountId: string,
+    options: { windowOverride?: PeriodWindow; type?: SyncRunType } = {},
+  ): Promise<SyncOrdersSummary> {
     const account =
       await this.marketplaceAccountsService.findByIdOrFail(accountId);
 
@@ -122,7 +141,11 @@ export class MercadoLivreOrdersSyncService {
 
     const startedAt = new Date();
     const { from: periodFrom, to: periodTo } =
-      computeInitialSyncWindow(startedAt);
+      options.windowOverride ??
+      computeIncrementalSyncWindow(
+        (await this.persistence.getAccountSyncCoverage(accountId)).intervals,
+        startedAt,
+      );
 
     let syncRunId: string;
     try {
@@ -132,6 +155,7 @@ export class MercadoLivreOrdersSyncService {
         periodFrom,
         periodTo,
         startedAt,
+        type: options.type,
       });
     } catch (error) {
       if (error instanceof SyncAlreadyRunningError) {

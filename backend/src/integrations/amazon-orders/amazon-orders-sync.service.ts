@@ -9,7 +9,7 @@ import {
   SyncAlreadyRunningError,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
 import {
-  computeInitialSyncWindow,
+  computeIncrementalSyncWindow,
   dateOnlyToUtcInstant,
   addDaysToDateOnly,
   parseDateOnlyStrict,
@@ -18,6 +18,7 @@ import {
   InvalidKpiPeriodError,
   type PeriodWindow,
 } from '../marketplace-orders/period.util';
+import type { SyncRunType } from '../../sync/sync-run.entity';
 import { loadAmazonConfig } from '../amazon-sp-api/amazon-config';
 import { AmazonAuthService } from '../amazon-sp-api/amazon-auth.service';
 import {
@@ -145,6 +146,7 @@ export class AmazonOrdersSyncService {
   async syncOrders(
     accountId: string,
     input: AmazonOrdersSyncInput = {},
+    options: { type?: SyncRunType } = {},
   ): Promise<AmazonOrdersSyncSummary> {
     const account =
       await this.marketplaceAccountsService.findByIdOrFail(accountId);
@@ -169,7 +171,7 @@ export class AmazonOrdersSyncService {
     }
 
     const now = this.clock();
-    const window = this.resolveWindow(input, now);
+    const window = await this.resolveWindow(accountId, input, now);
 
     const startedAt = new Date();
     let syncRunId: string;
@@ -180,6 +182,7 @@ export class AmazonOrdersSyncService {
         periodFrom: window.from,
         periodTo: window.to,
         startedAt,
+        type: options.type,
       });
     } catch (error) {
       if (error instanceof SyncAlreadyRunningError) {
@@ -322,16 +325,28 @@ export class AmazonOrdersSyncService {
    * `createdBefore` esteja pelo menos dois minutos no passado); um período
    * customizado que inclua hoje é silenciosamente limitado a esse cutoff —
    * é ISSO que vai para `sync_runs.date_to`, nunca o fim solicitado.
+   *
+   * Sem `from`/`to` explícitos (botão "Sincronizar agora"/ciclo automático,
+   * Fase 4 "Histórico completo"): a janela é sempre INCREMENTAL a partir da
+   * cobertura já sincronizada com sucesso — nunca os 60 dias inteiros de
+   * novo a cada execução. Só a primeiríssima sincronização desta conta (sem
+   * nenhum run SUCCESS ainda) usa a janela inicial de 60 dias.
    */
-  private resolveWindow(input: AmazonOrdersSyncInput, now: Date): PeriodWindow {
+  private async resolveWindow(
+    accountId: string,
+    input: AmazonOrdersSyncInput,
+    now: Date,
+  ): Promise<PeriodWindow> {
     const hasFrom = input.from !== undefined && input.from !== '';
     const hasTo = input.to !== undefined && input.to !== '';
     const cutoff = new Date(now.getTime() - MIN_SEARCH_BEFORE_BUFFER_MS);
 
     if (!hasFrom && !hasTo) {
-      const initial = computeInitialSyncWindow(now);
-      const to = initial.to.getTime() > cutoff.getTime() ? cutoff : initial.to;
-      return { from: initial.from, to };
+      const coverage = await this.persistence.getAccountSyncCoverage(accountId);
+      const incremental = computeIncrementalSyncWindow(coverage.intervals, now);
+      const to =
+        incremental.to.getTime() > cutoff.getTime() ? cutoff : incremental.to;
+      return { from: incremental.from, to };
     }
     if (hasFrom !== hasTo) {
       throw new AmazonOrdersSyncError('INVALID_PERIOD');

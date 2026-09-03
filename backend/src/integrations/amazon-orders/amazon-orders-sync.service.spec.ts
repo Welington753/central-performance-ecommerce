@@ -132,6 +132,11 @@ function buildService(
       ordersUpdated: 0,
       itemsPersisted: 0,
     }),
+    getAccountSyncCoverage: jest.fn().mockResolvedValue({
+      intervals: [],
+      oldestFrom: null,
+      oldestRunRecordsRead: null,
+    }),
     ...overrides.persistence,
   };
   const configValues: Record<string, unknown> =
@@ -713,5 +718,55 @@ describe('AmazonOrdersSyncService — accepted allowlist on the returned summary
     );
     expect(JSON.stringify(result)).not.toContain('SHOULD_NEVER_LEAK');
     expect(JSON.stringify(result)).not.toContain('access-token');
+  });
+
+  describe('incremental window (Fase 4, "Histórico completo")', () => {
+    it('uses the full 60-day initial window on the very first sync (no prior coverage)', async () => {
+      let captured: { periodFrom: Date; periodTo: Date } | undefined;
+      const { service } = buildService({
+        persistence: {
+          beginSyncRun: jest.fn((input: typeof captured) => {
+            captured = input;
+            return Promise.resolve('run-1');
+          }),
+        },
+      });
+
+      await service.syncOrders('acc-amazon-1');
+
+      const spanDays = Math.round(
+        (captured!.periodTo.getTime() - captured!.periodFrom.getTime()) /
+          (24 * 60 * 60 * 1000),
+      );
+      expect(spanDays).toBe(60);
+    });
+
+    it('continues from the last covered edge on a recurring sync — never the full 60 days again', async () => {
+      let captured: { periodFrom: Date } | undefined;
+      const { service } = buildService({
+        persistence: {
+          beginSyncRun: jest.fn((input: typeof captured) => {
+            captured = input;
+            return Promise.resolve('run-1');
+          }),
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [
+              {
+                from: new Date('2026-06-01T00:00:00.000Z'),
+                to: new Date('2026-08-19T00:00:00.000Z'),
+              },
+            ],
+            oldestFrom: new Date('2026-06-01T00:00:00.000Z'),
+            oldestRunRecordsRead: 10,
+          }),
+        },
+      });
+
+      await service.syncOrders('acc-amazon-1');
+
+      expect(captured!.periodFrom.toISOString()).toBe(
+        '2026-08-18T00:00:00.000Z',
+      );
+    });
   });
 });
