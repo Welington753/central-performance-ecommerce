@@ -101,4 +101,56 @@ describe("DateRangeFilter", () => {
       to: dateOnlyToString(last30.to),
     });
   });
+
+  it("does not render 'Todo o período' when onAllTimeChange is not provided", () => {
+    render(
+      <DateRangeFilter from="2026-08-01" to="2026-08-05" onChange={jest.fn()} />,
+    );
+    expect(
+      screen.queryByRole("button", { name: /todo o período/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("'Todo o período' calls onAllTimeChange and hides the date pickers", async () => {
+    const onAllTimeChange = jest.fn();
+    const user = userEvent.setup();
+    render(
+      <DateRangeFilter
+        from="2026-08-01"
+        to="2026-08-05"
+        onChange={jest.fn()}
+        onAllTimeChange={onAllTimeChange}
+      />,
+    );
+
+    await user.click(screen.getByRole("button", { name: /personalizado/i }));
+    expect(screen.getByLabelText("Data inicial")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: /todo o período/i }));
+
+    expect(onAllTimeChange).toHaveBeenCalledTimes(1);
+    expect(screen.queryByLabelText("Data inicial")).not.toBeInTheDocument();
+  });
+
+  it("shows 'Todo o período' as active and hides preset/custom highlighting when allTime is true", () => {
+    render(
+      <DateRangeFilter
+        from="2026-08-01"
+        to="2026-08-05"
+        allTime
+        onChange={jest.fn()}
+        onAllTimeChange={jest.fn()}
+      />,
+    );
+
+    expect(
+      screen.getByRole("button", { name: /todo o período/i }),
+    ).toHaveAttribute("aria-pressed", "true");
+    expect(
+      screen.getByRole("button", { name: "Últimos 30 dias" }),
+    ).toHaveAttribute("aria-pressed", "false");
+    expect(
+      screen.getByText(/sem comparação com período anterior/i),
+    ).toBeInTheDocument();
+  });
 });

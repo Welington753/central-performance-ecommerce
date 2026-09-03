@@ -150,7 +150,14 @@ export interface AnalyticsDataCoverage {
  * individual ou qualquer resposta bruta de marketplace — só agregados.
  */
 export interface MarketplaceAnalyticsKpisResponseDto {
-  scope: { marketplace: MarketplaceFilter; accountId: string | null };
+  scope: {
+    marketplace: MarketplaceFilter;
+    accountId: string | null;
+    /** "Todo o período" (Fase 4): quando `true`, `comparison` é sempre
+     * `null` e `comparisonPeriod` não deve ser exibido — o frontend nunca
+     * mostra percentuais comparativos neste modo. */
+    allTime: boolean;
+  };
   availability: SourceAvailability;
   period: { days: number; timeZone: string; from: string; to: string };
   comparisonPeriod: { days: number; from: string; to: string };

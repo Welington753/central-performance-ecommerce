@@ -142,7 +142,11 @@ export interface AnalyticsDataCoverage {
 }
 
 export interface MarketplaceAnalyticsKpisDto {
-  scope: { marketplace: MarketplaceFilter; accountId: string | null };
+  scope: {
+    marketplace: MarketplaceFilter;
+    accountId: string | null;
+    allTime: boolean;
+  };
   availability: SourceAvailability;
   period: { days: number; timeZone: string; from: string; to: string };
   comparisonPeriod: { days: number; from: string; to: string };

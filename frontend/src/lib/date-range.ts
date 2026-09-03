@@ -7,7 +7,11 @@
 
 const SAO_PAULO_OFFSET_MS = 3 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
-export const MAX_RANGE_DAYS = 366;
+// Fase 4 ("Todo o período"): sem limite artificial de ~1 ano no
+// personalizado — mantém apenas um teto de sanidade bem acima de qualquer
+// intervalo real (espelha `NO_PRACTICAL_RANGE_CAP_DAYS` no backend,
+// `marketplace-analytics.service.ts`), nunca usado como cálculo de negócio.
+export const MAX_RANGE_DAYS = 36500;
 
 export interface DateOnly {
   year: number;

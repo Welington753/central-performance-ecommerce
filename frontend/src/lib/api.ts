@@ -172,16 +172,25 @@ export async function fetchMercadoLivreKpis(
 export class InvalidAnalyticsFilterApiError extends ApiFetchError {}
 
 export interface MarketplaceAnalyticsQuery {
-  from: string;
-  to: string;
+  // Ausentes quando `allTime` é true — o backend ignora `from`/`to` nesse
+  // modo (Fase 4, "Todo o período").
+  from?: string;
+  to?: string;
   marketplace?: MarketplaceFilter;
   accountId?: string;
+  allTime?: boolean;
 }
 
 export async function fetchMarketplaceAnalyticsKpis(
   query: MarketplaceAnalyticsQuery,
 ): Promise<MarketplaceAnalyticsKpisDto> {
-  const params = new URLSearchParams({ from: query.from, to: query.to });
+  const params = new URLSearchParams();
+  if (query.allTime) {
+    params.set("allTime", "true");
+  } else {
+    if (query.from) params.set("from", query.from);
+    if (query.to) params.set("to", query.to);
+  }
   if (query.marketplace && query.marketplace !== "ALL") {
     params.set("marketplace", query.marketplace);
   }

@@ -14,7 +14,9 @@ import {
 interface DateRangeFilterProps {
   from: string;
   to: string;
+  allTime?: boolean;
   onChange: (range: { from: string; to: string }) => void;
+  onAllTimeChange?: () => void;
 }
 
 const DEFAULT_RANGE_DAYS = 30;
@@ -33,9 +35,15 @@ function matchingPreset(from: string, to: string): PeriodPresetKey | null {
   return null;
 }
 
-export function DateRangeFilter({ from, to, onChange }: DateRangeFilterProps) {
+export function DateRangeFilter({
+  from,
+  to,
+  allTime = false,
+  onChange,
+  onAllTimeChange,
+}: DateRangeFilterProps) {
   const activePreset = matchingPreset(from, to);
-  const [customOpen, setCustomOpen] = useState(activePreset === null);
+  const [customOpen, setCustomOpen] = useState(!allTime && activePreset === null);
   const [draftFrom, setDraftFrom] = useState(from);
   const [draftTo, setDraftTo] = useState(to);
   const [error, setError] = useState<string | null>(null);
@@ -97,10 +105,10 @@ export function DateRangeFilter({ from, to, onChange }: DateRangeFilterProps) {
           <button
             key={preset.key}
             type="button"
-            aria-pressed={activePreset === preset.key && !customOpen}
+            aria-pressed={!allTime && activePreset === preset.key && !customOpen}
             onClick={() => applyPreset(preset.key)}
             className={`rounded-md border px-3 py-1.5 text-sm font-medium ${
-              activePreset === preset.key && !customOpen
+              !allTime && activePreset === preset.key && !customOpen
                 ? "border-brand bg-brand/10 text-brand"
                 : "border-border-subtle hover:bg-foreground/5"
             }`}
@@ -110,19 +118,42 @@ export function DateRangeFilter({ from, to, onChange }: DateRangeFilterProps) {
         ))}
         <button
           type="button"
-          aria-pressed={customOpen}
+          aria-pressed={!allTime && customOpen}
           onClick={openCustom}
           className={`rounded-md border px-3 py-1.5 text-sm font-medium ${
-            customOpen
+            !allTime && customOpen
               ? "border-brand bg-brand/10 text-brand"
               : "border-border-subtle hover:bg-foreground/5"
           }`}
         >
           Personalizado
         </button>
+        {onAllTimeChange ? (
+          <button
+            type="button"
+            aria-pressed={allTime}
+            onClick={() => {
+              setCustomOpen(false);
+              setError(null);
+              onAllTimeChange();
+            }}
+            className={`rounded-md border px-3 py-1.5 text-sm font-medium ${
+              allTime
+                ? "border-brand bg-brand/10 text-brand"
+                : "border-border-subtle hover:bg-foreground/5"
+            }`}
+          >
+            Todo o período
+          </button>
+        ) : null}
       </div>
 
-      {customOpen ? (
+      {allTime ? (
+        <p className="border-t border-border-subtle pt-3 text-sm text-foreground/60">
+          Consultando da primeira à última venda registrada — sem comparação
+          com período anterior.
+        </p>
+      ) : customOpen ? (
         <div className="flex flex-col gap-3 border-t border-border-subtle pt-3 sm:flex-row sm:items-end sm:gap-4">
           <label className="flex flex-col gap-1 text-sm">
             <span className="text-foreground/60">Data inicial</span>

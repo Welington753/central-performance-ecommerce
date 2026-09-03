@@ -78,7 +78,7 @@ function analyticsDto(
   overrides: Partial<MarketplaceAnalyticsKpisDto> = {},
 ): MarketplaceAnalyticsKpisDto {
   return {
-    scope: { marketplace: "ALL", accountId: null },
+    scope: { marketplace: "ALL", accountId: null, allTime: false },
     availability: "AVAILABLE",
     period: { days: 30, timeZone: "America/Sao_Paulo", from: "2026-08-03", to: "2026-09-01" },
     comparisonPeriod: { days: 30, from: "2026-07-04", to: "2026-08-02" },
@@ -340,7 +340,7 @@ describe("DashboardPage", () => {
   it("persists marketplace and accountId already present in the URL, and forwards them to the fetch", async () => {
     mockSearchParams({ marketplace: "MERCADO_LIVRE", accountId: "acc-1", from: "2026-08-01", to: "2026-08-31" });
     (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
-      analyticsDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: "acc-1" } }),
+      analyticsDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: "acc-1", allTime: false } }),
     );
     render(<DashboardPage />);
     await waitFor(() =>
@@ -499,7 +499,7 @@ describe("DashboardPage", () => {
       // B termina primeiro.
       resolveB(
         analyticsDto({
-          scope: { marketplace: "MERCADO_LIVRE", accountId: null },
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "222.00",
@@ -514,7 +514,7 @@ describe("DashboardPage", () => {
       // A termina depois (mais devagar) — nunca pode substituir B.
       resolveA(
         analyticsDto({
-          scope: { marketplace: "ALL", accountId: null },
+          scope: { marketplace: "ALL", accountId: null, allTime: false },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "111.00",
@@ -574,7 +574,7 @@ describe("DashboardPage", () => {
       // B (acc-2) termina primeiro.
       resolveAcc2(
         analyticsDto({
-          scope: { marketplace: "ALL", accountId: "acc-2" },
+          scope: { marketplace: "ALL", accountId: "acc-2", allTime: false },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "222.00",
@@ -589,7 +589,7 @@ describe("DashboardPage", () => {
       // A (acc-1) termina depois — nunca pode substituir B.
       resolveAcc1(
         analyticsDto({
-          scope: { marketplace: "ALL", accountId: "acc-1" },
+          scope: { marketplace: "ALL", accountId: "acc-1", allTime: false },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "111.00",

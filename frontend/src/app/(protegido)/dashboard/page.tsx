@@ -28,9 +28,34 @@ import {
 import { formatDateTimeSaoPaulo } from "@/lib/kpi-format";
 import type {
   AccountBreakdownEntry,
+  AnalyticsComparison,
   MarketplaceAnalyticsKpisDto,
   MarketplaceFilter,
 } from "@/types/marketplace-analytics";
+
+// Usado só quando `allTime` está ativo e `comparison` do backend é `null`
+// (Fase 4, "Todo o período" nunca calcula comparação) — todo card de
+// comparação já trata cada `*Pct: null` renderizando "—"/"Sem base no
+// período anterior", então isto apenas evita passar `null` para
+// componentes cujo `comparison` ainda é obrigatório, sem tocar em nenhum
+// deles.
+const EMPTY_COMPARISON: AnalyticsComparison = {
+  grossRevenuePct: null,
+  ordersPct: null,
+  unitsPct: null,
+  averageTicketPct: null,
+  cancelledOrdersPct: null,
+  cancellationRateDiffPp: 0,
+  distinctProductsPct: null,
+  unitsPerOrderPct: null,
+  grossSalesRevenuePct: null,
+  grossSalesOrdersPct: null,
+  grossSalesUnitsPct: null,
+  grossSalesAverageTicketPct: null,
+  grossSalesAvgUnitPricePct: null,
+  cancelledUnitsPct: null,
+  cancelledRevenuePct: null,
+};
 
 const MARKETPLACE_FILTER_VALUES: MarketplaceFilter[] = [
   "ALL",
@@ -159,6 +184,10 @@ function readAccountIdFromParams(searchParams: URLSearchParams): string | null {
   return searchParams.get("accountId") || null;
 }
 
+function readAllTimeFromParams(searchParams: URLSearchParams): boolean {
+  return searchParams.get("period") === "all";
+}
+
 function scopeTitle(marketplace: MarketplaceFilter): string {
   switch (marketplace) {
     case "ALL":
@@ -215,13 +244,23 @@ function DashboardContent() {
   const effectiveTo = effectivePeriod?.to ?? null;
   const marketplace = readMarketplaceFromParams(searchParams);
   const accountId = readAccountIdFromParams(searchParams);
+  const allTime = readAllTimeFromParams(searchParams);
 
   const loadScope = useCallback(
-    async (from: string, to: string, mkt: MarketplaceFilter) => {
+    async (
+      from: string | null,
+      to: string | null,
+      mkt: MarketplaceFilter,
+      allTimeFlag: boolean,
+    ) => {
       const seq = ++scopeRequestSeqRef.current;
-      const key = `${mkt}|${from}|${to}`;
+      const key = allTimeFlag ? `ALLTIME|${mkt}` : `${mkt}|${from}|${to}`;
       try {
-        const data = await fetchMarketplaceAnalyticsKpis({ from, to, marketplace: mkt });
+        const data = await fetchMarketplaceAnalyticsKpis(
+          allTimeFlag
+            ? { marketplace: mkt, allTime: true }
+            : { from: from as string, to: to as string, marketplace: mkt },
+        );
         // Uma requisição mais nova já começou enquanto esta estava em voo —
         // esta resposta chegou tarde demais e nunca pode substituir o
         // escopo atual (nem sucesso, nem erro, nem a chave de carregamento).
@@ -248,23 +287,35 @@ function DashboardContent() {
   useEffect(() => {
     // Primeira instrução é o `await` dentro de `loadScope` — nenhum
     // `setState` roda de forma síncrona no corpo deste efeito.
-    if (!effectiveFrom || !effectiveTo) return;
+    if (!allTime && (!effectiveFrom || !effectiveTo)) return;
     void (async () => {
-      await loadScope(effectiveFrom, effectiveTo, marketplace);
+      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime);
     })();
-  }, [effectiveFrom, effectiveTo, marketplace, loadScope]);
+  }, [effectiveFrom, effectiveTo, marketplace, allTime, loadScope]);
 
   const loadAccountScoped = useCallback(
-    async (from: string, to: string, mkt: MarketplaceFilter, account: string) => {
+    async (
+      from: string | null,
+      to: string | null,
+      mkt: MarketplaceFilter,
+      account: string,
+      allTimeFlag: boolean,
+    ) => {
       const seq = ++accountScopedRequestSeqRef.current;
-      const key = `${mkt}|${account}|${from}|${to}`;
+      const key = allTimeFlag
+        ? `ALLTIME|${mkt}|${account}`
+        : `${mkt}|${account}|${from}|${to}`;
       try {
-        const data = await fetchMarketplaceAnalyticsKpis({
-          from,
-          to,
-          marketplace: mkt,
-          accountId: account,
-        });
+        const data = await fetchMarketplaceAnalyticsKpis(
+          allTimeFlag
+            ? { marketplace: mkt, accountId: account, allTime: true }
+            : {
+                from: from as string,
+                to: to as string,
+                marketplace: mkt,
+                accountId: account,
+              },
+        );
         if (accountScopedRequestSeqRef.current !== seq) return;
         setAccountScopedData(data);
         setAccountScopedError(false);
@@ -282,21 +333,34 @@ function DashboardContent() {
   );
 
   useEffect(() => {
-    if (!effectiveFrom || !effectiveTo || !accountId) return;
+    if (!accountId) return;
+    if (!allTime && (!effectiveFrom || !effectiveTo)) return;
     void (async () => {
-      await loadAccountScoped(effectiveFrom, effectiveTo, marketplace, accountId);
+      await loadAccountScoped(
+        effectiveFrom,
+        effectiveTo,
+        marketplace,
+        accountId,
+        allTime,
+      );
     })();
-  }, [effectiveFrom, effectiveTo, marketplace, accountId, loadAccountScoped]);
+  }, [effectiveFrom, effectiveTo, marketplace, accountId, allTime, loadAccountScoped]);
 
-  const scopeRequestExpectedKey =
-    effectiveFrom && effectiveTo ? `${marketplace}|${effectiveFrom}|${effectiveTo}` : null;
+  const scopeRequestExpectedKey = allTime
+    ? `ALLTIME|${marketplace}`
+    : effectiveFrom && effectiveTo
+      ? `${marketplace}|${effectiveFrom}|${effectiveTo}`
+      : null;
   const scopeLoading =
     scopeRequestExpectedKey !== null && scopeRequestKey !== scopeRequestExpectedKey;
 
-  const accountRequestExpectedKey =
-    effectiveFrom && effectiveTo && accountId
-      ? `${marketplace}|${accountId}|${effectiveFrom}|${effectiveTo}`
-      : null;
+  const accountRequestExpectedKey = !accountId
+    ? null
+    : allTime
+      ? `ALLTIME|${marketplace}|${accountId}`
+      : effectiveFrom && effectiveTo
+        ? `${marketplace}|${accountId}|${effectiveFrom}|${effectiveTo}`
+        : null;
   const accountScopedLoading =
     accountRequestExpectedKey !== null &&
     accountScopedRequestKey !== accountRequestExpectedKey;
@@ -307,8 +371,18 @@ function DashboardContent() {
 
   function handlePeriodChange(range: { from: string; to: string }) {
     const params = new URLSearchParams(searchParams.toString());
+    // Escolher um período explícito sempre sai de "Todo o período".
+    params.delete("period");
     params.set("from", range.from);
     params.set("to", range.to);
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }
+
+  function handleAllTimeChange() {
+    const params = new URLSearchParams(searchParams.toString());
+    params.set("period", "all");
+    params.delete("from");
+    params.delete("to");
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }
 
@@ -328,11 +402,17 @@ function DashboardContent() {
   }
 
   async function reloadCurrentScope() {
-    if (!effectiveFrom || !effectiveTo) return;
+    if (!allTime && (!effectiveFrom || !effectiveTo)) return;
     if (accountId) {
-      await loadAccountScoped(effectiveFrom, effectiveTo, marketplace, accountId);
+      await loadAccountScoped(
+        effectiveFrom,
+        effectiveTo,
+        marketplace,
+        accountId,
+        allTime,
+      );
     } else {
-      await loadScope(effectiveFrom, effectiveTo, marketplace);
+      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime);
     }
   }
 
@@ -387,7 +467,8 @@ function DashboardContent() {
         <ErrorBlock
           message="Não foi possível carregar os dados de marketplaces. Tente novamente mais tarde."
           onRetry={() =>
-            effectiveFrom && effectiveTo && void loadScope(effectiveFrom, effectiveTo, marketplace)
+            (allTime || (effectiveFrom && effectiveTo)) &&
+            void loadScope(effectiveFrom, effectiveTo, marketplace, allTime)
           }
         />
       </div>
@@ -474,7 +555,9 @@ function DashboardContent() {
         <DateRangeFilter
           from={effectivePeriod.from}
           to={effectivePeriod.to}
+          allTime={allTime}
           onChange={handlePeriodChange}
+          onAllTimeChange={handleAllTimeChange}
         />
       ) : null}
 
@@ -553,13 +636,14 @@ function DashboardContent() {
               message="Não foi possível carregar os KPIs agora."
               onRetry={() => void reloadCurrentScope()}
             />
-          ) : displayData?.summary && displayData.comparison ? (
+          ) : displayData?.summary &&
+            (displayData.comparison || displayData.scope.allTime) ? (
             <div className="flex flex-col gap-6">
               <DataCoverageBanner coverage={displayData.dataCoverage} />
 
               <KpiSummaryCards
                 summary={displayData.summary}
-                comparison={displayData.comparison}
+                comparison={displayData.comparison ?? EMPTY_COMPARISON}
               />
               <p className="text-xs text-foreground/50">
                 Vendas brutas: pedidos pagos + pedidos cancelados com valor
@@ -568,18 +652,18 @@ function DashboardContent() {
 
               <OperationalKpiCards
                 summary={displayData.summary}
-                comparison={displayData.comparison}
+                comparison={displayData.comparison ?? EMPTY_COMPARISON}
               />
 
               <AdditionalKpiCards
                 summary={displayData.summary}
-                comparison={displayData.comparison}
+                comparison={displayData.comparison ?? EMPTY_COMPARISON}
                 bestDay={displayData.bestDay}
               />
 
               <CancellationsPanel
                 summary={displayData.summary}
-                comparison={displayData.comparison}
+                comparison={displayData.comparison ?? EMPTY_COMPARISON}
               />
 
               <div className="flex flex-col gap-3">

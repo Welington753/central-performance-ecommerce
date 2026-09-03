@@ -65,7 +65,7 @@ function kpisDto(
   overrides: Partial<MarketplaceAnalyticsKpisDto> = {},
 ): MarketplaceAnalyticsKpisDto {
   return {
-    scope: { marketplace: "ALL", accountId: null },
+    scope: { marketplace: "ALL", accountId: null, allTime: false },
     availability: "AVAILABLE",
     period: { days: 30, timeZone: "America/Sao_Paulo", from: "2026-08-01", to: "2026-08-30" },
     comparisonPeriod: { days: 30, from: "2026-07-01", to: "2026-07-31" },
@@ -278,7 +278,7 @@ describe("DashboardPage — resultado da sincronização", () => {
   it("preserva o período/marketplace do filtro atual ao recarregar os KPIs após sincronizar", async () => {
     mockSearchParams({ from: "2026-06-01", to: "2026-06-30", marketplace: "MERCADO_LIVRE" });
     await renderDashboardWithScope(
-      kpisDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: null } }),
+      kpisDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false } }),
     );
     api.syncMercadoLivreOrders.mockResolvedValueOnce({ status: "SUCCESS" });
     api.fetchMarketplaceAnalyticsKpis.mockResolvedValueOnce(kpisDto());
@@ -312,15 +312,103 @@ describe("DashboardPage — troca de filtro durante uma sincronização em andam
     await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
 
     // A resposta mais antiga (escopo ALL) chega DEPOIS da mais nova — nunca pode vencer.
-    first.resolve(kpisDto({ scope: { marketplace: "ALL", accountId: null } }));
+    first.resolve(kpisDto({ scope: { marketplace: "ALL", accountId: null, allTime: false } }));
     second.resolve(
       kpisDto({
-        scope: { marketplace: "MERCADO_LIVRE", accountId: null },
+        scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false },
         breakdownByAccount: [account()],
       }),
     );
 
     await screen.findByRole("heading", { name: "Desempenho do Mercado Livre" });
     expect(screen.queryByRole("heading", { name: "Visão consolidada dos marketplaces" })).not.toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage — Todo o período (Fase 4)", () => {
+  it("clicking 'Todo o período' puts period=all in the URL and drops from/to", async () => {
+    api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(kpisDto());
+    const user = userEvent.setup();
+    render(<DashboardPage />);
+    await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(1));
+
+    await user.click(screen.getByRole("button", { name: /todo o período/i }));
+
+    expect(routerReplace).toHaveBeenCalledWith(
+      expect.stringContaining("period=all"),
+      expect.anything(),
+    );
+    const [calledUrl] = routerReplace.mock.calls[
+      routerReplace.mock.calls.length - 1
+    ] as [string];
+    expect(calledUrl).not.toMatch(/[?&]from=/);
+    expect(calledUrl).not.toMatch(/[?&]to=/);
+  });
+
+  it("with ?period=all in the URL, fetches with allTime=true and no from/to", async () => {
+    api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(kpisDto());
+    mockSearchParams({ period: "all" });
+
+    render(<DashboardPage />);
+
+    await waitFor(() =>
+      expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith({
+        marketplace: "ALL",
+        allTime: true,
+      }),
+    );
+  });
+
+  it("shows KPIs (not the empty-sync fallback) when allTime is true and comparison is null", async () => {
+    api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(
+      kpisDto({
+        scope: { marketplace: "ALL", accountId: null, allTime: true },
+        summary: {
+          grossRevenue: "100.00",
+          orders: 1,
+          units: 1,
+          averageTicket: "100.00",
+          cancelledOrders: 0,
+          cancellationRate: 0,
+          distinctProducts: 1,
+          unitsPerOrder: 1,
+          avgUnitPrice: "100.00",
+          grossSalesRevenue: "100.00",
+          grossSalesOrders: 1,
+          grossSalesUnits: 1,
+          grossSalesAverageTicket: "100.00",
+          grossSalesAvgUnitPrice: "100.00",
+          cancelledUnits: 0,
+          cancelledRevenue: "0.00",
+        },
+        comparison: null,
+      }),
+    );
+    mockSearchParams({ period: "all" });
+
+    render(<DashboardPage />);
+
+    expect(
+      await screen.findByTestId("kpi-card-gross-revenue"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/nenhuma sincronização concluída/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("selecting a preset while allTime is active clears period=all", async () => {
+    api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(kpisDto());
+    mockSearchParams({ period: "all" });
+    const user = userEvent.setup();
+    render(<DashboardPage />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Últimos 7 dias" }),
+    );
+
+    const [calledUrl] = routerReplace.mock.calls[
+      routerReplace.mock.calls.length - 1
+    ] as [string];
+    expect(calledUrl).not.toMatch(/period=all/);
   });
 });

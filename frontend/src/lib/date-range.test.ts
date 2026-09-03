@@ -91,10 +91,21 @@ describe("validateDateRangeStrings", () => {
     expect(result).toEqual({ valid: false, error: "TO_IN_FUTURE" });
   });
 
-  it("rejects a range above 366 days", () => {
+  // Fase 4 ("Todo o período"): o limite artificial de ~1 ano no personalizado
+  // foi removido — um intervalo de mais de 366 dias agora é válido.
+  it("accepts a custom range longer than 366 days", () => {
     const result = validateDateRangeStrings(
       "2025-01-01",
       "2026-01-02",
+      REF_SEP1,
+    );
+    expect(result.valid).toBe(true);
+  });
+
+  it("still rejects an absurdly long range (RANGE_TOO_LONG is a sanity cap, not gone entirely)", () => {
+    const result = validateDateRangeStrings(
+      "1900-01-01",
+      "2026-09-01",
       REF_SEP1,
     );
     expect(result).toEqual({ valid: false, error: "RANGE_TOO_LONG" });

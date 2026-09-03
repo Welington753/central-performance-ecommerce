@@ -8,7 +8,7 @@ import type { MarketplaceAnalyticsAggregate } from './marketplace-analytics.serv
 
 function emptyAggregate(): MarketplaceAnalyticsAggregate {
   return {
-    scope: { marketplace: 'ALL', accountId: null },
+    scope: { marketplace: 'ALL', accountId: null, allTime: false },
     availability: 'NOT_CONNECTED',
     currentWindow: { from: new Date(0), to: new Date(0) },
     previousWindow: { from: new Date(0), to: new Date(0) },
@@ -56,6 +56,7 @@ describe('MarketplaceAnalyticsController', () => {
       to: '2026-08-31',
       marketplace: 'AMAZON',
       accountId: 'acc-1',
+      allTime: false,
     });
   });
 

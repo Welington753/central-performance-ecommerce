@@ -39,6 +39,13 @@ import {
 
 const TOP_RANKING_LIMIT = 50;
 
+// "Personalizado" (Fase 4, "Todo o período"): remove o limite de sanidade de
+// ~1 ano (`MAX_KPI_RANGE_DAYS`, `period.util.ts`) SÓ para este endpoint
+// genérico multi-marketplace — o endpoint legado do Mercado Livre
+// (`mercado-livre-orders-kpi.service.ts`) continua chamando `resolveKpiPeriod`
+// sem este argumento, então mantém o cap de sempre intocado.
+const NO_PRACTICAL_RANGE_CAP_DAYS = 36500;
+
 /**
  * Checkpoint 4-B: nunca soma `total_amount` de pedidos pagos com moedas
  * diferentes no mesmo agregado — o escopo (Mercado Livre sempre BRL até
@@ -138,7 +145,11 @@ export interface AnalyticsSourceCoverageRaw {
 }
 
 export interface MarketplaceAnalyticsAggregate {
-  scope: { marketplace: MarketplaceFilter; accountId: string | null };
+  scope: {
+    marketplace: MarketplaceFilter;
+    accountId: string | null;
+    allTime: boolean;
+  };
   availability: SourceAvailability;
   currentWindow: PeriodWindow;
   previousWindow: PeriodWindow;
@@ -160,6 +171,13 @@ export interface MarketplaceAnalyticsQuery {
   to?: string;
   marketplace?: string;
   accountId?: string;
+  /**
+   * "Todo o período" (Fase 4): ignora `from`/`to`, consulta da menor até a
+   * maior data de pedido persistida para as contas do escopo (marketplace +
+   * accountId), e NUNCA calcula comparação com período anterior —
+   * `previous`/`comparison` saem `null` do início ao fim do pipeline.
+   */
+  allTime?: boolean;
 }
 
 /**
@@ -186,10 +204,7 @@ export class MarketplaceAnalyticsService {
   ): Promise<MarketplaceAnalyticsAggregate> {
     const marketplaceFilter = parseMarketplaceFilter(query.marketplace);
     const accountIdFilter = parseAccountIdFilter(query.accountId);
-    const windows = resolveKpiPeriod(
-      { from: query.from, to: query.to },
-      referenceNow,
-    );
+    const allTime = query.allTime === true;
 
     const allAccounts = await this.marketplaceAccountsService.findAll();
     const hasHistoryByAccountId = await this.fetchHasHistoryMap();
@@ -233,6 +248,14 @@ export class MarketplaceAnalyticsService {
     const allClassifiedIds = [...classifiedByAccountId.values()].map(
       (a) => a.id,
     );
+
+    const windows = allTime
+      ? await this.resolveAllTimeWindow(scopedAccountIds, referenceNow)
+      : resolveKpiPeriod(
+          { from: query.from, to: query.to },
+          referenceNow,
+          NO_PRACTICAL_RANGE_CAP_DAYS,
+        );
 
     // Totais por conta, para TODAS as contas classificadas do sistema
     // (nunca só as do escopo atual) — o painel por marketplace mostra
@@ -303,7 +326,11 @@ export class MarketplaceAnalyticsService {
 
     if (!hasProvenData(scopeAvailability)) {
       return {
-        scope: { marketplace: marketplaceFilter, accountId: accountIdFilter },
+        scope: {
+          marketplace: marketplaceFilter,
+          accountId: accountIdFilter,
+          allTime,
+        },
         availability: scopeAvailability,
         currentWindow: windows.current,
         previousWindow: windows.previous,
@@ -335,7 +362,11 @@ export class MarketplaceAnalyticsService {
       sources,
     ] = await Promise.all([
       this.fetchPeriodTotals(scopedAccountIds, windows.current),
-      this.fetchPeriodTotals(scopedAccountIds, windows.previous),
+      // "Todo o período" nunca calcula comparação — `previous` sai `null`
+      // sem sequer consultar o banco para o período anterior.
+      allTime
+        ? Promise.resolve(null)
+        : this.fetchPeriodTotals(scopedAccountIds, windows.previous),
       this.fetchDailySeries(scopedAccountIds, windows.current),
       this.fetchTopProductsBySku(scopedAccountIds, windows.current),
       this.fetchTopListings(scopedAccountIds, windows.current),
@@ -347,7 +378,11 @@ export class MarketplaceAnalyticsService {
     );
 
     return {
-      scope: { marketplace: marketplaceFilter, accountId: accountIdFilter },
+      scope: {
+        marketplace: marketplaceFilter,
+        accountId: accountIdFilter,
+        allTime,
+      },
       availability: scopeAvailability,
       currentWindow: windows.current,
       previousWindow: windows.previous,
@@ -362,6 +397,52 @@ export class MarketplaceAnalyticsService {
       sources,
       dataCoverage,
       lastSync: lastSyncOf(scopedAccountIds),
+    };
+  }
+
+  /**
+   * "Todo o período" (Fase 4): consulta a menor e a maior `date_created`
+   * persistida para as contas do escopo (marketplace + accountId já
+   * resolvidos pelo chamador) — nunca todas as contas do sistema. Sem
+   * nenhum pedido no escopo, devolve uma janela de largura zero em
+   * `referenceNow`: toda consulta downstream (`fetchPeriodTotals` etc.) já
+   * trata `from === to` como "nenhum resultado" via `>= from AND < to`, sem
+   * precisar de nenhum caso especial aqui. `previous` é sempre IGUAL a
+   * `current` (nunca calculado) — é só o que permite reaproveitar
+   * `fetchSourceCoverage`/`computeSourceCoverage` sem mudar sua assinatura;
+   * `comparison` no DTO de resposta sai `null` porque `previous` do
+   * agregado (não desta janela) é `null` (ver `getAggregate`).
+   */
+  private async resolveAllTimeWindow(
+    scopedAccountIds: string[],
+    referenceNow: Date,
+  ): Promise<KpiWindows> {
+    const range = await this.fetchOrderDateRange(scopedAccountIds);
+    const current = range ?? { from: referenceNow, to: referenceNow };
+    return { current, previous: current };
+  }
+
+  private async fetchOrderDateRange(
+    accountIds: string[],
+  ): Promise<PeriodWindow | null> {
+    if (accountIds.length === 0) return null;
+
+    const [row] = await this.dataSource.query<
+      Array<{ min_date: Date | null; max_date: Date | null }>
+    >(
+      `SELECT MIN(date_created) AS min_date, MAX(date_created) AS max_date
+         FROM marketplace_orders
+        WHERE marketplace_account_id = ANY($1)`,
+      [accountIds],
+    );
+    if (!row.min_date || !row.max_date) return null;
+
+    // `to` exclusivo: soma 1 dia ao pedido mais recente para garantir que
+    // ele fique DENTRO da janela (`date_created < to`), sem depender da
+    // precisão de milissegundos do timestamp devolvido pelo driver.
+    return {
+      from: row.min_date,
+      to: new Date(row.max_date.getTime() + 24 * 60 * 60 * 1000),
     };
   }
 

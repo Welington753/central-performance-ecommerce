@@ -1324,4 +1324,203 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(listingsForThisAccount[0].grossRevenueCents).toBe(20000n);
     });
   });
+
+  describe('allTime ("Todo o período", Fase 4)', () => {
+    it('the default (non-allTime) 30-day window never sees an order from years ago — sanity baseline', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old-1',
+        status: 'paid',
+        totalAmount: '500.00',
+        dateCreated: new Date('2020-01-15T12:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      expect(aggregate.current?.orders ?? 0).toBe(0);
+    });
+
+    it('allTime=true includes an order from years ago, far outside any default/custom window cap', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old-1',
+        status: 'paid',
+        totalAmount: '500.00',
+        dateCreated: new Date('2020-01-15T12:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.summary?.grossRevenue).toBe('500.00');
+    });
+
+    it('allTime=true never computes a comparison — comparison and previous are always null', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old-1',
+        status: 'paid',
+        totalAmount: '500.00',
+        dateCreated: new Date('2020-01-15T12:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(aggregate.previous).toBeNull();
+      expect(dto.comparison).toBeNull();
+      expect(dto.scope.allTime).toBe(true);
+    });
+
+    it("allTime=true scoped by accountId isolates that account's full history from another account's", async () => {
+      const accountA = await seedAccount({ externalSellerId: 'A' });
+      const accountB = await seedAccount({ externalSellerId: 'B' });
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: 'a-old',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: new Date('2019-06-01T00:00:00.000Z'),
+        items: [],
+      });
+      await seedOrder({
+        accountId: accountB,
+        externalOrderId: 'b-old',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: new Date('2018-01-01T00:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true, accountId: accountA },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.summary?.grossRevenue).toBe('100.00');
+    });
+
+    it('allTime=true scoped by marketplace=MERCADO_LIVRE excludes an old Amazon order', async () => {
+      const mlAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccountId = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: mlAccountId,
+        externalOrderId: 'ml-old',
+        status: 'paid',
+        totalAmount: '70.00',
+        dateCreated: new Date('2021-03-01T00:00:00.000Z'),
+        items: [],
+      });
+      await seedOrder({
+        accountId: amazonAccountId,
+        externalOrderId: 'amz-old',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: new Date('2021-03-01T00:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true, marketplace: 'MERCADO_LIVRE' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.summary?.grossRevenue).toBe('70.00');
+    });
+
+    it('allTime=true with ALL marketplaces sums every scoped account with data', async () => {
+      const mlAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccountId = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: mlAccountId,
+        externalOrderId: 'ml-old',
+        status: 'paid',
+        totalAmount: '70.00',
+        dateCreated: new Date('2021-03-01T00:00:00.000Z'),
+        items: [],
+      });
+      await seedOrder({
+        accountId: amazonAccountId,
+        externalOrderId: 'amz-old',
+        status: 'paid',
+        totalAmount: '30.00',
+        dateCreated: new Date('2021-03-01T00:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.grossRevenue).toBe('100.00');
+    });
+
+    it('never reports coverage as complete when no sync_runs prove the all-time window was fully synced', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old-1',
+        status: 'paid',
+        totalAmount: '500.00',
+        dateCreated: new Date('2020-01-15T12:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true },
+        REFERENCE_NOW,
+      );
+
+      // Nenhum sync_run SUCCESS foi semeado neste teste — cobertura nunca
+      // pode ser 'complete' sem prova real de sincronização.
+      expect(aggregate.dataCoverage.status).not.toBe('complete');
+    });
+
+    it('a custom (non-allTime) period longer than the old ~1-year cap is no longer rejected', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'two-years-ago',
+        status: 'paid',
+        totalAmount: '42.00',
+        dateCreated: new Date('2024-09-01T12:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { from: '2024-09-01', to: '2026-09-01' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.summary?.grossRevenue).toBe('42.00');
+    });
+  });
 });
