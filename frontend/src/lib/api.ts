@@ -25,9 +25,29 @@ import type {
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
 export class ApiFetchError extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    public readonly code?: string,
+  ) {
     super(message);
     this.name = "ApiFetchError";
+  }
+}
+
+/**
+ * Extrai o código de erro sanitizado do corpo de uma resposta de erro do
+ * backend (`{ message: CODE, ... }`, ver `HttpException`/vocabulário
+ * fechado nos serviços) — nunca lança, nunca repassa nada além dessa única
+ * string já validada, nunca o corpo bruto.
+ */
+async function parseSanitizedErrorCode(
+  response: Response,
+): Promise<string | undefined> {
+  try {
+    const body = (await response.json()) as { message?: unknown };
+    return typeof body.message === "string" ? body.message : undefined;
+  } catch {
+    return undefined;
   }
 }
 
@@ -232,7 +252,11 @@ export async function syncMercadoLivreOrders(
     { method: "POST" },
   );
   if (!response.ok) {
-    throw new ApiFetchError("Não foi possível sincronizar agora. Tente novamente.");
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      "Não foi possível sincronizar agora. Tente novamente.",
+      code,
+    );
   }
   return (await response.json()) as MercadoLivreSyncSummary;
 }

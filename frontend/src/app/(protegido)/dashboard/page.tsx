@@ -12,7 +12,11 @@ import { KpiSummaryCards } from "@/components/KpiSummaryCards";
 import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { ProductRankingTabs } from "@/components/ProductRankingTabs";
 import { ScopeFilters } from "@/components/ScopeFilters";
-import { fetchMarketplaceAnalyticsKpis, syncMercadoLivreOrders } from "@/lib/api";
+import {
+  ApiFetchError,
+  fetchMarketplaceAnalyticsKpis,
+  syncMercadoLivreOrders,
+} from "@/lib/api";
 import {
   DATE_RANGE_ERROR_MESSAGES,
   dateOnlyToString,
@@ -32,6 +36,28 @@ const MARKETPLACE_FILTER_VALUES: MarketplaceFilter[] = [
   "AMAZON",
   "SHOPEE",
 ];
+
+// Mensagens específicas por código sanitizado devolvido pelo backend (ver
+// `SyncOrdersErrorCode` em `mercado-livre-orders-sync.service.ts`) — nunca
+// exibe o código cru nem qualquer detalhe interno; `SYNC_FAILED` e qualquer
+// código não mapeado caem no fallback genérico já lançado por
+// `syncMercadoLivreOrders` (`error.message`).
+const SYNC_ERROR_MESSAGES: Record<string, string> = {
+  ACCOUNT_NOT_CONNECTED:
+    "Esta conta não está mais conectada ao Mercado Livre. Reconecte-a em Integrações.",
+  SYNC_ALREADY_RUNNING:
+    "Já existe uma sincronização em andamento para esta conta. Aguarde a conclusão.",
+  TOKEN_EXPIRED:
+    "O Mercado Livre encerrou o acesso desta conta. Reconecte-a em Integrações.",
+  ACCOUNT_BUSY:
+    "Esta conta está processando outra operação agora. Tente novamente em instantes.",
+  PROVIDER_RATE_LIMITED:
+    "O Mercado Livre limitou as requisições no momento. Tente novamente em alguns minutos.",
+  INVALID_PROVIDER_RESPONSE:
+    "O Mercado Livre retornou uma resposta inesperada. Tente novamente mais tarde.",
+  PROVIDER_UNAVAILABLE:
+    "O Mercado Livre está indisponível no momento. Tente novamente mais tarde.",
+};
 
 function LoadingBlock({ label }: { label: string }) {
   return (
@@ -202,7 +228,11 @@ function DashboardContent() {
         setScopeError(false);
       } catch {
         if (scopeRequestSeqRef.current !== seq) return;
-        setScopeData(null);
+        // Nunca zera um `scopeData` já carregado com sucesso — uma recarga
+        // que falha (ex.: após "Sincronizar agora") deve manter o último
+        // retrato bom na tela com um aviso pontual, nunca apagar painéis,
+        // filtros e o próprio botão de sincronizar por trás de uma tela de
+        // erro em branco.
         setScopeError(true);
       } finally {
         if (scopeRequestSeqRef.current === seq) {
@@ -238,7 +268,7 @@ function DashboardContent() {
         setAccountScopedError(false);
       } catch {
         if (accountScopedRequestSeqRef.current !== seq) return;
-        setAccountScopedData(null);
+        // Mesmo raciocínio de `loadScope` acima: preserva o último dado bom.
         setAccountScopedError(true);
       } finally {
         if (accountScopedRequestSeqRef.current === seq) {
@@ -312,8 +342,14 @@ function DashboardContent() {
     try {
       await syncMercadoLivreOrders(mlAccountId);
       await reloadCurrentScope();
-    } catch {
-      setSyncError("Não foi possível sincronizar agora. Tente novamente.");
+    } catch (error) {
+      if (error instanceof ApiFetchError) {
+        setSyncError(
+          (error.code && SYNC_ERROR_MESSAGES[error.code]) || error.message,
+        );
+      } else {
+        setSyncError("Não foi possível sincronizar agora. Tente novamente.");
+      }
     } finally {
       syncingRef.current = false;
       setSyncing(false);
