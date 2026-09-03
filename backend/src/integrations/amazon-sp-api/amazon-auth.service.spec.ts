@@ -728,6 +728,26 @@ describe('AmazonAuthService.provisionAccount', () => {
     expect(encryptionService.decrypt(storedEncrypted)).toBe(rawRefreshToken);
   });
 
+  it('passes an explicit connectedByUserId through to provisionCredentials (Checkpoint 4-C: attributed to the authenticated user calling the controller)', async () => {
+    const { service, marketplaceAccountsService } = buildService();
+    marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      amazonAccount({ id: 'acc-1', tokenVersion: 1 }),
+    );
+
+    await service.provisionAccount({
+      accountId: 'acc-1',
+      sellingPartnerId: 'A1SELLERPARTNERID',
+      refreshToken: 'Atzr|refresh',
+      connectedByUserId: 'user-42',
+    });
+
+    expect(
+      marketplaceAccountsService.provisionCredentials,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ connectedByUserId: 'user-42' }),
+    );
+  });
+
   it('maps external_seller_conflict to AMAZON_ACCOUNT_ALREADY_CONNECTED', async () => {
     const { service, marketplaceAccountsService } = buildService({
       marketplaceAccountsService: {

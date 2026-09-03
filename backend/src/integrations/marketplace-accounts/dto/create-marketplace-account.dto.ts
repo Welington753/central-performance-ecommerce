@@ -3,9 +3,11 @@ import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { Marketplace } from '../../contracts/marketplace.enum';
 
 export class CreateMarketplaceAccountDto {
-  @ApiProperty({ enum: [Marketplace.MERCADO_LIVRE] })
-  @IsIn([Marketplace.MERCADO_LIVRE])
-  marketplace!: Marketplace.MERCADO_LIVRE;
+  // Checkpoint 4-C: Amazon também tem conector wired (Fase 4) — Shopee
+  // continua fora da allowlist (nenhum conector existe ainda).
+  @ApiProperty({ enum: [Marketplace.MERCADO_LIVRE, Marketplace.AMAZON] })
+  @IsIn([Marketplace.MERCADO_LIVRE, Marketplace.AMAZON])
+  marketplace!: Marketplace.MERCADO_LIVRE | Marketplace.AMAZON;
 
   @ApiProperty({ required: false })
   @IsOptional()

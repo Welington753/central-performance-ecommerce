@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { AmazonConnectionModule } from './amazon-connection/amazon-connection.module';
 import { AmazonOrdersModule } from './amazon-orders/amazon-orders.module';
 import { AmazonModule } from './amazon-sp-api/amazon.module';
 import { ConnectorsModule } from './connectors/connectors.module';
@@ -22,6 +23,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     MarketplaceAnalyticsModule,
     AmazonModule,
     AmazonOrdersModule,
+    AmazonConnectionModule,
   ],
   exports: [
     ConnectorsModule,
@@ -31,6 +33,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     MarketplaceAnalyticsModule,
     AmazonModule,
     AmazonOrdersModule,
+    AmazonConnectionModule,
   ],
 })
 export class IntegrationsModule {}

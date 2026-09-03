@@ -239,16 +239,22 @@ export class AmazonAuthService {
   }
 
   /**
-   * Provisionamento interno (Etapa 6) — nunca exposto por controller
-   * público. Recebe o refresh token já obtido pela autoautorização (fora
-   * deste sistema), criptografa imediatamente e nunca o loga. Limpa
-   * qualquer access token antigo (Etapa 6): a próxima
-   * `ensureValidAccessToken` renova naturalmente via LWA.
+   * Provisionamento de credenciais (Etapa 6; exposto por controller
+   * autenticado desde o Checkpoint 4-C via `AmazonConnectionController`).
+   * Recebe o refresh token já obtido pela autoautorização (fora deste
+   * sistema), criptografa imediatamente e nunca o loga. Limpa qualquer
+   * access token antigo (Etapa 6, também no REprovisionamento — mesmo
+   * `UPDATE` do `provisionCredentials`): a próxima `ensureValidAccessToken`
+   * renova naturalmente via LWA.
    */
   async provisionAccount(input: {
     accountId: string;
     sellingPartnerId: string;
     refreshToken: string;
+    // Opcional (default `null`) por compatibilidade com o provisionamento
+    // interno já existente antes do Checkpoint 4-C, que nunca tinha um
+    // usuário autenticado no fluxo.
+    connectedByUserId?: string | null;
   }): Promise<void> {
     const account = await this.marketplaceAccountsService.findByIdOrFail(
       input.accountId,
@@ -264,7 +270,7 @@ export class AmazonAuthService {
       expectedTokenVersion: account.tokenVersion,
       externalSellerId: input.sellingPartnerId,
       encryptedRefreshToken,
-      connectedByUserId: null,
+      connectedByUserId: input.connectedByUserId ?? null,
     });
 
     if (outcome === 'external_seller_conflict') {

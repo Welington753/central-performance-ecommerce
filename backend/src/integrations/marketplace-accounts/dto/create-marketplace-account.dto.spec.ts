@@ -24,8 +24,12 @@ describe('CreateMarketplaceAccountDto', () => {
     ).toHaveLength(0);
   });
 
-  it('rejects a marketplace other than MERCADO_LIVRE (Amazon/Shopee have no connector wired in this phase)', async () => {
-    const errors = await validateBody({ marketplace: 'AMAZON' });
+  it('accepts a valid AMAZON body (Checkpoint 4-C: Amazon connector wired)', async () => {
+    expect(await validateBody({ marketplace: 'AMAZON' })).toHaveLength(0);
+  });
+
+  it('rejects SHOPEE (no connector wired yet)', async () => {
+    const errors = await validateBody({ marketplace: 'SHOPEE' });
     expect(errors.length).toBeGreaterThan(0);
   });
 
