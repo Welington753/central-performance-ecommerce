@@ -1,4 +1,4 @@
-import { NotFoundException } from '@nestjs/common';
+import { ConflictException, NotFoundException } from '@nestjs/common';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
   MarketplaceAccount,
@@ -269,6 +269,54 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
     const { service, persistence } = buildService({
       oauthService: {
         ensureValidAccessToken: jest.fn().mockRejectedValue(new Error('boom')),
+      },
+    });
+
+    await expect(service.syncOrders('acc-1')).rejects.toMatchObject({
+      code: 'SYNC_FAILED',
+    });
+    expect(persistence.finalizeSyncRunFailure).toHaveBeenCalledWith(
+      'run-1',
+      'SYNC_FAILED',
+      expect.any(String),
+      expect.any(Date),
+    );
+  });
+
+  it.each([
+    ['REFRESH_TOKEN_REJECTED', 'TOKEN_EXPIRED'],
+    ['ACCOUNT_BUSY', 'ACCOUNT_BUSY'],
+  ])(
+    'maps ConflictException("%s") from ensureValidAccessToken to SyncOrdersError "%s" instead of masking it as SYNC_FAILED',
+    async (conflictMessage, expectedCode) => {
+      const { service, persistence } = buildService({
+        oauthService: {
+          ensureValidAccessToken: jest
+            .fn()
+            .mockRejectedValue(new ConflictException(conflictMessage)),
+        },
+      });
+
+      await expect(service.syncOrders('acc-1')).rejects.toMatchObject({
+        code: expectedCode,
+      });
+      expect(persistence.finalizeSyncRunFailure).toHaveBeenCalledWith(
+        'run-1',
+        expectedCode,
+        expect.any(String),
+        expect.any(Date),
+      );
+    },
+  );
+
+  it('maps an unrecognized ConflictException from ensureValidAccessToken to the generic SYNC_FAILED fallback', async () => {
+    const { service, persistence } = buildService({
+      oauthService: {
+        ensureValidAccessToken: jest
+          .fn()
+          .mockRejectedValue(
+            new ConflictException('CREDENTIAL_DECRYPTION_FAILED'),
+          ),
       },
     });
 

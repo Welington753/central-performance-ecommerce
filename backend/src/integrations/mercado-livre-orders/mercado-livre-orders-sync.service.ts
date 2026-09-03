@@ -1,4 +1,8 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
@@ -23,6 +27,8 @@ import { computeInitialSyncWindow } from '../marketplace-orders/period.util';
 export type SyncOrdersErrorCode =
   | 'ACCOUNT_NOT_CONNECTED'
   | 'SYNC_ALREADY_RUNNING'
+  | 'TOKEN_EXPIRED'
+  | 'ACCOUNT_BUSY'
   | 'PROVIDER_UNAVAILABLE'
   | 'PROVIDER_RATE_LIMITED'
   | 'INVALID_PROVIDER_RESPONSE'
@@ -31,11 +37,36 @@ export type SyncOrdersErrorCode =
 const FAILURE_SUMMARIES: Record<SyncOrdersErrorCode, string> = {
   ACCOUNT_NOT_CONNECTED: 'Conta não está conectada ao Mercado Livre.',
   SYNC_ALREADY_RUNNING: 'Já existe uma sincronização em andamento.',
+  TOKEN_EXPIRED:
+    'O Mercado Livre rejeitou o token da conta. Reconexão necessária.',
+  ACCOUNT_BUSY: 'Já existe uma operação de token em andamento para esta conta.',
   PROVIDER_UNAVAILABLE: 'Provedor indisponível ao consultar pedidos.',
   PROVIDER_RATE_LIMITED: 'Provedor limitou a taxa de requisições.',
   INVALID_PROVIDER_RESPONSE: 'Resposta do provedor em formato inesperado.',
   SYNC_FAILED: 'Falha inesperada durante a sincronização.',
 };
+
+// Vocabulário fechado de `ConflictException` lançado por
+// `MercadoLivreOAuthService.ensureValidAccessToken` (ver esse arquivo) — só
+// os dois casos abaixo têm um código de sincronização mais específico que
+// `SYNC_FAILED`; os demais (`ACCOUNT_NOT_ELIGIBLE_FOR_TOKEN`,
+// `REFRESH_RESULT_UNKNOWN`, `REFRESH_RESULT_NOT_COMMITTED`,
+// `CREDENTIAL_DECRYPTION_FAILED`) são condições de borda/corrida internas
+// sem ação distinta possível pelo usuário, então caem no fallback genérico.
+const OAUTH_CONFLICT_TO_SYNC_ERROR_CODE: Partial<
+  Record<string, SyncOrdersErrorCode>
+> = {
+  REFRESH_TOKEN_REJECTED: 'TOKEN_EXPIRED',
+  ACCOUNT_BUSY: 'ACCOUNT_BUSY',
+};
+
+function resolveSyncErrorCode(error: unknown): SyncOrdersErrorCode {
+  if (error instanceof SyncOrdersError) return error.code;
+  if (error instanceof ConflictException) {
+    return OAUTH_CONFLICT_TO_SYNC_ERROR_CODE[error.message] ?? 'SYNC_FAILED';
+  }
+  return 'SYNC_FAILED';
+}
 
 /**
  * Vocabulário fechado de erro (design "Sincronização") — a mensagem da
@@ -161,8 +192,7 @@ export class MercadoLivreOrdersSyncService {
         periodTo: periodTo.toISOString(),
       };
     } catch (error) {
-      const code =
-        error instanceof SyncOrdersError ? error.code : 'SYNC_FAILED';
+      const code = resolveSyncErrorCode(error);
       await this.persistence.finalizeSyncRunFailure(
         syncRunId,
         code,
@@ -171,7 +201,7 @@ export class MercadoLivreOrdersSyncService {
       );
       throw error instanceof SyncOrdersError
         ? error
-        : new SyncOrdersError('SYNC_FAILED');
+        : new SyncOrdersError(code);
     }
   }
 

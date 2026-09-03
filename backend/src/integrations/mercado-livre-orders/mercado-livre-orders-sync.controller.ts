@@ -49,6 +49,8 @@ export class MercadoLivreOrdersSyncController {
     switch (error.code) {
       case 'SYNC_ALREADY_RUNNING':
       case 'ACCOUNT_NOT_CONNECTED':
+      case 'TOKEN_EXPIRED':
+      case 'ACCOUNT_BUSY':
         return new ConflictException(error.code);
       case 'PROVIDER_RATE_LIMITED':
         return new HttpException(error.code, HttpStatus.TOO_MANY_REQUESTS);

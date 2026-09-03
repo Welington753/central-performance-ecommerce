@@ -53,6 +53,8 @@ describe('MercadoLivreOrdersSyncController', () => {
     it.each([
       ['SYNC_ALREADY_RUNNING', ConflictException],
       ['ACCOUNT_NOT_CONNECTED', ConflictException],
+      ['TOKEN_EXPIRED', ConflictException],
+      ['ACCOUNT_BUSY', ConflictException],
       ['PROVIDER_UNAVAILABLE', ServiceUnavailableException],
       ['INVALID_PROVIDER_RESPONSE', BadGatewayException],
       ['SYNC_FAILED', ServiceUnavailableException],
