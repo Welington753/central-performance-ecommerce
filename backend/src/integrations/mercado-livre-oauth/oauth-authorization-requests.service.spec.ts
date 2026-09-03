@@ -136,24 +136,50 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
 
   it('createPending: two truly concurrent calls for the same account — exactly one wins, the other gets OAuthConnectionInProgressError, no PROCESSING attempt is ever expired', async () => {
     // Duas chamadas a `service.createPending` iniciadas "ao mesmo tempo" via
-    // `Promise.allSettled` nem sempre colidem de fato no Postgres: em uma
-    // máquina local, o round-trip para abrir uma conexão física nova (dentro
-    // de `queryRunner.connect()`) pode ser mais lento que a transação
-    // inteira da OUTRA chamada (SELECT + UPDATE + INSERT + COMMIT), o que
-    // faz as duas execuções ficarem efetivamente sequenciais — a segunda
-    // apenas expira a primeira (caminho normal, já coberto pelo teste
-    // "expires a previous PENDING attempt"), sem nunca colidir na constraint
-    // de tentativa ativa. Para testar a colisão real de verdade, uma
-    // barreira força as duas chamadas a chegar à primeira query (o SELECT de
-    // checagem de PROCESSING, já dentro da transação de cada uma) no mesmo
-    // instante, garantindo que os dois INSERTs disputem o mesmo índice único
-    // parcial de fato — sem alterar nada do serviço em si, só o instante em
-    // que cada `QueryRunner` de teste dispara sua primeira query.
-    let arrivals = 0;
-    let releaseBarrier: () => void;
-    const barrier = new Promise<void>((resolve) => {
-      releaseBarrier = resolve;
-    });
+    // `Promise.allSettled` nem sempre colidem de fato no Postgres. Uma delas
+    // reaproveita a conexão já aberta/ociosa deixada pelo teste anterior; a
+    // outra precisa abrir uma conexão física NOVA (handshake TCP completo).
+    // Uma barreira única antes da PRIMEIRA query (`START TRANSACTION`)
+    // sincroniza só a ENTRADA na transação — depois disso, a chamada com a
+    // conexão já aquecida corre livre e pode terminar o SELECT+UPDATE+INSERT
+    // +COMMIT inteiro antes de a outra sequer emitir seu UPDATE. Quando isso
+    // acontece, o UPDATE ...SET status='EXPIRED' da chamada mais lenta acaba
+    // expirando a linha PENDING que a mais rápida JÁ COMMITOU — limpando o
+    // caminho para o INSERT da mais lenta também ter sucesso, sem nunca
+    // colidir no índice único parcial. Resultado: as duas terminam
+    // `fulfilled` (bug do TESTE, não do serviço — comprovado por
+    // investigação isolada: ver `docs`/relatório do CP4-B-R1-fix-oauth).
+    //
+    // Correção: uma barreira em CADA passo (`START TRANSACTION`, `SELECT`,
+    // `UPDATE`, `INSERT`) força as duas chamadas a avançar em lockstep até o
+    // INSERT — a operação de fato disputada —, eliminando a vantagem da
+    // conexão "aquecida" sem impedir que a corrida real aconteça: os dois
+    // INSERTs continuam sendo emitidos em conexões/transações independentes
+    // e de verdade disputam o índice único parcial no Postgres (nunca
+    // serializados manualmente pelo teste).
+    const LOCKSTEP_QUERY_COUNT = 4; // START TRANSACTION, SELECT, UPDATE, INSERT
+    const participants = 2;
+    const stepBarriers: Array<{
+      arrivals: number;
+      promise: Promise<void>;
+      release: () => void;
+    }> = [];
+
+    function arriveAtStep(step: number): Promise<void> {
+      let barrier = stepBarriers[step];
+      if (!barrier) {
+        let release!: () => void;
+        const promise = new Promise<void>((resolve) => {
+          release = resolve;
+        });
+        barrier = { arrivals: 0, promise, release };
+        stepBarriers[step] = barrier;
+      }
+      barrier.arrivals += 1;
+      if (barrier.arrivals >= participants) barrier.release();
+      return barrier.promise;
+    }
+
     const originalCreateQueryRunner =
       dataSource.createQueryRunner.bind(dataSource);
     const spy = jest
@@ -161,13 +187,12 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       .mockImplementation(() => {
         const queryRunner = originalCreateQueryRunner();
         const originalQuery = queryRunner.query.bind(queryRunner);
-        let firstQuery = true;
+        let step = 0;
         queryRunner.query = ((...args: Parameters<typeof originalQuery>) => {
-          if (firstQuery) {
-            firstQuery = false;
-            arrivals += 1;
-            if (arrivals >= 2) releaseBarrier();
-            return barrier.then(() => originalQuery(...args));
+          const currentStep = step;
+          step += 1;
+          if (currentStep < LOCKSTEP_QUERY_COUNT) {
+            return arriveAtStep(currentStep).then(() => originalQuery(...args));
           }
           return originalQuery(...args);
         }) as typeof originalQuery;
