@@ -36,5 +36,8 @@ import { AmazonOrdersSyncService } from './amazon-orders-sync.service';
     },
     AmazonOrdersSyncService,
   ],
+  // Exportado (Fase 4) para o backfill histórico e o orquestrador de
+  // sincronização automática reaproveitarem a MESMA implementação.
+  exports: [AmazonOrdersSyncService],
 })
 export class AmazonOrdersModule {}

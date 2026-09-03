@@ -5,6 +5,7 @@ import { AmazonModule } from './amazon-sp-api/amazon.module';
 import { ConnectorsModule } from './connectors/connectors.module';
 import { MarketplaceAccountsModule } from './marketplace-accounts/marketplace-accounts.module';
 import { MarketplaceAnalyticsModule } from './marketplace-analytics/marketplace-analytics.module';
+import { MarketplaceSyncModule } from './marketplace-sync/marketplace-sync.module';
 import { MercadoLivreOAuthModule } from './mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-orders.module';
 
@@ -24,6 +25,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     AmazonModule,
     AmazonOrdersModule,
     AmazonConnectionModule,
+    MarketplaceSyncModule,
   ],
   exports: [
     ConnectorsModule,
@@ -34,6 +36,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     AmazonModule,
     AmazonOrdersModule,
     AmazonConnectionModule,
+    MarketplaceSyncModule,
   ],
 })
 export class IntegrationsModule {}

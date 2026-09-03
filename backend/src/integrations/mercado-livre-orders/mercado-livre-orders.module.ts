@@ -40,5 +40,9 @@ import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.servi
     MercadoLivreOrdersSyncService,
     MercadoLivreOrdersKpiService,
   ],
+  // `MercadoLivreOrdersSyncService` exportado (Fase 4) para o backfill
+  // histórico e o orquestrador de sincronização automática reaproveitarem a
+  // MESMA implementação — nunca uma cópia.
+  exports: [MercadoLivreOrdersSyncService],
 })
 export class MercadoLivreOrdersModule {}

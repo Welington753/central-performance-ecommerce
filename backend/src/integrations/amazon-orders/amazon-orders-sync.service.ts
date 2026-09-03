@@ -143,10 +143,19 @@ export class AmazonOrdersSyncService {
     @Inject(AMAZON_ORDERS_CLOCK) private readonly clock: ClockFn,
   ) {}
 
+  /**
+   * `options.windowOverride` (Fase 4, "Histórico completo") existe só para o
+   * backfill histórico (`MarketplaceBackfillService`) reaproveitar esta
+   * MESMA implementação com uma janela [from, to) exata em instantes —
+   * nunca a rota `input.from/to` (strings de dia-calendário, com
+   * arredondamento de fronteira incompatível com a contiguidade exigida
+   * pelo backfill). Tem prioridade sobre `input` e sobre a janela
+   * incremental/inicial; nenhum outro caminho de negócio novo.
+   */
   async syncOrders(
     accountId: string,
     input: AmazonOrdersSyncInput = {},
-    options: { type?: SyncRunType } = {},
+    options: { type?: SyncRunType; windowOverride?: PeriodWindow } = {},
   ): Promise<AmazonOrdersSyncSummary> {
     const account =
       await this.marketplaceAccountsService.findByIdOrFail(accountId);
@@ -171,7 +180,9 @@ export class AmazonOrdersSyncService {
     }
 
     const now = this.clock();
-    const window = await this.resolveWindow(accountId, input, now);
+    const window =
+      options.windowOverride ??
+      (await this.resolveWindow(accountId, input, now));
 
     const startedAt = new Date();
     let syncRunId: string;
