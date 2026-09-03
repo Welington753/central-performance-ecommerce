@@ -7,6 +7,11 @@ import {
   MarketplaceAccount,
   MarketplaceAccountStatus,
 } from './marketplace-account.entity';
+import {
+  NicknameAlreadyInUseError,
+  assertValidNickname,
+  normalizeNickname,
+} from './nickname.util';
 
 export interface FindMarketplaceAccountsFilter {
   marketplace?: Marketplace;
@@ -52,6 +57,61 @@ export class MarketplaceAccountsService {
       status: MarketplaceAccountStatus.DISCONNECTED,
     });
     return this.repository.save(account);
+  }
+
+  /**
+   * Renomeia (ou, com `rawNickname: null`, restaura o nome padrão de) uma
+   * conta — apenas visual/interno, nunca toca `externalSellerId`,
+   * `marketplace`, `status`, tokens ou `tokenVersion`. `null` pula toda
+   * validação de conteúdo (representa "sem apelido", sempre válido); um
+   * `string` é normalizado (trim + espaços colapsados) e validado antes de
+   * checar duplicidade case-insensitive dentro do MESMO marketplace — outro
+   * marketplace com o mesmo nome nunca conflita.
+   *
+   * A checagem de duplicidade em memória fecha a janela na maioria dos
+   * casos, mas a fonte de verdade final é o índice único parcial do
+   * Postgres (`UQ_marketplace_accounts_marketplace_nickname`, ver
+   * migration) — duas renomeações concorrentes para o mesmo nome sempre
+   * deixam exatamente uma delas presa na violação de índice, nunca as duas
+   * "vencendo" silenciosamente.
+   */
+  async rename(
+    id: string,
+    rawNickname: string | null,
+  ): Promise<MarketplaceAccount> {
+    const account = await this.findByIdOrFail(id);
+
+    if (rawNickname === null) {
+      account.nickname = null;
+      return this.repository.save(account);
+    }
+
+    const normalized = normalizeNickname(rawNickname);
+    assertValidNickname(normalized);
+
+    const duplicate = await this.repository
+      .createQueryBuilder('account')
+      .where('account.marketplace = :marketplace', {
+        marketplace: account.marketplace,
+      })
+      .andWhere('account.id != :id', { id: account.id })
+      .andWhere('lower(account.nickname) = lower(:nickname)', {
+        nickname: normalized,
+      })
+      .getOne();
+    if (duplicate) {
+      throw new NicknameAlreadyInUseError();
+    }
+
+    account.nickname = normalized;
+    try {
+      return await this.repository.save(account);
+    } catch (error) {
+      if (this.isUniqueNicknameViolation(error)) {
+        throw new NicknameAlreadyInUseError();
+      }
+      throw error;
+    }
   }
 
   async findByIdOrFail(id: string): Promise<MarketplaceAccount> {
@@ -318,6 +378,14 @@ export class MarketplaceAccountsService {
       pgError?.code === '23505' &&
       pgError.constraint ===
         'UQ_marketplace_accounts_marketplace_external_seller_id'
+    );
+  }
+
+  private isUniqueNicknameViolation(error: unknown): boolean {
+    const pgError = this.extractPostgresError(error);
+    return (
+      pgError?.code === '23505' &&
+      pgError.constraint === 'UQ_marketplace_accounts_marketplace_nickname'
     );
   }
 

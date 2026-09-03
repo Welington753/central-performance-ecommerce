@@ -17,6 +17,15 @@ export interface MarketplaceCardData {
     disabled: boolean;
     onClick?: () => void;
   };
+  // Renomeação opcional (Fase 4): omitido para cards que não representam
+  // uma conta real (placeholders "não conectado"/"disponível futuramente").
+  // `secondaryLabel` mostra o identificador real (externalSellerId ou id
+  // curto) ao lado do apelido, para nunca confundir contas parecidas.
+  rename?: {
+    currentNickname: string | null;
+    secondaryLabel: string;
+    onSave: (nickname: string | null) => Promise<void>;
+  };
 }
 
 // Espelha MarketplaceAccountResponseDto (Task 14) exatamente — sem

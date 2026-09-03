@@ -1,10 +1,26 @@
-import { Body, Controller, Get, Post, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  ConflictException,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Patch,
+  Post,
+  UnprocessableEntityException,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
 import { CreateMarketplaceAccountDto } from './dto/create-marketplace-account.dto';
+import { RenameMarketplaceAccountDto } from './dto/rename-marketplace-account.dto';
 import { toMarketplaceAccountResponse } from './dto/marketplace-account-response.dto';
 import type { MarketplaceAccountResponseDto } from './dto/marketplace-account-response.dto';
 import { MarketplaceAccountsService } from './marketplace-accounts.service';
+import {
+  InvalidNicknameError,
+  NicknameAlreadyInUseError,
+} from './nickname.util';
 
 @ApiTags('marketplace-accounts')
 @ApiCookieAuth()
@@ -33,5 +49,27 @@ export class MarketplaceAccountsController {
       nickname: dto.nickname ?? null,
     });
     return toMarketplaceAccountResponse(account);
+  }
+
+  @Patch(':id/nickname')
+  async rename(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() dto: RenameMarketplaceAccountDto,
+  ): Promise<MarketplaceAccountResponseDto> {
+    try {
+      const account = await this.marketplaceAccountsService.rename(
+        id,
+        dto.nickname,
+      );
+      return toMarketplaceAccountResponse(account);
+    } catch (error) {
+      if (error instanceof InvalidNicknameError) {
+        throw new UnprocessableEntityException(error.code);
+      }
+      if (error instanceof NicknameAlreadyInUseError) {
+        throw new ConflictException(error.code);
+      }
+      throw error;
+    }
   }
 }

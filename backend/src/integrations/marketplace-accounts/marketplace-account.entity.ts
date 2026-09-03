@@ -35,6 +35,10 @@ export enum MarketplaceAccountStatus {
     where: '"external_seller_id" IS NOT NULL',
   },
 )
+// Unicidade condicional do apelido: case-insensitive dentro do mesmo
+// marketplace, só quando não nulo (múltiplas contas sem apelido coexistem
+// livremente) — ver a migration correspondente para o índice real (usa
+// `lower(nickname)`, não expressável neste decorator).
 export class MarketplaceAccount {
   @PrimaryGeneratedColumn('uuid')
   id!: string;
@@ -46,7 +50,7 @@ export class MarketplaceAccount {
   @Column({ type: 'varchar', nullable: true })
   externalSellerId!: string | null;
 
-  @Column({ type: 'varchar', nullable: true })
+  @Column({ type: 'varchar', length: 60, nullable: true })
   nickname!: string | null;
 
   @Column({ type: 'varchar', default: MarketplaceAccountStatus.DISCONNECTED })

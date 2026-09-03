@@ -13,6 +13,7 @@ import {
   fetchAmazonSetupStatus,
   fetchMarketplaceAccounts,
   redirectTo,
+  renameMarketplaceAccount,
   syncAmazonOrders,
 } from "@/lib/api";
 import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
@@ -192,6 +193,33 @@ function IntegracoesContent() {
     }
   }
 
+  async function handleRename(accountId: string, nickname: string | null) {
+    const updated = await renameMarketplaceAccount(accountId, nickname);
+    setAccounts((prev) =>
+      prev ? prev.map((a) => (a.id === accountId ? updated : a)) : prev,
+    );
+    setAmazonStatus((prev) =>
+      prev
+        ? {
+            ...prev,
+            accounts: prev.accounts.map((a) =>
+              a.id === accountId ? updated : a,
+            ),
+          }
+        : prev,
+    );
+  }
+
+  function renamePropsFor(account: MarketplaceAccountDto) {
+    return {
+      currentNickname: account.nickname,
+      secondaryLabel: account.externalSellerId
+        ? `ID: ${account.externalSellerId}`
+        : `ID interno: ${account.id.slice(0, 8)}`,
+      onSave: (nickname: string | null) => handleRename(account.id, nickname),
+    };
+  }
+
   async function handleAmazonSync(accountId: string) {
     if (amazonSyncingRef.current.has(accountId)) return; // trava síncrona, mesmo padrão do Mercado Livre
     amazonSyncingRef.current.add(accountId);
@@ -300,6 +328,7 @@ function IntegracoesContent() {
                   name: `Mercado Livre — ${accountLabel(account)}`,
                   statusLabel: STATUS_LABELS[account.status],
                   description: STATUS_DESCRIPTIONS[account.status],
+                  rename: renamePropsFor(account),
                   cta: {
                     label:
                       account.status === "DISCONNECTED"
@@ -386,6 +415,7 @@ function IntegracoesContent() {
                   name: `Amazon — ${accountLabel(account)}`,
                   statusLabel: AMAZON_STATUS_LABELS[account.status],
                   description: AMAZON_STATUS_DESCRIPTIONS[account.status],
+                  rename: renamePropsFor(account),
                   cta:
                     account.status === "CONNECTED"
                       ? {

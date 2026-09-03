@@ -12,7 +12,7 @@ export class CreateMarketplaceAccountDto {
   @ApiProperty({ required: false })
   @IsOptional()
   @IsString()
-  @MaxLength(120)
+  @MaxLength(60)
   nickname?: string;
 
   // Deliberadamente SEM campo `externalSellerId`: o `ValidationPipe` global

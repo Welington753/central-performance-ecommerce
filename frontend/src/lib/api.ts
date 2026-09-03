@@ -108,6 +108,31 @@ export async function createMarketplaceAccount(
   return (await response.json()) as MarketplaceAccountDto;
 }
 
+const RENAME_ERROR_MESSAGES: Record<string, string> = {
+  INVALID_NICKNAME:
+    "Nome inválido. Use até 60 caracteres (letras, números, espaços, hífen e pontuação simples).",
+  NICKNAME_ALREADY_IN_USE: "Já existe uma conta com esse nome neste marketplace.",
+};
+
+export async function renameMarketplaceAccount(
+  accountId: string,
+  nickname: string | null,
+): Promise<MarketplaceAccountDto> {
+  const response = await apiFetch(`/marketplace-accounts/${accountId}/nickname`, {
+    method: "PATCH",
+    body: JSON.stringify({ nickname }),
+  });
+  if (!response.ok) {
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      (code && RENAME_ERROR_MESSAGES[code]) ||
+        "Não foi possível renomear a conta. Tente novamente.",
+      code,
+    );
+  }
+  return (await response.json()) as MarketplaceAccountDto;
+}
+
 export async function connectMercadoLivre(
   accountId: string,
 ): Promise<{ authorizationUrl: string }> {

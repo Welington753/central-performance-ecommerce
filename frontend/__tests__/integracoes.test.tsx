@@ -604,4 +604,118 @@ describe("IntegracoesPage — Amazon (Checkpoint 4-C)", () => {
       within(mlCard).getByRole("button", { name: /reconectar/i }),
     ).toBeInTheDocument();
   });
+
+  it("renames a connected account inline without reloading the page", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({ id: "acc-1", status: "CONNECTED", externalSellerId: "111" }),
+    ]);
+    (api.renameMarketplaceAccount as jest.Mock).mockResolvedValue(
+      mlAccount({
+        id: "acc-1",
+        status: "CONNECTED",
+        externalSellerId: "111",
+        nickname: "Meli 1",
+      }),
+    );
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /renomear/i }));
+    const input = within(card).getByRole("textbox");
+    await user.clear(input);
+    await user.type(input, "Meli 1");
+    await user.click(within(card).getByRole("button", { name: /salvar/i }));
+
+    await waitFor(() =>
+      expect(api.renameMarketplaceAccount).toHaveBeenCalledWith(
+        "acc-1",
+        "Meli 1",
+      ),
+    );
+    expect(within(card).getByText(/meli 1/i)).toBeInTheDocument();
+    // Sem novo fetch de listagem — a UI aplica a resposta do PATCH direto.
+    expect(api.fetchMarketplaceAccounts).toHaveBeenCalledTimes(1);
+  });
+
+  it("renames a disconnected account inline as well", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({ id: "acc-1", status: "DISCONNECTED" }),
+    ]);
+    (api.renameMarketplaceAccount as jest.Mock).mockResolvedValue(
+      mlAccount({ id: "acc-1", status: "DISCONNECTED", nickname: "Meli 2" }),
+    );
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /renomear/i }));
+    await user.type(within(card).getByRole("textbox"), "Meli 2");
+    await user.click(within(card).getByRole("button", { name: /salvar/i }));
+
+    await waitFor(() =>
+      expect(within(card).getByText(/meli 2/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("shows a clear error message when the nickname is a duplicate, without discarding the previous name", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({ id: "acc-1", status: "CONNECTED", nickname: "Loja Principal" }),
+    ]);
+    (api.renameMarketplaceAccount as jest.Mock).mockRejectedValue(
+      new (jest.requireActual("../src/lib/api") as typeof api).ApiFetchError(
+        "Já existe uma conta com esse nome neste marketplace.",
+        "NICKNAME_ALREADY_IN_USE",
+      ),
+    );
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /renomear/i }));
+    const input = within(card).getByRole("textbox");
+    await user.clear(input);
+    await user.type(input, "Outra Loja");
+    await user.click(within(card).getByRole("button", { name: /salvar/i }));
+
+    expect(
+      await within(card).findByText(/já existe uma conta com esse nome/i),
+    ).toBeInTheDocument();
+    // Cancelar após a falha volta a exibir o apelido anterior — a tentativa
+    // rejeitada nunca chegou a sobrescrever o estado da conta no componente
+    // pai (nenhuma chamada bem-sucedida a `renameMarketplaceAccount`).
+    await user.click(within(card).getByRole("button", { name: /cancelar/i }));
+    expect(within(card).getByText(/loja principal/i)).toBeInTheDocument();
+  });
+
+  it("restores the default name via 'Restaurar nome padrão'", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({
+        id: "acc-1",
+        status: "CONNECTED",
+        nickname: "Loja Principal",
+        externalSellerId: "111",
+      }),
+    ]);
+    (api.renameMarketplaceAccount as jest.Mock).mockResolvedValue(
+      mlAccount({ id: "acc-1", status: "CONNECTED", externalSellerId: "111" }),
+    );
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /renomear/i }));
+    await user.click(
+      within(card).getByRole("button", { name: /restaurar nome padrão/i }),
+    );
+
+    await waitFor(() =>
+      expect(api.renameMarketplaceAccount).toHaveBeenCalledWith("acc-1", null),
+    );
+    expect(within(card).getByText(/conta 111/i)).toBeInTheDocument();
+  });
 });
