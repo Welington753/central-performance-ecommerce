@@ -1,4 +1,6 @@
 import {
+  centsToDecimalAmount,
+  decimalAmountToCents,
   isValidCurrencyCode,
   validateAmazonMoney,
   validateAmazonMoneyAmount,
@@ -80,5 +82,45 @@ describe('validateAmazonMoney', () => {
   it('rejects a non-object', () => {
     expect(validateAmazonMoney(null)).toBeNull();
     expect(validateAmazonMoney('199.90')).toBeNull();
+  });
+});
+
+describe('decimalAmountToCents', () => {
+  it('converts a well-formed two-decimal amount to cents (bigint)', () => {
+    expect(decimalAmountToCents('99.98')).toBe(9998n);
+    expect(decimalAmountToCents('0.00')).toBe(0n);
+    expect(decimalAmountToCents('199.90')).toBe(19990n);
+  });
+
+  it('pads a missing decimal place ("5.5" -> 50 cents)', () => {
+    expect(decimalAmountToCents('5.5')).toBe(550n);
+  });
+
+  it('pads a fully-integer amount ("100" -> 10000 cents)', () => {
+    expect(decimalAmountToCents('100')).toBe(10000n);
+  });
+
+  it('never loses precision to floating point (large amount)', () => {
+    expect(decimalAmountToCents('12345678.99')).toBe(1234567899n);
+  });
+});
+
+describe('centsToDecimalAmount', () => {
+  it('is the exact inverse of decimalAmountToCents for exact splits', () => {
+    expect(centsToDecimalAmount(4999n)).toBe('49.99');
+    expect(centsToDecimalAmount(0n)).toBe('0.00');
+    expect(centsToDecimalAmount(19990n)).toBe('199.90');
+  });
+
+  it('always produces exactly two decimal places', () => {
+    expect(centsToDecimalAmount(5n)).toBe('0.05');
+    expect(centsToDecimalAmount(100n)).toBe('1.00');
+  });
+
+  it('round-trips the mandatory checkpoint example: quantity 2, subtotal 99.98 -> unit 49.99', () => {
+    const subtotalCents = decimalAmountToCents('99.98');
+    const unitCents = subtotalCents / 2n;
+    expect(subtotalCents % 2n).toBe(0n);
+    expect(centsToDecimalAmount(unitCents)).toBe('49.99');
   });
 });

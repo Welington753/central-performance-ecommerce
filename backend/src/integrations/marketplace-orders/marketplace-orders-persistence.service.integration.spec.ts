@@ -244,6 +244,129 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
     });
   });
 
+  describe('finalizeSyncRunIncomplete (Checkpoint 4-B-R1, "Correção 1")', () => {
+    it('finalizes as FAILED (never SUCCESS/PARTIAL) while preserving the real read/created/updated/failed/pages/items counters', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.AMAZON,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-10T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await service.finalizeSyncRunIncomplete(
+        runId,
+        {
+          ordersFetched: 5,
+          ordersCreated: 3,
+          ordersUpdated: 1,
+          recordsFailed: 1,
+          pagesFetched: 2,
+          itemsPersisted: 4,
+        },
+        'INCOMPLETE_PROVIDER_DATA',
+        'Parte dos pedidos recebidos não pôde ser processada com segurança.',
+        new Date(),
+      );
+
+      const [row] = await dataSource.query<
+        Array<{
+          status: string;
+          records_read: number;
+          records_created: number;
+          records_updated: number;
+          records_failed: number;
+          pages_fetched: number;
+          items_persisted: number;
+          error_code: string | null;
+          error_summary: string | null;
+        }>
+      >(
+        `SELECT status, records_read, records_created, records_updated,
+                records_failed, pages_fetched, items_persisted, error_code,
+                error_summary
+           FROM sync_runs WHERE id = $1`,
+        [runId],
+      );
+
+      expect(row.status).toBe('FAILED');
+      expect(row.status).not.toBe('SUCCESS');
+      expect(row.status).not.toBe('PARTIAL');
+      expect(row.records_read).toBe(5);
+      expect(row.records_created).toBe(3);
+      expect(row.records_updated).toBe(1);
+      expect(row.records_failed).toBe(1);
+      expect(row.pages_fetched).toBe(2);
+      expect(row.items_persisted).toBe(4);
+      expect(row.error_code).toBe('INCOMPLETE_PROVIDER_DATA');
+    });
+
+    it('never appears in the SUCCESS-only coverage query used by the dashboard — an INCOMPLETE_PROVIDER_DATA run never counts as coverage', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.AMAZON,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-10T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunIncomplete(
+        runId,
+        {
+          ordersFetched: 5,
+          ordersCreated: 5,
+          ordersUpdated: 0,
+          recordsFailed: 1,
+          pagesFetched: 1,
+          itemsPersisted: 5,
+        },
+        'INCOMPLETE_PROVIDER_DATA',
+        'Parte dos pedidos recebidos não pôde ser processada com segurança.',
+        new Date(),
+      );
+
+      // Mesma condição usada pelas queries de cobertura do dashboard
+      // (`marketplace-analytics.service.ts`): só considera `status =
+      // 'SUCCESS'`.
+      const successRows = await dataSource.query<Array<{ id: string }>>(
+        `SELECT id FROM sync_runs WHERE marketplace_account_id = $1 AND status = 'SUCCESS'`,
+        [accountId],
+      );
+      expect(successRows.find((r) => r.id === runId)).toBeUndefined();
+    });
+
+    it('does not touch last_successful_sync_at on the account (that column is only set by markAccountSynced, never called for an incomplete run)', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.AMAZON,
+        periodFrom: new Date(),
+        periodTo: new Date(),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunIncomplete(
+        runId,
+        {
+          ordersFetched: 1,
+          ordersCreated: 1,
+          ordersUpdated: 0,
+          recordsFailed: 1,
+          pagesFetched: 1,
+          itemsPersisted: 1,
+        },
+        'INCOMPLETE_PROVIDER_DATA',
+        'Parte dos pedidos recebidos não pôde ser processada com segurança.',
+        new Date(),
+      );
+
+      const [account] = await dataSource.query<
+        Array<{ last_successful_sync_at: Date | null }>
+      >(
+        'SELECT last_successful_sync_at FROM marketplace_accounts WHERE id = $1',
+        [accountId],
+      );
+      expect(account.last_successful_sync_at).toBeNull();
+    });
+  });
+
   describe('persistOrders (idempotência)', () => {
     it('creates a new order and its items on first sync', async () => {
       const result = await service.persistOrders([

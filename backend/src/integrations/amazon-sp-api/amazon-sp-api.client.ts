@@ -34,6 +34,54 @@ export interface SearchOrdersInput {
   paginationToken?: string;
 }
 
+/**
+ * Contrato fechado de `SearchOrdersInput` (Checkpoint 4-B-R1, "Correção
+ * 7") — exatamente UM dos dois modos de data, nunca uma mistura, e nunca um
+ * `Before` menor que o `After` do mesmo modo. Lança SÍNCRONO/antes de
+ * qualquer chamada de rede — nenhuma combinação inválida chega ao `fetch`.
+ *   - modo `created`: `createdAfter` (obrigatório) + `createdBefore`
+ *     (opcional);
+ *   - modo `updated`: `lastUpdatedAfter` (obrigatório) + `lastUpdatedBefore`
+ *     (opcional);
+ *   - `createdAfter` com `lastUpdatedBefore` (ou vice-versa) é rejeitado —
+ *     não é "nenhum dos dois modos", é uma mistura ambígua dos dois.
+ */
+export function assertValidSearchOrdersDateMode(
+  input: Pick<
+    SearchOrdersInput,
+    'createdAfter' | 'createdBefore' | 'lastUpdatedAfter' | 'lastUpdatedBefore'
+  >,
+): void {
+  const hasCreatedAfter = input.createdAfter !== undefined;
+  const hasCreatedBefore = input.createdBefore !== undefined;
+  const hasLastUpdatedAfter = input.lastUpdatedAfter !== undefined;
+  const hasLastUpdatedBefore = input.lastUpdatedBefore !== undefined;
+
+  if (hasCreatedAfter === hasLastUpdatedAfter) {
+    throw new Error('AMAZON_SEARCH_ORDERS_INVALID_DATE_MODE');
+  }
+  if (hasCreatedAfter && hasLastUpdatedBefore) {
+    throw new Error('AMAZON_SEARCH_ORDERS_INVALID_DATE_MODE');
+  }
+  if (hasLastUpdatedAfter && hasCreatedBefore) {
+    throw new Error('AMAZON_SEARCH_ORDERS_INVALID_DATE_MODE');
+  }
+  if (
+    hasCreatedAfter &&
+    hasCreatedBefore &&
+    (input.createdBefore as string) < (input.createdAfter as string)
+  ) {
+    throw new Error('AMAZON_SEARCH_ORDERS_INVALID_DATE_MODE');
+  }
+  if (
+    hasLastUpdatedAfter &&
+    hasLastUpdatedBefore &&
+    (input.lastUpdatedBefore as string) < (input.lastUpdatedAfter as string)
+  ) {
+    throw new Error('AMAZON_SEARCH_ORDERS_INVALID_DATE_MODE');
+  }
+}
+
 const SP_API_HTTP_TIMEOUT_MS = 10000;
 const MARKETPLACE_PARTICIPATIONS_PATH = '/sellers/v1/marketplaceParticipations';
 const ORDERS_SEARCH_PATH = '/orders/2026-01-01/orders';
@@ -122,11 +170,7 @@ export class AmazonSpApiClient {
   async searchOrders(
     input: SearchOrdersInput,
   ): Promise<AmazonSearchOrdersOutcome> {
-    const hasCreatedAfter = input.createdAfter !== undefined;
-    const hasLastUpdatedAfter = input.lastUpdatedAfter !== undefined;
-    if (hasCreatedAfter === hasLastUpdatedAfter) {
-      throw new Error('AMAZON_SEARCH_ORDERS_INVALID_DATE_MODE');
-    }
+    assertValidSearchOrdersDateMode(input);
 
     if (!isAllowedAmazonSpApiEndpoint(input.endpoint)) {
       return { kind: 'endpoint_not_allowed' };

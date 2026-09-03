@@ -529,6 +529,152 @@ describe('AmazonAuthService.ensureValidAccessToken', () => {
   });
 });
 
+describe('AmazonAuthService.refreshAccessTokenAfterUnauthorized', () => {
+  it('forces a fresh LWA call even when tokenExpiresAt is still valid/in the future — a stored token can be locally "valid" yet already revoked server-side', async () => {
+    const encryptionService = buildEncryptionService();
+    const { service, marketplaceAccountsService, lwaClient } = buildService({
+      encryptionService,
+    });
+
+    const rejectedAccessToken = encryptionService.encrypt('rejected-token');
+    marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      amazonAccount({
+        encryptedRefreshToken: encryptionService.encrypt('refresh-token'),
+        encryptedAccessToken: rejectedAccessToken,
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1h no futuro
+        tokenVersion: 3,
+      }),
+    );
+    lwaClient.refreshAccessToken.mockResolvedValue({
+      kind: 'success',
+      token: {
+        accessToken: 'brand-new-access-token',
+        tokenType: 'bearer',
+        expiresInSeconds: 3600,
+      },
+    });
+
+    const token = await service.refreshAccessTokenAfterUnauthorized(
+      'acc-1',
+      'rejected-token',
+    );
+
+    expect(token).toBe('brand-new-access-token');
+    expect(lwaClient.refreshAccessToken).toHaveBeenCalledTimes(1);
+    expect(
+      marketplaceAccountsService.applyRefreshedTokens,
+    ).toHaveBeenCalledWith(
+      expect.objectContaining({ expectedTokenVersion: 3 }),
+    );
+  });
+
+  it('reuses the already-refreshed token without a new LWA call when a concurrent renewal already replaced the rejected token', async () => {
+    const encryptionService = buildEncryptionService();
+    const { service, marketplaceAccountsService, lwaClient } = buildService({
+      encryptionService,
+    });
+
+    marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      amazonAccount({
+        encryptedRefreshToken: encryptionService.encrypt('refresh-token'),
+        encryptedAccessToken: encryptionService.encrypt('already-newer-token'),
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+    );
+
+    const token = await service.refreshAccessTokenAfterUnauthorized(
+      'acc-1',
+      'old-rejected-token',
+    );
+
+    expect(token).toBe('already-newer-token');
+    expect(lwaClient.refreshAccessToken).not.toHaveBeenCalled();
+  });
+
+  it('a second consecutive call with the SAME (still-current) rejected token forces exactly one more LWA call — never loops, never reuses across two real rejections', async () => {
+    const encryptionService = buildEncryptionService();
+    const { service, marketplaceAccountsService, lwaClient } = buildService({
+      encryptionService,
+    });
+
+    marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      amazonAccount({
+        encryptedRefreshToken: encryptionService.encrypt('refresh-token'),
+        encryptedAccessToken: encryptionService.encrypt('rejected-again'),
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+    );
+    lwaClient.refreshAccessToken.mockResolvedValue({
+      kind: 'success',
+      token: {
+        accessToken: 'yet-another-new-token',
+        tokenType: 'bearer',
+        expiresInSeconds: 3600,
+      },
+    });
+
+    const token = await service.refreshAccessTokenAfterUnauthorized(
+      'acc-1',
+      'rejected-again',
+    );
+
+    expect(token).toBe('yet-another-new-token');
+    expect(lwaClient.refreshAccessToken).toHaveBeenCalledTimes(1);
+  });
+
+  it('acquires the advisory lock and rereads the account before deciding', async () => {
+    const encryptionService = buildEncryptionService();
+    const { service, marketplaceAccountsService, advisoryLockService } =
+      buildService({ encryptionService });
+
+    marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      amazonAccount({
+        encryptedRefreshToken: encryptionService.encrypt('refresh-token'),
+        encryptedAccessToken: encryptionService.encrypt('already-newer-token'),
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+    );
+
+    await service.refreshAccessTokenAfterUnauthorized('acc-1', 'rejected');
+
+    expect(advisoryLockService.tryAcquire).toHaveBeenCalledWith('acc-1');
+    // Uma leitura inicial (fora do lock) + uma releitura pós-lock.
+    expect(marketplaceAccountsService.findByIdOrFail).toHaveBeenCalledTimes(2);
+  });
+
+  it('never logs, returns, or serializes the rejected access token anywhere, even on failure', async () => {
+    const encryptionService = buildEncryptionService();
+    const rejectedPlainToken = 'Atza|SUPER-SECRET-REJECTED-ACCESS-TOKEN';
+    const { service, marketplaceAccountsService, lwaClient } = buildService({
+      encryptionService,
+    });
+
+    marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      amazonAccount({
+        encryptedRefreshToken: encryptionService.encrypt('refresh-token'),
+        encryptedAccessToken: encryptionService.encrypt(rejectedPlainToken),
+        tokenExpiresAt: new Date(Date.now() + 60 * 60 * 1000),
+      }),
+    );
+    lwaClient.refreshAccessToken.mockResolvedValue({ kind: 'invalid_grant' });
+
+    let caught: unknown;
+    try {
+      await service.refreshAccessTokenAfterUnauthorized(
+        'acc-1',
+        rejectedPlainToken,
+      );
+    } catch (error) {
+      caught = error;
+    }
+
+    expect(JSON.stringify(caught)).not.toContain(rejectedPlainToken);
+    expect(
+      JSON.stringify(marketplaceAccountsService.markTokenExpired.mock.calls),
+    ).not.toContain(rejectedPlainToken);
+  });
+});
+
 describe('AmazonAuthService.provisionAccount', () => {
   it('rejects a Mercado Livre account with a closed error', async () => {
     const { service, marketplaceAccountsService } = buildService();

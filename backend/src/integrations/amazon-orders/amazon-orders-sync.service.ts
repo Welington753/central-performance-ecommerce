@@ -13,6 +13,8 @@ import {
   dateOnlyToUtcInstant,
   addDaysToDateOnly,
   parseDateOnlyStrict,
+  saoPauloDateOnly,
+  compareDateOnly,
   InvalidKpiPeriodError,
   type PeriodWindow,
 } from '../marketplace-orders/period.util';
@@ -40,6 +42,8 @@ export type AmazonOrdersSyncErrorCode =
   | 'PROVIDER_RATE_LIMITED'
   | 'PROVIDER_REJECTED_REQUEST'
   | 'INVALID_PROVIDER_RESPONSE'
+  | 'INCOMPLETE_PROVIDER_DATA'
+  | 'PAGINATION_LIMIT_EXCEEDED'
   | 'SYNC_FAILED';
 
 const FAILURE_SUMMARIES: Record<AmazonOrdersSyncErrorCode, string> = {
@@ -51,6 +55,12 @@ const FAILURE_SUMMARIES: Record<AmazonOrdersSyncErrorCode, string> = {
   PROVIDER_RATE_LIMITED: 'Provedor limitou a taxa de requisições.',
   PROVIDER_REJECTED_REQUEST: 'Provedor rejeitou a requisição.',
   INVALID_PROVIDER_RESPONSE: 'Resposta do provedor em formato inesperado.',
+  // Checkpoint 4-B-R1 ("Correção 1") — só a CONTAGEM agregada de pedidos
+  // descartados é aceita aqui; nunca ID de pedido, SKU, título ou payload.
+  INCOMPLETE_PROVIDER_DATA:
+    'Parte dos pedidos recebidos não pôde ser processada com segurança.',
+  PAGINATION_LIMIT_EXCEEDED:
+    'Limite de segurança de paginação atingido antes do fim real dos dados.',
   SYNC_FAILED: 'Falha inesperada durante a sincronização.',
 };
 
@@ -84,10 +94,29 @@ export interface AmazonOrdersSyncInput {
 export const AMAZON_ORDERS_SLEEP = Symbol('AMAZON_ORDERS_SLEEP');
 export type SleepFn = (ms: number) => Promise<void>;
 
+/**
+ * Relógio injetável (Checkpoint 4-B-R1, "Correção 7") — produção usa
+ * `() => new Date()`; testes injetam um instante fixo, nunca dependendo do
+ * relógio real da máquina para validar o cutoff de dois minutos.
+ */
+export const AMAZON_ORDERS_CLOCK = Symbol('AMAZON_ORDERS_CLOCK');
+export type ClockFn = () => Date;
+
 const HARD_SAFETY_PAGE_CAP = 200;
 const HARD_SAFETY_ORDER_CAP = 20000;
 const MAX_TRANSIENT_RETRIES_PER_PAGE = 3;
 const MAX_TOKEN_RENEWAL_ATTEMPTS = 1;
+
+// A Amazon exige que `createdBefore`/`lastUpdatedBefore`, quando enviados,
+// estejam pelo menos 2 minutos atrás do instante da requisição (Checkpoint
+// 4-B-R1, "Correção 7") — cutoff sempre calculado a partir do relógio
+// injetado, nunca de `new Date()` direto.
+const MIN_SEARCH_BEFORE_BUFFER_MS = 2 * 60 * 1000;
+
+// Limite de sanidade para um período customizado — protege contra um
+// intervalo absurdamente longo antes de qualquer chamada de rede.
+const MAX_SYNC_RANGE_DAYS = 366;
+const MAX_SYNC_RANGE_MS = MAX_SYNC_RANGE_DAYS * 24 * 60 * 60 * 1000;
 
 /**
  * Sincronização de pedidos Amazon (Orders API `v2026-01-01`) — espelha a
@@ -110,6 +139,7 @@ export class AmazonOrdersSyncService {
     private readonly persistence: MarketplaceOrdersPersistenceService,
     private readonly configService: ConfigService,
     @Inject(AMAZON_ORDERS_SLEEP) private readonly sleep: SleepFn,
+    @Inject(AMAZON_ORDERS_CLOCK) private readonly clock: ClockFn,
   ) {}
 
   async syncOrders(
@@ -138,7 +168,8 @@ export class AmazonOrdersSyncService {
       throw new AmazonOrdersSyncError('AMAZON_NOT_CONFIGURED');
     }
 
-    const window = this.resolveWindow(input, new Date());
+    const now = this.clock();
+    const window = this.resolveWindow(input, now);
 
     const startedAt = new Date();
     let syncRunId: string;
@@ -157,23 +188,41 @@ export class AmazonOrdersSyncService {
       throw error;
     }
 
+    // Guarda contra finalização duplicada do mesmo run no bloco `catch`
+    // (Checkpoint 4-B-R1, "Correção 1") — o caminho de quarentena finaliza o
+    // run como FAILED com contadores completos ANTES de lançar o erro para o
+    // controller; sem esta flag, o `catch` abaixo tentaria finalizar de novo.
+    let finalized = false;
+
     try {
       let accessToken =
         await this.authService.ensureValidAccessToken(accountId);
 
-      const { rawOrders, pagesFetched } = await this.fetchAllPages({
+      const { rawOrders, pagesFetched, truncated } = await this.fetchAllPages({
         accountId,
         window,
         endpoint: configResult.config.spApiEndpoint,
         userAgent: configResult.config.userAgent,
         marketplaceIds,
         getAccessToken: () => accessToken,
-        renewAccessToken: async () => {
+        renewAccessToken: async (rejectedAccessToken: string) => {
           accessToken =
-            await this.authService.ensureValidAccessToken(accountId);
+            await this.authService.refreshAccessTokenAfterUnauthorized(
+              accountId,
+              rejectedAccessToken,
+            );
           return accessToken;
         },
       });
+
+      if (truncated) {
+        // Checkpoint 4-B-R1, "Correção 2" — o cap de segurança interrompeu a
+        // paginação enquanto ainda havia `nextToken`: o lote é
+        // estruturalmente incompleto, nunca persistido, nunca vira
+        // cobertura. O `catch` abaixo finaliza o run como FAILED normalmente
+        // (sem contadores — nada foi persistido).
+        throw new AmazonOrdersSyncError('PAGINATION_LIMIT_EXCEEDED');
+      }
 
       let quarantined = 0;
       const mappedOrders: MappedOrderRecord[] = [];
@@ -195,6 +244,36 @@ export class AmazonOrdersSyncService {
       const persistResult = await this.persistence.persistOrders(mappedOrders);
       const finishedAt = new Date();
 
+      if (quarantined > 0) {
+        // Checkpoint 4-B-R1, "Correção 1" — os pedidos VÁLIDOS já foram
+        // persistidos acima (cobertura parcial real, não descartada), mas o
+        // run nunca pode terminar como SUCCESS quando parte dos dados do
+        // provedor foi descartada: termina FAILED, com contadores completos,
+        // sem marcar a conta como sincronizada e sem entrar em nenhuma
+        // cobertura do dashboard (que só considera runs `SUCCESS`).
+        finalized = true;
+        await this.persistence.finalizeSyncRunIncomplete(
+          syncRunId,
+          {
+            ordersFetched: rawOrders.length,
+            ordersCreated: persistResult.ordersCreated,
+            ordersUpdated: persistResult.ordersUpdated,
+            recordsFailed: quarantined,
+            pagesFetched,
+            itemsPersisted: persistResult.itemsPersisted,
+          },
+          'INCOMPLETE_PROVIDER_DATA',
+          FAILURE_SUMMARIES.INCOMPLETE_PROVIDER_DATA,
+          finishedAt,
+        );
+        this.logger.warn('amazon_sync_quarantined_orders_summary', {
+          accountId,
+          quarantined,
+        });
+        throw new AmazonOrdersSyncError('INCOMPLETE_PROVIDER_DATA');
+      }
+
+      finalized = true;
       await this.persistence.finalizeSyncRunSuccess(
         syncRunId,
         {
@@ -207,13 +286,6 @@ export class AmazonOrdersSyncService {
         finishedAt,
       );
       await this.persistence.markAccountSynced(accountId, finishedAt);
-
-      if (quarantined > 0) {
-        this.logger.warn('amazon_sync_quarantined_orders_summary', {
-          accountId,
-          quarantined,
-        });
-      }
 
       return {
         syncRunId,
@@ -229,27 +301,37 @@ export class AmazonOrdersSyncService {
     } catch (error) {
       const code =
         error instanceof AmazonOrdersSyncError ? error.code : 'SYNC_FAILED';
-      await this.persistence.finalizeSyncRunFailure(
-        syncRunId,
-        code,
-        FAILURE_SUMMARIES[code],
-        new Date(),
-      );
+      if (!finalized) {
+        await this.persistence.finalizeSyncRunFailure(
+          syncRunId,
+          code,
+          FAILURE_SUMMARIES[code],
+          new Date(),
+        );
+      }
       throw error instanceof AmazonOrdersSyncError
         ? error
         : new AmazonOrdersSyncError('SYNC_FAILED');
     }
   }
 
-  private resolveWindow(
-    input: AmazonOrdersSyncInput,
-    referenceNow: Date,
-  ): PeriodWindow {
+  /**
+   * Resolve a janela [from, to) efetivamente consultada — nunca `new
+   * Date()` direto, sempre `now` (relógio injetado). `to` nunca ultrapassa
+   * `now - 2min` (Checkpoint 4-B-R1, "Correção 7": a Amazon exige que
+   * `createdBefore` esteja pelo menos dois minutos no passado); um período
+   * customizado que inclua hoje é silenciosamente limitado a esse cutoff —
+   * é ISSO que vai para `sync_runs.date_to`, nunca o fim solicitado.
+   */
+  private resolveWindow(input: AmazonOrdersSyncInput, now: Date): PeriodWindow {
     const hasFrom = input.from !== undefined && input.from !== '';
     const hasTo = input.to !== undefined && input.to !== '';
+    const cutoff = new Date(now.getTime() - MIN_SEARCH_BEFORE_BUFFER_MS);
 
     if (!hasFrom && !hasTo) {
-      return computeInitialSyncWindow(referenceNow);
+      const initial = computeInitialSyncWindow(now);
+      const to = initial.to.getTime() > cutoff.getTime() ? cutoff : initial.to;
+      return { from: initial.from, to };
     }
     if (hasFrom !== hasTo) {
       throw new AmazonOrdersSyncError('INVALID_PERIOD');
@@ -258,8 +340,30 @@ export class AmazonOrdersSyncService {
     try {
       const from = parseDateOnlyStrict(input.from as string);
       const to = parseDateOnlyStrict(input.to as string);
+
+      // Rejeita período futuro (dia-calendário `to` posterior a hoje em
+      // América/São_Paulo) ANTES de qualquer chamada de rede — distinto do
+      // cutoff de 2 minutos abaixo, que só recorta o FIM de um período que
+      // já inclui hoje.
+      if (compareDateOnly(to, saoPauloDateOnly(now)) > 0) {
+        throw new AmazonOrdersSyncError('INVALID_PERIOD');
+      }
+
       const fromInstant = dateOnlyToUtcInstant(from);
-      const toInstant = dateOnlyToUtcInstant(addDaysToDateOnly(to, 1));
+      const requestedToInstant = dateOnlyToUtcInstant(addDaysToDateOnly(to, 1));
+
+      if (
+        requestedToInstant.getTime() - fromInstant.getTime() >
+        MAX_SYNC_RANGE_MS
+      ) {
+        throw new AmazonOrdersSyncError('INVALID_PERIOD');
+      }
+
+      const toInstant =
+        requestedToInstant.getTime() > cutoff.getTime()
+          ? cutoff
+          : requestedToInstant;
+
       if (fromInstant.getTime() >= toInstant.getTime()) {
         throw new AmazonOrdersSyncError('INVALID_PERIOD');
       }
@@ -272,6 +376,14 @@ export class AmazonOrdersSyncService {
     }
   }
 
+  /**
+   * Busca todas as páginas dentro dos caps de segurança. `truncated: true`
+   * (Checkpoint 4-B-R1, "Correção 2") sinaliza que um cap foi atingido
+   * enquanto AINDA havia `nextToken` pendente — paginação estruturalmente
+   * incompleta, nunca traduzida em sucesso pelo chamador. Quando a última
+   * página não tem `nextToken`, o run pode terminar com sucesso mesmo que a
+   * quantidade esteja exatamente no limite.
+   */
   private async fetchAllPages(input: {
     accountId: string;
     window: PeriodWindow;
@@ -279,14 +391,18 @@ export class AmazonOrdersSyncService {
     userAgent: string;
     marketplaceIds: string[];
     getAccessToken: () => string;
-    renewAccessToken: () => Promise<string>;
-  }): Promise<{ rawOrders: RawAmazonOrder[]; pagesFetched: number }> {
+    renewAccessToken: (rejectedAccessToken: string) => Promise<string>;
+  }): Promise<{
+    rawOrders: RawAmazonOrder[];
+    pagesFetched: number;
+    truncated: boolean;
+  }> {
     const rawOrders: RawAmazonOrder[] = [];
     let pagesFetched = 0;
     let paginationToken: string | undefined;
     let tokenRenewals = 0;
 
-    while (pagesFetched < HARD_SAFETY_PAGE_CAP) {
+    for (;;) {
       let transientAttempts = 0;
       let outcome: AmazonSearchOrdersOutcome;
 
@@ -308,7 +424,7 @@ export class AmazonOrdersSyncService {
             throw new AmazonOrdersSyncError('PROVIDER_UNAVAILABLE');
           }
           tokenRenewals += 1;
-          await input.renewAccessToken();
+          await input.renewAccessToken(input.getAccessToken());
           continue;
         }
 
@@ -346,12 +462,18 @@ export class AmazonOrdersSyncService {
 
       pagesFetched += 1;
       rawOrders.push(...validation.orders);
+      const nextToken = validation.pagination.nextToken;
 
-      if (rawOrders.length >= HARD_SAFETY_ORDER_CAP) break;
-      if (validation.pagination.nextToken === null) break;
-      paginationToken = validation.pagination.nextToken;
+      if (rawOrders.length >= HARD_SAFETY_ORDER_CAP) {
+        return { rawOrders, pagesFetched, truncated: nextToken !== null };
+      }
+      if (nextToken === null) {
+        return { rawOrders, pagesFetched, truncated: false };
+      }
+      if (pagesFetched >= HARD_SAFETY_PAGE_CAP) {
+        return { rawOrders, pagesFetched, truncated: true };
+      }
+      paginationToken = nextToken;
     }
-
-    return { rawOrders, pagesFetched };
   }
 }

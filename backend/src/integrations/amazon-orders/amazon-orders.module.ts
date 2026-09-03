@@ -3,7 +3,10 @@ import { AuthModule } from '../../auth/auth.module';
 import { AmazonModule } from '../amazon-sp-api/amazon.module';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
 import { MarketplaceOrdersModule } from '../marketplace-orders/marketplace-orders.module';
-import { AMAZON_ORDERS_SLEEP } from './amazon-orders-sync.service';
+import {
+  AMAZON_ORDERS_CLOCK,
+  AMAZON_ORDERS_SLEEP,
+} from './amazon-orders-sync.service';
 import { AmazonOrdersSyncController } from './amazon-orders-sync.controller';
 import { AmazonOrdersSyncService } from './amazon-orders-sync.service';
 
@@ -26,6 +29,10 @@ import { AmazonOrdersSyncService } from './amazon-orders-sync.service';
       provide: AMAZON_ORDERS_SLEEP,
       useValue: (ms: number) =>
         new Promise((resolve) => setTimeout(resolve, ms)),
+    },
+    {
+      provide: AMAZON_ORDERS_CLOCK,
+      useValue: () => new Date(),
     },
     AmazonOrdersSyncService,
   ],

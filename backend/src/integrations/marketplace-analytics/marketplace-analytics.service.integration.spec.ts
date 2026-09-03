@@ -13,6 +13,9 @@ import { MercadoLivreOrdersKpiService } from '../mercado-livre-orders/mercado-li
 import { toMercadoLivreKpisResponse } from '../mercado-livre-orders/dto/mercado-livre-kpis-response.dto';
 import { resolveKpiPeriod } from '../marketplace-orders/period.util';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
+import type { RawAmazonOrder } from '../amazon-orders/amazon-order-response';
+import { mapAmazonOrder } from '../amazon-orders/amazon-order.mapper';
+import { MarketplaceOrdersPersistenceService } from '../marketplace-orders/marketplace-orders-persistence.service';
 import { MarketplaceAnalyticsService } from './marketplace-analytics.service';
 import { toMarketplaceAnalyticsResponse } from './dto/marketplace-analytics-response.dto';
 
@@ -1122,6 +1125,76 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       await expect(
         analyticsService.getAggregate({ marketplace: 'AMAZON' }, REFERENCE_NOW),
       ).rejects.toThrow('CURRENCY_MISMATCH');
+    });
+
+    it('11. the same ASIN/SKU sold in two different orders consolidates into a single topListings entry, with units and revenue summed (Correção 5)', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedSuccessfulSyncRunFor(
+        amazonAccount,
+        Marketplace.AMAZON,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T00:00:00.000Z'),
+      );
+
+      function sameListingOrder(input: {
+        orderId: string;
+        orderItemId: string;
+      }): RawAmazonOrder {
+        return {
+          orderId: input.orderId,
+          createdTime: IN_CURRENT.toISOString(),
+          lastUpdatedTime: IN_CURRENT.toISOString(),
+          marketplaceId: 'A2Q3Y263D00KWC',
+          fulfillmentStatus: 'SHIPPED',
+          fulfilledBy: 'AMAZON',
+          grandTotal: { amount: '100.00', currencyCode: 'BRL' },
+          items: [
+            {
+              // `orderItemId` é DIFERENTE em cada pedido — a identidade do
+              // anúncio nunca pode depender dele (Checkpoint 4-B-R1,
+              // "Correção 5"): o mesmo ASIN/SKU precisa consolidar.
+              orderItemId: input.orderItemId,
+              quantityOrdered: 2,
+              asin: 'B0SAMEASIN01',
+              sellerSku: 'SKU-SAME',
+              title: 'Produto Consolidado',
+              unitPrice: null,
+              itemSubtotal: { amount: '100.00', currencyCode: 'BRL' },
+            },
+          ],
+        };
+      }
+
+      const persistence = new MarketplaceOrdersPersistenceService(dataSource);
+      const mappedA = mapAmazonOrder(
+        amazonAccount,
+        sameListingOrder({ orderId: 'amz-order-a', orderItemId: 'item-a' }),
+        ['A2Q3Y263D00KWC'],
+      );
+      const mappedB = mapAmazonOrder(
+        amazonAccount,
+        sameListingOrder({ orderId: 'amz-order-b', orderItemId: 'item-b' }),
+        ['A2Q3Y263D00KWC'],
+      );
+      await persistence.persistOrders([mappedA, mappedB]);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+
+      const listingsForThisAccount = aggregate.topListings.filter(
+        (listing) => listing.accountId === amazonAccount,
+      );
+      expect(listingsForThisAccount).toHaveLength(1);
+      expect(listingsForThisAccount[0].externalItemId).toBe('B0SAMEASIN01');
+      expect(listingsForThisAccount[0].variationId).toBe('SKU-SAME');
+      // Cada pedido: quantidade 2 × unitário 50.00 (subtotal 100.00 / 2) —
+      // dois pedidos somam 4 unidades e 200.00 (20000 centavos).
+      expect(listingsForThisAccount[0].units).toBe(4);
+      expect(listingsForThisAccount[0].grossRevenueCents).toBe(20000n);
     });
   });
 });

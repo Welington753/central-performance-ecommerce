@@ -18,6 +18,11 @@ export const AMAZON_ORDER_STATUSES = [
   'PENDING',
   'PENDING_AVAILABILITY',
   'UNFULFILLABLE',
+  // Guia oficial de migração `orders_2026-01-01` (Checkpoint 4-B-R1,
+  // "Correção 8") — nota fiscal ainda não confirmada; nunca é venda paga
+  // nem cancelamento, então normaliza para `pending` como os outros dois
+  // estados de espera.
+  'INVOICE_UNCONFIRMED',
 ] as const;
 
 export type AmazonOrderStatus = (typeof AMAZON_ORDER_STATUSES)[number];
@@ -50,6 +55,7 @@ export function mapAmazonOrderStatusToCanonical(
       return CANCELLED_ORDER_STATUS;
     case 'PENDING':
     case 'PENDING_AVAILABILITY':
+    case 'INVOICE_UNCONFIRMED':
       return PENDING_ORDER_STATUS;
     case 'UNFULFILLABLE':
       return UNFULFILLABLE_ORDER_STATUS;

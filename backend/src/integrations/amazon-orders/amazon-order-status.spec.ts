@@ -12,7 +12,7 @@ describe('isKnownAmazonOrderStatus', () => {
   });
 
   it('rejects an unknown status', () => {
-    expect(isKnownAmazonOrderStatus('INVOICE_UNCONFIRMED')).toBe(false);
+    expect(isKnownAmazonOrderStatus('SOME_MADE_UP_STATUS')).toBe(false);
     expect(isKnownAmazonOrderStatus('')).toBe(false);
     expect(isKnownAmazonOrderStatus(42)).toBe(false);
     expect(isKnownAmazonOrderStatus(null)).toBe(false);
@@ -28,6 +28,7 @@ describe('mapAmazonOrderStatusToCanonical', () => {
     ['PENDING', 'pending'],
     ['PENDING_AVAILABILITY', 'pending'],
     ['UNFULFILLABLE', 'unfulfillable'],
+    ['INVOICE_UNCONFIRMED', 'pending'],
   ] as const)('maps %s to %s', (raw, canonical) => {
     expect(mapAmazonOrderStatusToCanonical(raw)).toBe(canonical);
   });
@@ -36,6 +37,15 @@ describe('mapAmazonOrderStatusToCanonical', () => {
     expect(mapAmazonOrderStatusToCanonical('PENDING')).not.toBe('paid');
     expect(mapAmazonOrderStatusToCanonical('PENDING_AVAILABILITY')).not.toBe(
       'paid',
+    );
+  });
+
+  it('never treats INVOICE_UNCONFIRMED as a paid sale nor as a cancellation', () => {
+    expect(mapAmazonOrderStatusToCanonical('INVOICE_UNCONFIRMED')).not.toBe(
+      'paid',
+    );
+    expect(mapAmazonOrderStatusToCanonical('INVOICE_UNCONFIRMED')).not.toBe(
+      'cancelled',
     );
   });
 

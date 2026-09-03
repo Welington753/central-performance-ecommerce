@@ -35,3 +35,28 @@ export function validateAmazonMoney(value: unknown): ValidatedMoney | null {
   if (amount === null || !isValidCurrencyCode(raw.currencyCode)) return null;
   return { amount, currencyCode: raw.currencyCode };
 }
+
+/**
+ * Converte um valor já validado por `DECIMAL_AMOUNT_PATTERN` (`\d+(\.\d{1,2})?`,
+ * nunca negativo) para centavos em `bigint` — nunca `float`/`Number`, que
+ * introduziria erro de ponto flutuante em cálculo financeiro (Checkpoint
+ * 4-B-R1, "Correção 4"). Preenche a casa decimal ausente (`"5.5"` -> 50
+ * centavos, `"100"` -> 10000 centavos).
+ */
+export function decimalAmountToCents(amount: string): bigint {
+  const [integerPart, fractionPart = ''] = amount.split('.');
+  const cents = fractionPart.padEnd(2, '0');
+  return BigInt(integerPart) * 100n + BigInt(cents);
+}
+
+/**
+ * Inverso de `decimalAmountToCents` — sempre produz exatamente duas casas
+ * decimais, o mesmo formato aceito por `DECIMAL_AMOUNT_PATTERN`. Nunca
+ * chamado com um valor negativo neste código-base (dinheiro de pedido nunca
+ * é negativo).
+ */
+export function centsToDecimalAmount(cents: bigint): string {
+  const integerPart = cents / 100n;
+  const fractionPart = (cents % 100n).toString().padStart(2, '0');
+  return `${integerPart}.${fractionPart}`;
+}

@@ -18,7 +18,7 @@ function item(overrides: Partial<RawAmazonOrderItem> = {}): RawAmazonOrderItem {
     sellerSku: 'SKU-1',
     title: 'Produto 1',
     unitPrice: { amount: '99.95', currencyCode: 'BRL' },
-    itemProceeds: null,
+    itemSubtotal: { amount: '199.90', currencyCode: 'BRL' },
     ...overrides,
   };
 }
@@ -38,7 +38,7 @@ function order(overrides: Partial<RawAmazonOrder> = {}): RawAmazonOrder {
 }
 
 describe('mapAmazonOrder', () => {
-  it('maps a well-formed paid order to the shared record shape', () => {
+  it('maps a well-formed paid order to the shared record shape — unit price derived from the ITEM subtotal, listing identity from ASIN/SKU (never orderItemId)', () => {
     const mapped = mapAmazonOrder(ACCOUNT_ID, order(), ALLOWED_MARKETPLACE_IDS);
 
     expect(mapped).toEqual({
@@ -56,8 +56,8 @@ describe('mapAmazonOrder', () => {
       externalMarketplaceId: 'A2Q3Y263D00KWC',
       items: [
         {
-          externalItemId: 'item-1',
-          variationId: null,
+          externalItemId: 'B000000001',
+          variationId: 'SKU-1',
           sellerSku: 'SKU-1',
           title: 'Produto 1',
           quantity: 2,
@@ -119,11 +119,45 @@ describe('mapAmazonOrder', () => {
         // presente (cenário real: Amazon manda o total estimado mesmo para
         // um pedido ainda pendente, só o preço do ITEM que está ausente).
         grandTotal: { amount: '0.00', currencyCode: 'BRL' },
-        items: [item({ unitPrice: null, itemProceeds: null })],
+        items: [item({ unitPrice: null, itemSubtotal: null })],
       }),
       ALLOWED_MARKETPLACE_IDS,
     );
     expect(mapped.status).toBe('pending');
+    expect(mapped.items[0].unitPrice).toBe('0.00');
+  });
+
+  it('maps INVOICE_UNCONFIRMED to pending — never paid nor cancelled — while preserving the original source status', () => {
+    const mapped = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({
+        fulfillmentStatus: 'INVOICE_UNCONFIRMED',
+        grandTotal: { amount: '0.00', currencyCode: 'BRL' },
+        items: [item({ unitPrice: null, itemSubtotal: null })],
+      }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    expect(mapped.status).toBe('pending');
+    expect(mapped.status).not.toBe('paid');
+    expect(mapped.status).not.toBe('cancelled');
+    expect(mapped.sourceStatus).toBe('INVOICE_UNCONFIRMED');
+  });
+
+  it('a non-paid item never uses the (line-total) itemSubtotal as a per-unit display price — only product.price.unitPrice, or "0.00"', () => {
+    const mapped = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({
+        fulfillmentStatus: 'PENDING',
+        grandTotal: { amount: '0.00', currencyCode: 'BRL' },
+        items: [
+          item({
+            unitPrice: null,
+            itemSubtotal: { amount: '199.90', currencyCode: 'BRL' },
+          }),
+        ],
+      }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
     expect(mapped.items[0].unitPrice).toBe('0.00');
   });
 
@@ -169,46 +203,109 @@ describe('mapAmazonOrder', () => {
     }
   });
 
-  it('throws MISSING_ITEM_PRICE for a PAID order whose item has neither unitPrice nor a valid proceeds[type=ITEM] fallback', () => {
+  it('throws MISSING_ITEM_PROCEEDS for a PAID order whose item has no ITEM-typed proceeds subtotal — never falls back to product.price.unitPrice', () => {
     try {
       mapAmazonOrder(
         ACCOUNT_ID,
-        order({ items: [item({ unitPrice: null, itemProceeds: null })] }),
+        order({
+          items: [
+            item({
+              unitPrice: { amount: '99.95', currencyCode: 'BRL' }, // presente, mas irrelevante
+              itemSubtotal: null,
+            }),
+          ],
+        }),
         ALLOWED_MARKETPLACE_IDS,
       );
       fail('expected to throw');
     } catch (error) {
       expect(error).toBeInstanceOf(AmazonOrderQuarantinedError);
       expect((error as AmazonOrderQuarantinedError).reason).toBe(
-        'MISSING_ITEM_PRICE',
+        'MISSING_ITEM_PROCEEDS',
       );
     }
   });
 
-  it('falls back to proceeds[type=ITEM] when product.price.unitPrice is absent, for a paid order', () => {
+  it('mandatory checkpoint example: quantity 2 + ITEM subtotal 99.98 produces unit price 49.99 (never 199.96 / never a double count)', () => {
     const mapped = mapAmazonOrder(
       ACCOUNT_ID,
       order({
+        grandTotal: { amount: '99.98', currencyCode: 'BRL' },
         items: [
           item({
+            quantityOrdered: 2,
             unitPrice: null,
-            itemProceeds: { amount: '80.00', currencyCode: 'BRL' },
+            itemSubtotal: { amount: '99.98', currencyCode: 'BRL' },
           }),
         ],
       }),
       ALLOWED_MARKETPLACE_IDS,
     );
-    expect(mapped.items[0].unitPrice).toBe('80.00');
+    expect(mapped.items[0].unitPrice).toBe('49.99');
+    expect(mapped.items[0].quantity).toBe(2);
+    // A "receita da linha" (quantidade × unitário persistido) reproduz
+    // exatamente o subtotal original — nunca dobra o valor.
+    expect(
+      Number(mapped.items[0].quantity) * Number(mapped.items[0].unitPrice),
+    ).toBeCloseTo(99.98);
   });
 
-  it('throws CURRENCY_MISMATCH when an item currency diverges from the order currency', () => {
+  it('throws ITEM_SUBTOTAL_NOT_DIVISIBLE when the ITEM subtotal cannot be split exactly (in cents) by the quantity — never rounds silently', () => {
+    try {
+      mapAmazonOrder(
+        ACCOUNT_ID,
+        order({
+          grandTotal: { amount: '10.00', currencyCode: 'BRL' },
+          items: [
+            item({
+              quantityOrdered: 3,
+              unitPrice: null,
+              itemSubtotal: { amount: '10.00', currencyCode: 'BRL' },
+            }),
+          ],
+        }),
+        ALLOWED_MARKETPLACE_IDS,
+      );
+      fail('expected to throw');
+    } catch (error) {
+      expect(error).toBeInstanceOf(AmazonOrderQuarantinedError);
+      expect((error as AmazonOrderQuarantinedError).reason).toBe(
+        'ITEM_SUBTOTAL_NOT_DIVISIBLE',
+      );
+    }
+  });
+
+  it('a divergent product.price.unitPrice never silently replaces the ITEM proceeds subtotal for a paid order', () => {
+    const mapped = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({
+        grandTotal: { amount: '99.98', currencyCode: 'BRL' },
+        items: [
+          item({
+            quantityOrdered: 2,
+            // Preço de catálogo bem diferente do subtotal financeiro real —
+            // nunca deve vazar para o unitário persistido.
+            unitPrice: { amount: '500.00', currencyCode: 'BRL' },
+            itemSubtotal: { amount: '99.98', currencyCode: 'BRL' },
+          }),
+        ],
+      }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    expect(mapped.items[0].unitPrice).toBe('49.99');
+  });
+
+  it('throws CURRENCY_MISMATCH when a paid item ITEM-subtotal currency diverges from the order currency', () => {
     try {
       mapAmazonOrder(
         ACCOUNT_ID,
         order({
           grandTotal: { amount: '199.90', currencyCode: 'BRL' },
           items: [
-            item({ unitPrice: { amount: '99.95', currencyCode: 'USD' } }),
+            item({
+              unitPrice: null,
+              itemSubtotal: { amount: '99.95', currencyCode: 'USD' },
+            }),
           ],
         }),
         ALLOWED_MARKETPLACE_IDS,
@@ -260,5 +357,70 @@ describe('mapAmazonOrder', () => {
       expect(JSON.stringify((error as Error).message)).not.toContain('{');
       expect((error as AmazonOrderQuarantinedError).orderId).toBe('ORDER-1');
     }
+  });
+});
+
+describe('mapAmazonOrder — listing identity (Correção 5)', () => {
+  it('uses the ASIN as externalItemId and the SKU as variationId when both are present', () => {
+    const mapped = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({ items: [item({ asin: 'B111', sellerSku: 'SKU-A' })] }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    expect(mapped.items[0].externalItemId).toBe('B111');
+    expect(mapped.items[0].variationId).toBe('SKU-A');
+  });
+
+  it('falls back to a deterministic SKU-based identity when ASIN is absent', () => {
+    const mapped = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({ items: [item({ asin: null, sellerSku: 'SKU-B' })] }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    expect(mapped.items[0].externalItemId).toBe('SKU:SKU-B');
+    expect(mapped.items[0].variationId).toBeNull();
+  });
+
+  it('falls back to orderItemId only as a last resort, when neither ASIN nor SKU is present', () => {
+    const mapped = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({
+        items: [
+          item({ orderItemId: 'item-only-id', asin: null, sellerSku: null }),
+        ],
+      }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    expect(mapped.items[0].externalItemId).toBe('item-only-id');
+    expect(mapped.items[0].variationId).toBeNull();
+  });
+
+  it('the same ASIN/SKU across two different orderItemIds resolves to the SAME listing identity — never two different listings', () => {
+    const mappedFirst = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({
+        orderId: 'ORDER-1',
+        items: [
+          item({ orderItemId: 'item-a', asin: 'B999', sellerSku: 'SKU-X' }),
+        ],
+      }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    const mappedSecond = mapAmazonOrder(
+      ACCOUNT_ID,
+      order({
+        orderId: 'ORDER-2',
+        items: [
+          item({ orderItemId: 'item-b', asin: 'B999', sellerSku: 'SKU-X' }),
+        ],
+      }),
+      ALLOWED_MARKETPLACE_IDS,
+    );
+    expect(mappedFirst.items[0].externalItemId).toBe(
+      mappedSecond.items[0].externalItemId,
+    );
+    expect(mappedFirst.items[0].variationId).toBe(
+      mappedSecond.items[0].variationId,
+    );
   });
 });

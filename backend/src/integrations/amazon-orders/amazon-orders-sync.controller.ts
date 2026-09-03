@@ -12,6 +12,7 @@ import {
   PreconditionFailedException,
   Post,
   ServiceUnavailableException,
+  UnprocessableEntityException,
   UseGuards,
 } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
@@ -72,7 +73,13 @@ export class AmazonOrdersSyncController {
         return new HttpException(error.code, HttpStatus.TOO_MANY_REQUESTS);
       case 'INVALID_PROVIDER_RESPONSE':
       case 'PROVIDER_REJECTED_REQUEST':
+      case 'PAGINATION_LIMIT_EXCEEDED':
         return new BadGatewayException(error.code);
+      case 'INCOMPLETE_PROVIDER_DATA':
+        // Só o código fechado chega ao cliente — nunca contagens, IDs de
+        // pedido ou qualquer payload bruto (Checkpoint 4-B-R1, "Correção
+        // 1").
+        return new UnprocessableEntityException(error.code);
       case 'PROVIDER_UNAVAILABLE':
       case 'SYNC_FAILED':
       default:

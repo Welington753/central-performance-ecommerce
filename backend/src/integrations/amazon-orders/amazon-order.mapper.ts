@@ -3,7 +3,10 @@ import type {
   MappedOrderRecord,
 } from '../marketplace-orders/mapped-order-record';
 import { PAID_ORDER_STATUS } from '../marketplace-orders/order-status';
-import type { ValidatedMoney } from './amazon-money.util';
+import {
+  centsToDecimalAmount,
+  decimalAmountToCents,
+} from './amazon-money.util';
 import { mapAmazonOrderStatusToCanonical } from './amazon-order-status';
 import type {
   RawAmazonOrder,
@@ -11,15 +14,16 @@ import type {
 } from './amazon-order-response';
 
 /**
- * Vocabulário fechado de motivo de quarentena (Checkpoint 4-B, "Mapeamento
- * financeiro") — a mensagem da exceção É o código, nunca inclui payload
- * bruto do pedido.
+ * Vocabulário fechado de motivo de quarentena (Checkpoint 4-B-R1,
+ * "Mapeamento financeiro") — a mensagem da exceção É o código, nunca inclui
+ * payload bruto do pedido.
  */
 export type AmazonOrderQuarantineReason =
   | 'MARKETPLACE_NOT_ALLOWED'
   | 'MISSING_GRAND_TOTAL'
   | 'MISSING_CURRENCY'
-  | 'MISSING_ITEM_PRICE'
+  | 'MISSING_ITEM_PROCEEDS'
+  | 'ITEM_SUBTOTAL_NOT_DIVISIBLE'
   | 'CURRENCY_MISMATCH';
 
 /**
@@ -44,8 +48,11 @@ export class AmazonOrderQuarantinedError extends Error {
  *   - o `marketplaceId` do pedido não está na allowlist configurada da
  *     conta;
  *   - o pedido está PAGO mas não tem `grandTotal` válido — nunca vira zero;
- *   - o pedido está PAGO mas algum item não tem preço resolvível (nem
- *     `product.price.unitPrice`, nem breakdown `proceeds[type=ITEM]`);
+ *   - o pedido está PAGO mas algum item não tem `proceeds[type=ITEM].subtotal`
+ *     válido (Checkpoint 4-B-R1 — `product.price.unitPrice` NUNCA substitui
+ *     silenciosamente o dado financeiro de PROCEEDS);
+ *   - o pedido está PAGO e o subtotal do item não é divisível de forma exata
+ *     (em centavos) pela quantidade — nunca arredonda silenciosamente;
  *   - a moeda de algum item diverge da moeda do pedido;
  *   - não há NENHUMA moeda determinável para o pedido (nem grandTotal, nem
  *     qualquer item com preço).
@@ -103,19 +110,33 @@ export function mapAmazonOrder(
 function resolveOrderCurrency(raw: RawAmazonOrder): string | null {
   if (raw.grandTotal !== null) return raw.grandTotal.currencyCode;
   for (const item of raw.items) {
-    const price = resolveItemPrice(item);
-    if (price !== null) return price.currencyCode;
+    const currency = (item.itemSubtotal ?? item.unitPrice)?.currencyCode;
+    if (currency !== undefined) return currency;
   }
   return null;
 }
 
 /**
- * `product.price.unitPrice` é priorizado; o breakdown `proceeds[type=ITEM]`
- * só é usado como fallback quando o preço direto não é válido (Checkpoint
- * 4-B, "priorizar... se necessário, usar somente breakdown").
+ * Identidade do ANÚNCIO Amazon (Checkpoint 4-B-R1, "Correção 5") —
+ * `orderItemId` identifica só uma LINHA de um pedido, nunca o anúncio: duas
+ * vendas do mesmo ASIN/SKU em pedidos diferentes têm `orderItemId`s
+ * distintos, mas precisam consolidar no mesmo `topListings`. Prioridade:
+ * ASIN (`externalItemId`) + SKU como parte determinística da variação
+ * (`variationId`); sem ASIN, um fallback determinístico baseado só no SKU;
+ * `orderItemId` é usado apenas como último recurso, quando nem ASIN nem SKU
+ * estão presentes.
  */
-function resolveItemPrice(item: RawAmazonOrderItem): ValidatedMoney | null {
-  return item.unitPrice ?? item.itemProceeds ?? null;
+function resolveListingIdentity(item: RawAmazonOrderItem): {
+  externalItemId: string;
+  variationId: string | null;
+} {
+  if (item.asin !== null) {
+    return { externalItemId: item.asin, variationId: item.sellerSku };
+  }
+  if (item.sellerSku !== null) {
+    return { externalItemId: `SKU:${item.sellerSku}`, variationId: null };
+  }
+  return { externalItemId: item.orderItemId, variationId: null };
 }
 
 function mapAmazonOrderItem(
@@ -124,34 +145,82 @@ function mapAmazonOrderItem(
   isPaid: boolean,
   orderCurrency: string,
 ): MappedOrderItemRecord {
-  const resolved = resolveItemPrice(item);
+  return isPaid
+    ? mapPaidOrderItem(orderId, item, orderCurrency)
+    : mapNonPaidOrderItem(orderId, item, orderCurrency);
+}
 
-  if (resolved === null) {
-    if (isPaid) {
-      throw new AmazonOrderQuarantinedError(orderId, 'MISSING_ITEM_PRICE');
-    }
-    return {
-      externalItemId: item.orderItemId,
-      variationId: null,
-      sellerSku: item.sellerSku,
-      title: item.title,
-      quantity: item.quantityOrdered,
-      unitPrice: '0.00',
-      currencyId: orderCurrency,
-    };
+/**
+ * Pedido PAGO: a única fonte de faturamento realizado permitida é o
+ * `subtotal` do breakdown `proceeds[type=ITEM]` (Checkpoint 4-B-R1,
+ * "Correção 4") — `product.price.unitPrice` nunca substitui isso, mesmo
+ * quando presente e divergente (só serve para diagnóstico fora deste
+ * mapper). O subtotal é o valor da LINHA INTEIRA; o preço unitário
+ * persistido só existe quando a divisão por `quantityOrdered` é EXATA em
+ * centavos — nunca arredonda.
+ */
+function mapPaidOrderItem(
+  orderId: string,
+  item: RawAmazonOrderItem,
+  orderCurrency: string,
+): MappedOrderItemRecord {
+  if (item.itemSubtotal === null) {
+    throw new AmazonOrderQuarantinedError(orderId, 'MISSING_ITEM_PROCEEDS');
   }
-
-  if (resolved.currencyCode !== orderCurrency) {
+  if (item.itemSubtotal.currencyCode !== orderCurrency) {
     throw new AmazonOrderQuarantinedError(orderId, 'CURRENCY_MISMATCH');
   }
 
+  const subtotalCents = decimalAmountToCents(item.itemSubtotal.amount);
+  const quantity = BigInt(item.quantityOrdered);
+  if (subtotalCents % quantity !== 0n) {
+    throw new AmazonOrderQuarantinedError(
+      orderId,
+      'ITEM_SUBTOTAL_NOT_DIVISIBLE',
+    );
+  }
+  const unitCents = subtotalCents / quantity;
+
   return {
-    externalItemId: item.orderItemId,
-    variationId: null,
+    ...resolveListingIdentity(item),
     sellerSku: item.sellerSku,
     title: item.title,
     quantity: item.quantityOrdered,
-    unitPrice: resolved.amount,
-    currencyId: resolved.currencyCode,
+    unitPrice: centsToDecimalAmount(unitCents),
+    currencyId: item.itemSubtotal.currencyCode,
+  };
+}
+
+/**
+ * Pedido NÃO pago (`pending`/`cancelled`/`unfulfillable`): nunca afeta
+ * nenhum KPI de faturamento (todos filtram `status = 'paid'`), então tolera
+ * ausência de preço com um "0.00" de preenchimento. Usa
+ * `product.price.unitPrice` (já é, por definição, um valor POR UNIDADE) —
+ * nunca o `itemSubtotal` (valor da linha inteira) diretamente num campo de
+ * preço unitário, mesmo aqui.
+ */
+function mapNonPaidOrderItem(
+  orderId: string,
+  item: RawAmazonOrderItem,
+  orderCurrency: string,
+): MappedOrderItemRecord {
+  const listing = resolveListingIdentity(item);
+  const base = {
+    ...listing,
+    sellerSku: item.sellerSku,
+    title: item.title,
+    quantity: item.quantityOrdered,
+  };
+
+  if (item.unitPrice === null) {
+    return { ...base, unitPrice: '0.00', currencyId: orderCurrency };
+  }
+  if (item.unitPrice.currencyCode !== orderCurrency) {
+    throw new AmazonOrderQuarantinedError(orderId, 'CURRENCY_MISMATCH');
+  }
+  return {
+    ...base,
+    unitPrice: item.unitPrice.amount,
+    currencyId: item.unitPrice.currencyCode,
   };
 }

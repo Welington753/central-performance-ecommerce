@@ -227,6 +227,62 @@ describe('AmazonSpApiClient.searchOrders', () => {
     expect(fetchImpl).not.toHaveBeenCalled();
   });
 
+  it('rejects createdAfter mixed with lastUpdatedBefore — never sends an ambiguous cross-mode request', async () => {
+    const fetchImpl = jest.fn();
+    const client = new AmazonSpApiClient(fetchImpl);
+
+    await expect(
+      client.searchOrders({
+        ...SEARCH_ORDERS_BASE_INPUT,
+        createdAfter: '2026-08-01T00:00:00Z',
+        lastUpdatedBefore: '2026-08-02T00:00:00Z',
+      }),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects lastUpdatedAfter mixed with createdBefore — never sends an ambiguous cross-mode request', async () => {
+    const fetchImpl = jest.fn();
+    const client = new AmazonSpApiClient(fetchImpl);
+
+    await expect(
+      client.searchOrders({
+        ...SEARCH_ORDERS_BASE_INPUT,
+        lastUpdatedAfter: '2026-08-01T00:00:00Z',
+        createdBefore: '2026-08-02T00:00:00Z',
+      }),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects createdBefore earlier than createdAfter', async () => {
+    const fetchImpl = jest.fn();
+    const client = new AmazonSpApiClient(fetchImpl);
+
+    await expect(
+      client.searchOrders({
+        ...SEARCH_ORDERS_BASE_INPUT,
+        createdAfter: '2026-08-05T00:00:00Z',
+        createdBefore: '2026-08-01T00:00:00Z',
+      }),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it('rejects lastUpdatedBefore earlier than lastUpdatedAfter', async () => {
+    const fetchImpl = jest.fn();
+    const client = new AmazonSpApiClient(fetchImpl);
+
+    await expect(
+      client.searchOrders({
+        ...SEARCH_ORDERS_BASE_INPUT,
+        lastUpdatedAfter: '2026-08-05T00:00:00Z',
+        lastUpdatedBefore: '2026-08-01T00:00:00Z',
+      }),
+    ).rejects.toThrow();
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it('sends paginationToken for a subsequent page while preserving the original filters', async () => {
     const fetchImpl = jest
       .fn()

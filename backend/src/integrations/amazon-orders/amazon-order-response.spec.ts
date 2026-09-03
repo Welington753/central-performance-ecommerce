@@ -55,7 +55,7 @@ describe('validateOrdersSearchResponseBody', () => {
       sellerSku: 'SKU-1',
       title: 'Produto 1',
       unitPrice: { amount: '99.95', currencyCode: 'BRL' },
-      itemProceeds: null,
+      itemSubtotal: null,
     });
     expect(result.pagination.nextToken).toBeNull();
   });
@@ -125,6 +125,23 @@ describe('validateOrdersSearchResponseBody', () => {
         validBody([validOrder({ salesChannel: {} })]),
       ),
     ).toEqual({ valid: false });
+  });
+
+  it('accepts INVOICE_UNCONFIRMED as a known fulfillmentStatus (official migration guide)', () => {
+    const result = validateOrdersSearchResponseBody(
+      validBody([
+        validOrder({
+          fulfillment: {
+            fulfillmentStatus: 'INVOICE_UNCONFIRMED',
+            fulfilledBy: 'AMAZON',
+          },
+        }),
+      ]),
+    );
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.orders[0].fulfillmentStatus).toBe('INVOICE_UNCONFIRMED');
+    }
   });
 
   it('rejects the whole page for an unknown fulfillmentStatus', () => {
@@ -199,11 +216,42 @@ describe('validateOrdersSearchResponseBody', () => {
     if (result.valid) expect(result.orders[0].items[0].unitPrice).toBeNull();
   });
 
-  it('extracts the ITEM-typed proceeds entry as the fallback price, ignoring other types', () => {
+  it('reads the ITEM-typed breakdown subtotal from the official orderItems[].proceeds.breakdowns[] object, ignoring other types', () => {
     const item = validItem({
       product: { asin: 'B1', sellerSku: 'SKU-1', title: 'X' }, // sem price.unitPrice
+      proceeds: {
+        breakdowns: [
+          {
+            type: 'SHIPPING',
+            subtotal: { amount: '15.00', currencyCode: 'BRL' },
+          },
+          {
+            type: 'ITEM',
+            subtotal: { amount: '80.00', currencyCode: 'BRL' },
+          },
+          {
+            type: 'TAX',
+            subtotal: { amount: '5.00', currencyCode: 'BRL' },
+          },
+        ],
+      },
+    });
+    const result = validateOrdersSearchResponseBody(
+      validBody([validOrder({ orderItems: [item] })]),
+    );
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.orders[0].items[0].itemSubtotal).toEqual({
+        amount: '80.00',
+        currencyCode: 'BRL',
+      });
+    }
+  });
+
+  it('never accepts the old fictitious { type, amount }[] array format as a financial proceeds source', () => {
+    const item = validItem({
+      product: { asin: 'B1', sellerSku: 'SKU-1', title: 'X' },
       proceeds: [
-        { type: 'SHIPPING', amount: { amount: '15.00', currencyCode: 'BRL' } },
         { type: 'ITEM', amount: { amount: '80.00', currencyCode: 'BRL' } },
       ],
     });
@@ -212,10 +260,44 @@ describe('validateOrdersSearchResponseBody', () => {
     );
     expect(result.valid).toBe(true);
     if (result.valid) {
-      expect(result.orders[0].items[0].itemProceeds).toEqual({
-        amount: '80.00',
-        currencyCode: 'BRL',
-      });
+      expect(result.orders[0].items[0].itemSubtotal).toBeNull();
+    }
+  });
+
+  it('tolerates proceeds with no breakdowns array, or with no ITEM-typed entry (null, not a rejection)', () => {
+    const noBreakdowns = validateOrdersSearchResponseBody(
+      validBody([
+        validOrder({
+          orderItems: [validItem({ proceeds: {} })],
+        }),
+      ]),
+    );
+    expect(noBreakdowns.valid).toBe(true);
+    if (noBreakdowns.valid) {
+      expect(noBreakdowns.orders[0].items[0].itemSubtotal).toBeNull();
+    }
+
+    const noItemEntry = validateOrdersSearchResponseBody(
+      validBody([
+        validOrder({
+          orderItems: [
+            validItem({
+              proceeds: {
+                breakdowns: [
+                  {
+                    type: 'SHIPPING',
+                    subtotal: { amount: '15.00', currencyCode: 'BRL' },
+                  },
+                ],
+              },
+            }),
+          ],
+        }),
+      ]),
+    );
+    expect(noItemEntry.valid).toBe(true);
+    if (noItemEntry.valid) {
+      expect(noItemEntry.orders[0].items[0].itemSubtotal).toBeNull();
     }
   });
 });

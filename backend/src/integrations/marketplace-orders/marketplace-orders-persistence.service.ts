@@ -121,6 +121,55 @@ export class MarketplaceOrdersPersistenceService {
     );
   }
 
+  /**
+   * Finaliza um `sync_run` como `FAILED` PRESERVANDO os contadores de
+   * leitura/criação/atualização/páginas/itens do que foi de fato buscado e
+   * persistido (Checkpoint 4-B-R1, "Correção 1") — diferente de
+   * `finalizeSyncRunFailure` (usada pelo Mercado Livre e pelas demais falhas
+   * da Amazon), que zera esses contadores por não ter nada útil para
+   * registrar quando a falha ocorre ANTES de qualquer fetch/persistência
+   * bem-sucedida. Usada quando pedidos válidos FORAM persistidos, mas parte
+   * do lote foi descartada (quarentena) — o run nunca pode terminar como
+   * `SUCCESS` nesse caso, mas os contadores reais continuam úteis para
+   * diagnóstico.
+   */
+  async finalizeSyncRunIncomplete(
+    syncRunId: string,
+    counts: {
+      ordersFetched: number;
+      ordersCreated: number;
+      ordersUpdated: number;
+      recordsFailed: number;
+      pagesFetched: number;
+      itemsPersisted: number;
+    },
+    errorCode: string,
+    errorSummary: string,
+    finishedAt: Date,
+  ): Promise<void> {
+    await this.dataSource.query(
+      `UPDATE sync_runs
+          SET status = $2, finished_at = $3, records_read = $4,
+              records_created = $5, records_updated = $6, records_failed = $7,
+              pages_fetched = $8, items_persisted = $9, error_code = $10,
+              error_summary = $11
+        WHERE id = $1`,
+      [
+        syncRunId,
+        SyncRunStatus.FAILED,
+        finishedAt,
+        counts.ordersFetched,
+        counts.ordersCreated,
+        counts.ordersUpdated,
+        counts.recordsFailed,
+        counts.pagesFetched,
+        counts.itemsPersisted,
+        errorCode,
+        errorSummary,
+      ],
+    );
+  }
+
   async markAccountSynced(accountId: string, syncedAt: Date): Promise<void> {
     await this.dataSource.query(
       `UPDATE marketplace_accounts SET last_successful_sync_at = $2 WHERE id = $1`,

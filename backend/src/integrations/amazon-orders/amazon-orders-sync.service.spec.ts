@@ -17,6 +17,13 @@ const AMAZON_ENV = {
   AMAZON_MARKETPLACE_IDS: 'A2Q3Y263D00KWC',
 };
 
+// Instante de referência fixo (Checkpoint 4-B-R1, "Correção 7") — todo teste
+// que não sobrescreve `clock` usa este relógio, bem depois de qualquer data
+// usada nos fixtures abaixo (2026-08-01 em diante), então o cutoff de 2
+// minutos nunca recorta silenciosamente uma janela que os testes antigos já
+// validavam byte a byte.
+const FIXED_NOW = new Date('2026-08-20T15:00:00.000Z');
+
 function account(
   overrides: Partial<MarketplaceAccount> = {},
 ): MarketplaceAccount {
@@ -66,10 +73,27 @@ function rawOrder(overrides: Record<string, unknown> = {}) {
           title: 'Produto',
           price: { unitPrice: { amount: '199.90', currencyCode: 'BRL' } },
         },
+        // Contrato oficial `orders_2026-01-01` (Checkpoint 4-B-R1): o
+        // faturamento realizado do item vem do breakdown `type=ITEM`, nunca
+        // do preço de catálogo.
+        proceeds: {
+          breakdowns: [
+            {
+              type: 'ITEM',
+              subtotal: { amount: '199.90', currencyCode: 'BRL' },
+            },
+          ],
+        },
       },
     ],
     ...overrides,
   };
+}
+
+function manyRawOrders(count: number) {
+  return Array.from({ length: count }, (_, index) =>
+    rawOrder({ orderId: `ORDER-${index}` }),
+  );
 }
 
 function buildService(
@@ -79,6 +103,7 @@ function buildService(
     spApiClient?: Record<string, jest.Mock>;
     persistence?: Record<string, jest.Mock>;
     configValues?: Record<string, unknown>;
+    clock?: () => Date;
   } = {},
 ) {
   const marketplaceAccountsService = {
@@ -87,6 +112,9 @@ function buildService(
   };
   const authService = {
     ensureValidAccessToken: jest.fn().mockResolvedValue('access-token-1'),
+    refreshAccessTokenAfterUnauthorized: jest
+      .fn()
+      .mockResolvedValue('access-token-2'),
     ...overrides.authService,
   };
   const spApiClient = {
@@ -97,6 +125,7 @@ function buildService(
     beginSyncRun: jest.fn().mockResolvedValue('run-1'),
     finalizeSyncRunSuccess: jest.fn().mockResolvedValue(undefined),
     finalizeSyncRunFailure: jest.fn().mockResolvedValue(undefined),
+    finalizeSyncRunIncomplete: jest.fn().mockResolvedValue(undefined),
     markAccountSynced: jest.fn().mockResolvedValue(undefined),
     persistOrders: jest.fn().mockResolvedValue({
       ordersCreated: 0,
@@ -111,6 +140,7 @@ function buildService(
     get: (key: string, fallback?: unknown) => configValues[key] ?? fallback,
   } as unknown as ConfigService;
   const sleep = jest.fn().mockResolvedValue(undefined);
+  const clock = overrides.clock ?? (() => FIXED_NOW);
 
   const service = new AmazonOrdersSyncService(
     marketplaceAccountsService as never,
@@ -119,6 +149,7 @@ function buildService(
     persistence as never,
     configService,
     sleep,
+    clock,
   );
 
   return {
@@ -173,18 +204,19 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
     });
   });
 
-  it('defaults to the initial 60-day sync window when no period is given', async () => {
-    const { service, persistence } = buildService();
-    const before = Date.now();
-
-    const result = await service.syncOrders('acc-amazon-1');
+  it('defaults to the initial 60-day sync window when no period is given, ending at least 2 minutes before now (Amazon cutoff)', async () => {
+    const result = await buildService().service.syncOrders('acc-amazon-1');
 
     const from = new Date(result.dateFrom).getTime();
     const to = new Date(result.dateTo).getTime();
-    expect(to - from).toBeCloseTo(60 * 24 * 60 * 60 * 1000, -3);
-    expect(to).toBeGreaterThanOrEqual(before);
-    expect(persistence.beginSyncRun).toHaveBeenCalledWith(
-      expect.objectContaining({ marketplace: Marketplace.AMAZON }),
+    const expectedTo = FIXED_NOW.getTime() - 2 * 60 * 1000;
+    expect(to).toBe(expectedTo);
+    // A janela de 60 dias é calculada a partir de `now` (não do cutoff
+    // clampado) — só o FIM é recortado pelos 2 minutos, então a duração real
+    // é 60 dias menos esses 2 minutos, nunca exatamente 60 dias.
+    expect(FIXED_NOW.getTime() - from).toBeCloseTo(
+      60 * 24 * 60 * 60 * 1000,
+      -3,
     );
   });
 
@@ -261,10 +293,6 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
           .mockResolvedValue(successPage([rawOrder()], null)),
       },
       persistence: {
-        beginSyncRun: jest.fn().mockResolvedValue('run-1'),
-        finalizeSyncRunSuccess: jest.fn().mockResolvedValue(undefined),
-        finalizeSyncRunFailure: jest.fn().mockResolvedValue(undefined),
-        markAccountSynced: jest.fn().mockResolvedValue(undefined),
         persistOrders: jest.fn().mockResolvedValue({
           ordersCreated: 1,
           ordersUpdated: 0,
@@ -279,7 +307,7 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
     expect(persistence.persistOrders).toHaveBeenCalledTimes(1);
   });
 
-  it('a single 401 forces exactly one token renewal and one retry, then succeeds', async () => {
+  it('a single 401 forces exactly one call to refreshAccessTokenAfterUnauthorized (never a second ensureValidAccessToken) and one retry, then succeeds', async () => {
     const { service, authService, spApiClient } = buildService({
       spApiClient: {
         searchOrders: jest
@@ -292,12 +320,22 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
     const result = await service.syncOrders('acc-amazon-1');
 
     expect(result.status).toBe('SUCCESS');
-    expect(authService.ensureValidAccessToken).toHaveBeenCalledTimes(2); // inicial + renovação forçada
+    expect(authService.ensureValidAccessToken).toHaveBeenCalledTimes(1);
+    expect(
+      authService.refreshAccessTokenAfterUnauthorized,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      authService.refreshAccessTokenAfterUnauthorized,
+    ).toHaveBeenCalledWith('acc-amazon-1', 'access-token-1');
     expect(spApiClient.searchOrders).toHaveBeenCalledTimes(2);
+    const secondCall = spApiClient.searchOrders.mock.calls[1] as [
+      Record<string, unknown>,
+    ];
+    expect(secondCall[0].accessToken).toBe('access-token-2');
   });
 
-  it('a second consecutive 401 (after the one allowed renewal) fails the sync — never loops forever', async () => {
-    const { service, spApiClient } = buildService({
+  it('a second consecutive 401 (after the one allowed renewal) fails the sync — never loops forever, never renews twice', async () => {
+    const { service, authService, spApiClient } = buildService({
       spApiClient: {
         searchOrders: jest.fn().mockResolvedValue({ kind: 'unauthorized' }),
       },
@@ -307,6 +345,9 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
       code: 'PROVIDER_UNAVAILABLE',
     });
     expect(spApiClient.searchOrders).toHaveBeenCalledTimes(2); // 1 inicial + 1 após a única renovação
+    expect(
+      authService.refreshAccessTokenAfterUnauthorized,
+    ).toHaveBeenCalledTimes(1);
   });
 
   it('429 respects Retry-After and retries with a limited number of attempts, using the injected sleep (never real time)', async () => {
@@ -372,45 +413,6 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
     expect(sleep).not.toHaveBeenCalled();
   });
 
-  it('a quarantined order is skipped without failing the whole sync — the rest is still persisted', async () => {
-    const { service, persistence } = buildService({
-      spApiClient: {
-        searchOrders: jest.fn().mockResolvedValue(
-          successPage(
-            [
-              rawOrder({ orderId: 'BAD', proceeds: {} }), // sem grandTotal, pago -> quarentena
-              rawOrder({ orderId: 'GOOD' }),
-            ],
-            null,
-          ),
-        ),
-      },
-      persistence: {
-        beginSyncRun: jest.fn().mockResolvedValue('run-1'),
-        finalizeSyncRunSuccess: jest.fn().mockResolvedValue(undefined),
-        finalizeSyncRunFailure: jest.fn().mockResolvedValue(undefined),
-        markAccountSynced: jest.fn().mockResolvedValue(undefined),
-        persistOrders: jest.fn().mockResolvedValue({
-          ordersCreated: 1,
-          ordersUpdated: 0,
-          itemsPersisted: 1,
-        }),
-      },
-    });
-
-    const result = await service.syncOrders('acc-amazon-1');
-    expect(result.status).toBe('SUCCESS');
-    expect(result.ordersFetched).toBe(2); // ambos chegaram da API
-    expect(result.ordersUpserted).toBe(1); // só o bom foi persistido
-    const persistOrdersCalls = persistence.persistOrders.mock
-      .calls as unknown[][];
-    const persistedOrders = persistOrdersCalls[0][0] as Array<{
-      externalOrderId: string;
-    }>;
-    expect(persistedOrders).toHaveLength(1);
-    expect(persistedOrders[0].externalOrderId).toBe('GOOD');
-  });
-
   it('a failure partway through pagination persists NOTHING and marks the sync_run as failed', async () => {
     const { service, persistence } = buildService({
       spApiClient: {
@@ -434,6 +436,7 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
       expect.any(Date),
     );
     expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
+    expect(persistence.finalizeSyncRunIncomplete).not.toHaveBeenCalled();
   });
 
   it('two concurrent syncs on the same account: the second gets SYNC_ALREADY_RUNNING', async () => {
@@ -442,10 +445,6 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
         beginSyncRun: jest
           .fn()
           .mockRejectedValue(new SyncAlreadyRunningError()),
-        finalizeSyncRunSuccess: jest.fn(),
-        finalizeSyncRunFailure: jest.fn(),
-        markAccountSynced: jest.fn(),
-        persistOrders: jest.fn(),
       },
     });
 
@@ -469,9 +468,91 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
       code: 'INVALID_PROVIDER_RESPONSE',
     });
   });
+});
 
-  it('stops paginating at the hard safety page cap — never an infinite loop even with an endless nextToken', async () => {
-    const { service, spApiClient } = buildService({
+describe('AmazonOrdersSyncService — quarantine never allows SUCCESS (Correção 1)', () => {
+  it('a quarantined order never lets the run end as SUCCESS: valid orders are still persisted, the run ends FAILED (INCOMPLETE_PROVIDER_DATA) with records_failed set, and the account is never marked synced', async () => {
+    const { service, persistence } = buildService({
+      spApiClient: {
+        searchOrders: jest.fn().mockResolvedValue(
+          successPage(
+            [
+              rawOrder({ orderId: 'BAD', proceeds: {} }), // sem grandTotal, pago -> quarentena
+              rawOrder({ orderId: 'GOOD' }),
+            ],
+            null,
+          ),
+        ),
+      },
+      persistence: {
+        persistOrders: jest.fn().mockResolvedValue({
+          ordersCreated: 1,
+          ordersUpdated: 0,
+          itemsPersisted: 1,
+        }),
+      },
+    });
+
+    await expect(service.syncOrders('acc-amazon-1')).rejects.toMatchObject({
+      code: 'INCOMPLETE_PROVIDER_DATA',
+    });
+
+    expect(persistence.persistOrders).toHaveBeenCalledTimes(1);
+    const persistedOrders = (
+      persistence.persistOrders.mock.calls[0] as unknown[]
+    )[0] as Array<{ externalOrderId: string }>;
+    expect(persistedOrders).toHaveLength(1);
+    expect(persistedOrders[0].externalOrderId).toBe('GOOD');
+
+    expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
+    // Nunca finalização duplicada do mesmo run.
+    expect(persistence.finalizeSyncRunFailure).not.toHaveBeenCalled();
+    expect(persistence.finalizeSyncRunIncomplete).toHaveBeenCalledTimes(1);
+    expect(persistence.finalizeSyncRunIncomplete).toHaveBeenCalledWith(
+      'run-1',
+      expect.objectContaining({
+        ordersFetched: 2,
+        ordersCreated: 1,
+        ordersUpdated: 0,
+        recordsFailed: 1,
+        pagesFetched: 1,
+        itemsPersisted: 1,
+      }),
+      'INCOMPLETE_PROVIDER_DATA',
+      expect.any(String),
+      expect.any(Date),
+    );
+    expect(persistence.markAccountSynced).not.toHaveBeenCalled();
+  });
+
+  it('the controller-facing error never carries individual order/SKU/payload details — only the closed code', async () => {
+    const { service } = buildService({
+      spApiClient: {
+        searchOrders: jest
+          .fn()
+          .mockResolvedValue(
+            successPage(
+              [rawOrder({ orderId: 'SHOULD_NEVER_LEAK', proceeds: {} })],
+              null,
+            ),
+          ),
+      },
+    });
+
+    let caught: unknown;
+    try {
+      await service.syncOrders('acc-amazon-1');
+    } catch (error) {
+      caught = error;
+    }
+    expect(JSON.stringify(caught)).not.toContain('SHOULD_NEVER_LEAK');
+    expect(JSON.stringify(caught)).toContain('INCOMPLETE_PROVIDER_DATA');
+  });
+});
+
+describe('AmazonOrdersSyncService — safety caps never produce SUCCESS on a truncated batch (Correção 2)', () => {
+  it('a nextToken still pending at the hard safety PAGE cap fails safely: never SUCCESS, nothing persisted, account never marked synced', async () => {
+    const { service, spApiClient, persistence } = buildService({
       spApiClient: {
         searchOrders: jest
           .fn()
@@ -481,10 +562,121 @@ describe('AmazonOrdersSyncService.syncOrders', () => {
       },
     });
 
+    await expect(service.syncOrders('acc-amazon-1')).rejects.toMatchObject({
+      code: 'PAGINATION_LIMIT_EXCEEDED',
+    });
+    expect(spApiClient.searchOrders).toHaveBeenCalledTimes(200);
+    expect(persistence.persistOrders).not.toHaveBeenCalled();
+    expect(persistence.markAccountSynced).not.toHaveBeenCalled();
+    expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
+    expect(persistence.finalizeSyncRunFailure).toHaveBeenCalledWith(
+      'run-1',
+      'PAGINATION_LIMIT_EXCEEDED',
+      expect.any(String),
+      expect.any(Date),
+    );
+  }, 15000);
+
+  it('exactly reaching the page cap on the LAST page (no pending nextToken) still succeeds — hitting a limit is not automatically a truncation', async () => {
+    let call = 0;
+    const searchOrders = jest.fn().mockImplementation(() => {
+      call += 1;
+      const nextToken = call < 200 ? `token-${call}` : null;
+      return Promise.resolve(successPage([], nextToken));
+    });
+    const { service } = buildService({ spApiClient: { searchOrders } });
+
     const result = await service.syncOrders('acc-amazon-1');
     expect(result.status).toBe('SUCCESS');
-    expect(spApiClient.searchOrders.mock.calls.length).toBeLessThanOrEqual(200);
+    expect(result.pagesFetched).toBe(200);
+    expect(searchOrders).toHaveBeenCalledTimes(200);
   }, 15000);
+
+  it('a nextToken still pending at the hard safety ORDER cap fails safely: never SUCCESS, nothing persisted', async () => {
+    const { service, persistence } = buildService({
+      spApiClient: {
+        searchOrders: jest
+          .fn()
+          .mockResolvedValue(
+            successPage(manyRawOrders(20000), 'more-after-cap'),
+          ),
+      },
+    });
+
+    await expect(service.syncOrders('acc-amazon-1')).rejects.toMatchObject({
+      code: 'PAGINATION_LIMIT_EXCEEDED',
+    });
+    expect(persistence.persistOrders).not.toHaveBeenCalled();
+    expect(persistence.markAccountSynced).not.toHaveBeenCalled();
+  }, 20000);
+
+  it('exactly reaching the order cap with NO pending nextToken still succeeds', async () => {
+    const { service } = buildService({
+      spApiClient: {
+        searchOrders: jest
+          .fn()
+          .mockResolvedValue(successPage(manyRawOrders(20000), null)),
+      },
+      persistence: {
+        persistOrders: jest.fn().mockResolvedValue({
+          ordersCreated: 20000,
+          ordersUpdated: 0,
+          itemsPersisted: 20000,
+        }),
+      },
+    });
+
+    const result = await service.syncOrders('acc-amazon-1');
+    expect(result.status).toBe('SUCCESS');
+    expect(result.ordersFetched).toBe(20000);
+  }, 20000);
+});
+
+describe('AmazonOrdersSyncService — the 2-minute Amazon cutoff (Correção 7)', () => {
+  it('a custom period that includes today is clamped to now - 2min, and that is what gets persisted as sync_runs.date_to', async () => {
+    const { service, persistence } = buildService({
+      spApiClient: {
+        searchOrders: jest.fn().mockResolvedValue(successPage([], null)),
+      },
+    });
+
+    const result = await service.syncOrders('acc-amazon-1', {
+      from: '2026-08-18',
+      to: '2026-08-20', // hoje, relativo a FIXED_NOW
+    });
+
+    const expectedCutoff = new Date(
+      FIXED_NOW.getTime() - 2 * 60 * 1000,
+    ).toISOString();
+    expect(result.dateTo).toBe(expectedCutoff);
+    expect(persistence.beginSyncRun).toHaveBeenCalledWith(
+      expect.objectContaining({ periodTo: new Date(expectedCutoff) }),
+    );
+  });
+
+  it('rejects a period whose "to" is a future calendar day (América/São_Paulo) before any network call', async () => {
+    const { service, spApiClient } = buildService();
+
+    await expect(
+      service.syncOrders('acc-amazon-1', {
+        from: '2026-08-18',
+        to: '2026-08-21', // depois de FIXED_NOW (2026-08-20)
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PERIOD' });
+    expect(spApiClient.searchOrders).not.toHaveBeenCalled();
+  });
+
+  it('rejects an excessively long custom range before any network call', async () => {
+    const { service, spApiClient } = buildService();
+
+    await expect(
+      service.syncOrders('acc-amazon-1', {
+        from: '2020-01-01',
+        to: '2026-08-20',
+      }),
+    ).rejects.toMatchObject({ code: 'INVALID_PERIOD' });
+    expect(spApiClient.searchOrders).not.toHaveBeenCalled();
+  });
 });
 
 describe('AmazonOrdersSyncService — accepted allowlist on the returned summary', () => {
@@ -498,10 +690,6 @@ describe('AmazonOrdersSyncService — accepted allowlist on the returned summary
           ),
       },
       persistence: {
-        beginSyncRun: jest.fn().mockResolvedValue('run-1'),
-        finalizeSyncRunSuccess: jest.fn().mockResolvedValue(undefined),
-        finalizeSyncRunFailure: jest.fn().mockResolvedValue(undefined),
-        markAccountSynced: jest.fn().mockResolvedValue(undefined),
         persistOrders: jest.fn().mockResolvedValue({
           ordersCreated: 1,
           ordersUpdated: 0,

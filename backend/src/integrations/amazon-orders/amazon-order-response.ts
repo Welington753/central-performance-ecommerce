@@ -5,11 +5,15 @@ import {
 import { validateAmazonMoney, type ValidatedMoney } from './amazon-money.util';
 
 /**
- * Item de pedido já validado — allowlist fechada (Checkpoint 4-B), nunca um
- * spread do objeto bruto. `unitPrice`/`itemProceeds` continuam como `Money`
- * validado (ou `null`); a resolução de qual usar (e a quarentena de pedido
- * pago sem preço válido) é responsabilidade de `amazon-order.mapper.ts`,
- * não deste parser.
+ * Item de pedido já validado — allowlist fechada (Checkpoint 4-B-R1), nunca
+ * um spread do objeto bruto. `unitPrice` é o preço de CATÁLOGO
+ * (`product.price.unitPrice`) — só para diagnóstico/consistência, nunca a
+ * fonte de faturamento realizado. `itemSubtotal` é o `subtotal` do
+ * breakdown `type === 'ITEM'` de `orderItems[].proceeds.breakdowns` — o
+ * valor da LINHA INTEIRA (quantidade × unitário), não um preço unitário; a
+ * divisão pela quantidade (e a quarentena quando ela não é exata em
+ * centavos) é responsabilidade de `amazon-order.mapper.ts`, não deste
+ * parser.
  */
 export interface RawAmazonOrderItem {
   orderItemId: string;
@@ -18,7 +22,7 @@ export interface RawAmazonOrderItem {
   sellerSku: string | null;
   title: string;
   unitPrice: ValidatedMoney | null;
-  itemProceeds: ValidatedMoney | null;
+  itemSubtotal: ValidatedMoney | null;
 }
 
 export interface RawAmazonOrder {
@@ -95,7 +99,7 @@ function validateOrderItem(raw: unknown): RawAmazonOrderItem | null {
   const price = isRecord(product.price) ? product.price : null;
   const unitPrice = price ? validateAmazonMoney(price.unitPrice) : null;
 
-  const itemProceeds = extractItemProceeds(raw.proceeds);
+  const itemSubtotal = extractItemSubtotal(raw.proceeds);
 
   return {
     orderItemId,
@@ -104,25 +108,27 @@ function validateOrderItem(raw: unknown): RawAmazonOrderItem | null {
     sellerSku,
     title: product.title,
     unitPrice,
-    itemProceeds,
+    itemSubtotal,
   };
 }
 
 /**
- * `orderItems[].proceeds`: array de entradas `{ type, amount }` — só a
- * entrada `type === 'ITEM'` é o fallback financeiro permitido (Checkpoint
- * 4-B, "se necessário, usar somente breakdown de proceeds com type=ITEM").
- * Nunca soma múltiplas entradas (evita contar frete/taxa como faturamento
- * do item).
+ * `orderItems[].proceeds` é um OBJETO (contrato oficial `orders_2026-01-01`,
+ * não o array fictício de checkpoints anteriores), com
+ * `proceeds.breakdowns[]` — só a entrada `type === 'ITEM'` é lida, e dela só
+ * o campo `subtotal` (o valor financeiro da linha inteira). `TAX`,
+ * `SHIPPING`, `DISCOUNT` e qualquer outro `type` são ignorados; nunca soma
+ * múltiplas entradas (evita contar frete/taxa como faturamento do item).
  */
-function extractItemProceeds(raw: unknown): ValidatedMoney | null {
-  if (!Array.isArray(raw)) return null;
-  const entries = raw as unknown[];
-  const itemEntry = entries.find(
+function extractItemSubtotal(raw: unknown): ValidatedMoney | null {
+  if (!isRecord(raw)) return null;
+  if (!Array.isArray(raw.breakdowns)) return null;
+  const breakdowns = raw.breakdowns as unknown[];
+  const breakdown = breakdowns.find(
     (entry) => isRecord(entry) && entry.type === 'ITEM',
   );
-  if (!isRecord(itemEntry)) return null;
-  return validateAmazonMoney(itemEntry.amount);
+  if (!isRecord(breakdown)) return null;
+  return validateAmazonMoney(breakdown.subtotal);
 }
 
 function validateOrder(raw: unknown): RawAmazonOrder | null {
