@@ -133,6 +133,20 @@ export const envValidationSchema = Joi.object({
   // "habilitado somente fora de produção" (ver main.ts).
   ENABLE_SWAGGER: Joi.string().valid('true', 'false').optional(),
 
+  // --- Sincronização automática multi-marketplace (Fase 4) ---------------
+  // Desligada por padrão: um deploy existente nunca começa a chamar
+  // marketplaces reais em ciclo sozinho sem decisão explícita. SEMPRE
+  // desligada quando NODE_ENV=test, independente deste valor (ver
+  // MarketplaceAutoSyncService.onModuleInit).
+  MARKETPLACE_AUTO_SYNC_ENABLED: Joi.string()
+    .valid('true', 'false')
+    .default('false'),
+  // Intervalo entre ciclos, em minutos. Padrão recomendado: 60.
+  MARKETPLACE_AUTO_SYNC_INTERVAL_MINUTES: Joi.number()
+    .integer()
+    .min(1)
+    .default(60),
+
   // Rate limit padrão global (ThrottlerModule). A rota de login usa um
   // limite mais restrito, sobrescrito diretamente no controller (~5/60s)
   // via decorator @Throttle, conforme exigido para essa rota específica.

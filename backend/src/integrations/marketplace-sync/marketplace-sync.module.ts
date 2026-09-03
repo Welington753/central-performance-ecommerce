@@ -4,6 +4,8 @@ import { AmazonOrdersModule } from '../amazon-orders/amazon-orders.module';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
 import { MarketplaceOrdersModule } from '../marketplace-orders/marketplace-orders.module';
 import { MercadoLivreOrdersModule } from '../mercado-livre-orders/mercado-livre-orders.module';
+import { AdvisoryLockService } from '../shared/advisory-lock.service';
+import { MarketplaceAutoSyncService } from './marketplace-auto-sync.service';
 import { MarketplaceBackfillController } from './marketplace-backfill.controller';
 import { MarketplaceBackfillService } from './marketplace-backfill.service';
 
@@ -23,6 +25,10 @@ import { MarketplaceBackfillService } from './marketplace-backfill.service';
     AuthModule,
   ],
   controllers: [MarketplaceBackfillController],
-  providers: [MarketplaceBackfillService],
+  providers: [
+    MarketplaceBackfillService,
+    AdvisoryLockService,
+    MarketplaceAutoSyncService,
+  ],
 })
 export class MarketplaceSyncModule {}
