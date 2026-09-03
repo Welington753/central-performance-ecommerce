@@ -3,7 +3,14 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import type { Marketplace } from '../contracts/marketplace.enum';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
+import { mergeIntervals, type SyncedInterval } from './coverage-interval.util';
 import type { MappedOrderRecord } from './mapped-order-record';
+
+export interface AccountSyncCoverage {
+  intervals: SyncedInterval[];
+  oldestFrom: Date | null;
+  oldestRunRecordsRead: number | null;
+}
 
 export class SyncAlreadyRunningError extends Error {}
 
@@ -168,6 +175,63 @@ export class MarketplaceOrdersPersistenceService {
         errorSummary,
       ],
     );
+  }
+
+  /**
+   * Cobertura já sincronizada com sucesso para UMA conta — base tanto da
+   * janela incremental (`computeIncrementalSyncWindow`) quanto do backfill
+   * histórico (`computeBackfillChunkWindow`/`oldestFrom`). `oldestRunRecordsRead`
+   * é o `records_read` do run SUCCESS mais antigo (por `date_from`): quando é
+   * `0`, o provedor já confirmou que não há pedido mais antigo que aquela
+   * janela — sinal de "backfill completo" sem precisar de nenhuma coluna
+   * nova (nunca inferido da menor/maior data de PEDIDO, só de runs SUCCESS
+   * reais, que é o que prova cobertura de verdade).
+   */
+  async getAccountSyncCoverage(
+    accountId: string,
+  ): Promise<AccountSyncCoverage> {
+    const rows = await this.dataSource.query<
+      Array<{ date_from: Date; date_to: Date; records_read: number }>
+    >(
+      `SELECT date_from, date_to, records_read
+         FROM sync_runs
+        WHERE marketplace_account_id = $1 AND status = 'SUCCESS'
+          AND date_from IS NOT NULL AND date_to IS NOT NULL
+        ORDER BY date_from ASC`,
+      [accountId],
+    );
+    if (rows.length === 0) {
+      return { intervals: [], oldestFrom: null, oldestRunRecordsRead: null };
+    }
+    const intervals = mergeIntervals(
+      rows.map((row) => ({ from: row.date_from, to: row.date_to })),
+    );
+    return {
+      intervals,
+      oldestFrom: rows[0].date_from,
+      oldestRunRecordsRead: rows[0].records_read,
+    };
+  }
+
+  /**
+   * Recupera `sync_runs` presos em `RUNNING` (processo derrubado/reiniciado
+   * no meio de uma sincronização) marcando-os `FAILED` — sem isso, o índice
+   * único parcial `UQ_sync_runs_active_run_per_account` bloquearia PARA
+   * SEMPRE qualquer nova tentativa naquela conta (backfill, incremental ou
+   * manual) após uma queda. `staleAfterMs` deve ser bem maior que a duração
+   * plausível de qualquer sincronização real, nunca usado como timeout de
+   * operação normal.
+   */
+  async recoverStaleRunningRuns(staleAfterMs: number): Promise<number> {
+    const [rows] = (await this.dataSource.query(
+      `UPDATE sync_runs
+          SET status = 'FAILED', finished_at = now(), error_code = 'STALE_RUN_RECOVERED',
+              error_summary = 'Execução interrompida (processo reiniciado ou travado) — recuperada automaticamente.'
+        WHERE status = 'RUNNING' AND started_at < now() - ($1 || ' milliseconds')::interval
+        RETURNING id`,
+      [staleAfterMs],
+    )) as [Array<{ id: string }>, number];
+    return rows.length;
   }
 
   async markAccountSynced(accountId: string, syncedAt: Date): Promise<void> {

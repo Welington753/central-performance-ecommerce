@@ -688,4 +688,179 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
       );
     });
   });
+
+  describe('getAccountSyncCoverage', () => {
+    it('returns empty coverage for an account with no successful runs', async () => {
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage).toEqual({
+        intervals: [],
+        oldestFrom: null,
+        oldestRunRecordsRead: null,
+      });
+    });
+
+    it('merges intervals from multiple SUCCESS runs and reports the oldest edge', async () => {
+      const run1 = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date('2026-06-01T00:00:00.000Z'),
+        periodTo: new Date('2026-07-01T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunSuccess(
+        run1,
+        {
+          ordersFetched: 5,
+          ordersCreated: 5,
+          ordersUpdated: 0,
+          pagesFetched: 1,
+          itemsPersisted: 5,
+        },
+        new Date(),
+      );
+
+      const run2 = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date('2026-07-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-01T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunSuccess(
+        run2,
+        {
+          ordersFetched: 3,
+          ordersCreated: 3,
+          ordersUpdated: 0,
+          pagesFetched: 1,
+          itemsPersisted: 3,
+        },
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage.intervals).toEqual([
+        {
+          from: new Date('2026-06-01T00:00:00.000Z'),
+          to: new Date('2026-08-01T00:00:00.000Z'),
+        },
+      ]);
+      expect(coverage.oldestFrom).toEqual(new Date('2026-06-01T00:00:00.000Z'));
+      expect(coverage.oldestRunRecordsRead).toBe(5);
+    });
+
+    it('ignores RUNNING and FAILED runs — only SUCCESS proves coverage', async () => {
+      const runningId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date('2026-06-01T00:00:00.000Z'),
+        periodTo: new Date('2026-07-01T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunFailure(
+        runningId,
+        'PROVIDER_UNAVAILABLE',
+        'Provedor indisponível.',
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage.intervals).toEqual([]);
+      expect(coverage.oldestFrom).toBeNull();
+    });
+
+    it('reports oldestRunRecordsRead = 0 as the signal that history backfill reached its true start', async () => {
+      const chunkId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date('2026-01-01T00:00:00.000Z'),
+        periodTo: new Date('2026-02-01T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunSuccess(
+        chunkId,
+        {
+          ordersFetched: 0,
+          ordersCreated: 0,
+          ordersUpdated: 0,
+          pagesFetched: 1,
+          itemsPersisted: 0,
+        },
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage.oldestRunRecordsRead).toBe(0);
+    });
+  });
+
+  describe('recoverStaleRunningRuns', () => {
+    it('marks a long-stuck RUNNING run as FAILED with a sanitized error code', async () => {
+      const staleId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date(),
+        periodTo: new Date(),
+        startedAt: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      await dataSource.query(
+        `UPDATE sync_runs SET started_at = $2 WHERE id = $1`,
+        [staleId, new Date(Date.now() - 60 * 60 * 1000)],
+      );
+
+      const recovered = await service.recoverStaleRunningRuns(30 * 60 * 1000);
+      expect(recovered).toBe(1);
+
+      const [row] = await dataSource.query<
+        Array<{ status: string; error_code: string | null }>
+      >('SELECT status, error_code FROM sync_runs WHERE id = $1', [staleId]);
+      expect(row.status).toBe('FAILED');
+      expect(row.error_code).toBe('STALE_RUN_RECOVERED');
+    });
+
+    it('never touches a RUNNING run that is still within the stale threshold', async () => {
+      const freshId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date(),
+        periodTo: new Date(),
+        startedAt: new Date(),
+      });
+
+      const recovered = await service.recoverStaleRunningRuns(30 * 60 * 1000);
+      expect(recovered).toBe(0);
+
+      const [row] = await dataSource.query<Array<{ status: string }>>(
+        'SELECT status FROM sync_runs WHERE id = $1',
+        [freshId],
+      );
+      expect(row.status).toBe('RUNNING');
+    });
+
+    it('unblocks a new sync run on the same account after recovering the stale one', async () => {
+      const staleId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date(),
+        periodTo: new Date(),
+        startedAt: new Date(),
+      });
+      await dataSource.query(
+        `UPDATE sync_runs SET started_at = $2 WHERE id = $1`,
+        [staleId, new Date(Date.now() - 60 * 60 * 1000)],
+      );
+
+      await service.recoverStaleRunningRuns(30 * 60 * 1000);
+
+      await expect(
+        service.beginSyncRun({
+          marketplaceAccountId: accountId,
+          marketplace: Marketplace.MERCADO_LIVRE,
+          periodFrom: new Date(),
+          periodTo: new Date(),
+          startedAt: new Date(),
+        }),
+      ).resolves.toEqual(expect.any(String));
+    });
+  });
 });

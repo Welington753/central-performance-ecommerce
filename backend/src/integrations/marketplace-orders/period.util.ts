@@ -1,3 +1,5 @@
+import type { SyncedInterval } from './coverage-interval.util';
+
 export const SAO_PAULO_TIME_ZONE = 'America/Sao_Paulo';
 
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -44,6 +46,59 @@ function rollingWindow(referenceNow: Date, days: number): PeriodWindow {
   return {
     from: new Date(referenceNow.getTime() - days * DAY_MS),
     to: referenceNow,
+  };
+}
+
+// Sobreposição de segurança aplicada ao início de uma janela incremental —
+// recobre o último dia já sincronizado para capturar atualizações tardias de
+// status (ex.: pedido concluído pouco depois do corte anterior) sem nunca
+// redownloadar o histórico inteiro a cada execução.
+const INCREMENTAL_OVERLAP_MS = DAY_MS;
+
+/**
+ * Janela usada por uma sincronização RECORRENTE (botão manual repetido ou
+ * ciclo automático) — nunca a janela fixa de 60 dias em toda execução.
+ * Sem cobertura anterior (primeira sincronização real desta conta): cai no
+ * mesmo `computeInitialSyncWindow` de sempre. Com cobertura: começa 1 dia
+ * antes do fim do intervalo mesclado mais recente (nunca antes de `to`, que
+ * usaria uma janela invertida) e vai até `referenceNow`.
+ */
+export function computeIncrementalSyncWindow(
+  priorIntervals: readonly SyncedInterval[],
+  referenceNow: Date,
+): PeriodWindow {
+  if (priorIntervals.length === 0) {
+    return computeInitialSyncWindow(referenceNow);
+  }
+  const latestTo = priorIntervals.reduce(
+    (latest, interval) =>
+      interval.to.getTime() > latest.getTime() ? interval.to : latest,
+    priorIntervals[0].to,
+  );
+  const from = new Date(
+    Math.min(
+      latestTo.getTime() - INCREMENTAL_OVERLAP_MS,
+      referenceNow.getTime(),
+    ),
+  );
+  return { from, to: referenceNow };
+}
+
+export const BACKFILL_CHUNK_DAYS = 30;
+
+/**
+ * Próxima janela do backfill histórico — sempre contígua e mais antiga que
+ * `oldestCoveredFrom` (nunca sobrepõe nem deixa lacuna com o que já foi
+ * sincronizado), em passos pequenos e paginados (`BACKFILL_CHUNK_DAYS`) para
+ * nunca tentar baixar anos de histórico em uma única chamada ao provedor.
+ */
+export function computeBackfillChunkWindow(
+  oldestCoveredFrom: Date,
+  chunkDays: number = BACKFILL_CHUNK_DAYS,
+): PeriodWindow {
+  return {
+    from: new Date(oldestCoveredFrom.getTime() - chunkDays * DAY_MS),
+    to: oldestCoveredFrom,
   };
 }
 
@@ -172,6 +227,7 @@ export interface KpiPeriodQuery {
 export function resolveKpiPeriod(
   query: KpiPeriodQuery,
   referenceNow: Date,
+  maxRangeDays: number = MAX_KPI_RANGE_DAYS,
 ): KpiWindows {
   const hasFrom = query.from !== undefined && query.from !== '';
   const hasTo = query.to !== undefined && query.to !== '';
@@ -201,7 +257,7 @@ export function resolveKpiPeriod(
   }
 
   const days = diffDaysInclusive(fromDate, toDate);
-  if (days > MAX_KPI_RANGE_DAYS) {
+  if (days > maxRangeDays) {
     throw new InvalidKpiPeriodError('RANGE_TOO_LONG');
   }
 
