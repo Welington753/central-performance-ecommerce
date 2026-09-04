@@ -22,6 +22,10 @@ import type {
   AmazonSetupStatusDto,
   AmazonVerifyConnectionDto,
 } from "@/types/amazon-connection";
+import type {
+  BackfillChunkResultDto,
+  BackfillStatusDto,
+} from "@/types/marketplace-backfill";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
 
@@ -324,6 +328,56 @@ export async function syncMercadoLivreOrders(
     );
   }
   return (await response.json()) as MercadoLivreSyncSummary;
+}
+
+const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
+  ACCOUNT_NOT_CONNECTED:
+    "Esta conta não está mais conectada. Reconecte-a em Integrações.",
+  MARKETPLACE_NOT_SUPPORTED:
+    "Este marketplace ainda não tem histórico completo disponível.",
+  NO_INITIAL_SYNC_YET:
+    "Sincronize esta conta pelo menos uma vez antes de completar o histórico.",
+  BACKFILL_ALREADY_RUNNING:
+    "Já existe uma sincronização em andamento para esta conta.",
+  AMAZON_NOT_CONFIGURED: "Integração Amazon não configurada no servidor.",
+  SYNC_FAILED: "Falha ao consultar o marketplace. Tente novamente.",
+};
+
+export async function fetchBackfillStatus(
+  accountId: string,
+): Promise<BackfillStatusDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/backfill/status`,
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível carregar o status do histórico.",
+    );
+  }
+  return (await response.json()) as BackfillStatusDto;
+}
+
+/**
+ * Executa UM chunk do backfill histórico (Fase 4, "Completar histórico") —
+ * o chamador decide quando parar de repetir com base em `hasMoreHistory`
+ * (ver `MarketplaceBackfillService.runNextChunk` no backend).
+ */
+export async function runBackfillNextChunk(
+  accountId: string,
+): Promise<BackfillChunkResultDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/backfill/next-chunk`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      (code && BACKFILL_ERROR_MESSAGES[code]) ||
+        "Não foi possível continuar o histórico agora. Tente novamente.",
+      code,
+    );
+  }
+  return (await response.json()) as BackfillChunkResultDto;
 }
 
 /**

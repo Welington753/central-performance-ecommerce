@@ -858,7 +858,7 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
       expect(coverage.oldestFrom).toBeNull();
     });
 
-    it('reports oldestRunRecordsRead = 0 as the signal that history backfill reached its true start', async () => {
+    it('reports oldestRunRecordsRead = 0 faithfully as the raw DB value — the caller decides what it means (Fase 4: never proof of the true history start on its own)', async () => {
       const chunkId = await service.beginSyncRun({
         marketplaceAccountId: accountId,
         marketplace: Marketplace.MERCADO_LIVRE,
@@ -880,6 +880,47 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
 
       const coverage = await service.getAccountSyncCoverage(accountId);
       expect(coverage.oldestRunRecordsRead).toBe(0);
+    });
+  });
+
+  describe('getAccountOrderDateRange', () => {
+    it('returns null when the account has no orders', async () => {
+      expect(await service.getAccountOrderDateRange(accountId)).toBeNull();
+    });
+
+    it('returns the real MIN/MAX date_created across persisted orders, distinct accounts isolated', async () => {
+      const otherAccount = await dataSource
+        .getRepository(MarketplaceAccount)
+        .save({
+          id: randomUUID(),
+          marketplace: Marketplace.MERCADO_LIVRE,
+          externalSellerId: '999',
+          nickname: null,
+          status: MarketplaceAccountStatus.CONNECTED,
+          tokenVersion: 1,
+        });
+      const otherAccountId = otherAccount.id;
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: '2001',
+          dateCreated: new Date('2026-01-10T00:00:00.000Z'),
+        }),
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: '2002',
+          dateCreated: new Date('2026-08-20T00:00:00.000Z'),
+        }),
+        orderRecord({
+          marketplaceAccountId: otherAccountId,
+          externalOrderId: '3001',
+          dateCreated: new Date('2020-01-01T00:00:00.000Z'),
+        }),
+      ]);
+
+      const range = await service.getAccountOrderDateRange(accountId);
+      expect(range?.first).toEqual(new Date('2026-01-10T00:00:00.000Z'));
+      expect(range?.last).toEqual(new Date('2026-08-20T00:00:00.000Z'));
     });
   });
 

@@ -5,6 +5,7 @@ import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-a
 import { MarketplaceOrdersModule } from '../marketplace-orders/marketplace-orders.module';
 import { MercadoLivreOrdersModule } from '../mercado-livre-orders/mercado-livre-orders.module';
 import { AdvisoryLockService } from '../shared/advisory-lock.service';
+import { SyncModule } from '../../sync/sync.module';
 import { MarketplaceAutoSyncService } from './marketplace-auto-sync.service';
 import { MarketplaceBackfillController } from './marketplace-backfill.controller';
 import { MarketplaceBackfillService } from './marketplace-backfill.service';
@@ -23,6 +24,7 @@ import { MarketplaceBackfillService } from './marketplace-backfill.service';
     MercadoLivreOrdersModule,
     AmazonOrdersModule,
     AuthModule,
+    SyncModule,
   ],
   controllers: [MarketplaceBackfillController],
   providers: [

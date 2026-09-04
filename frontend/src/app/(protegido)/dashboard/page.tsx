@@ -716,7 +716,12 @@ function DashboardContent() {
           ) : displayData?.summary &&
             (displayData.comparison || displayData.scope.allTime) ? (
             <div className="flex flex-col gap-6">
-              <DataCoverageBanner coverage={displayData.dataCoverage} />
+              <DataCoverageBanner
+                coverage={displayData.dataCoverage}
+                requestedPeriod={
+                  !allTime && effectivePeriod ? effectivePeriod : undefined
+                }
+              />
 
               <KpiSummaryCards
                 summary={displayData.summary}
@@ -762,7 +767,12 @@ function DashboardContent() {
             </div>
           ) : displayData ? (
             <div className="flex flex-col gap-4">
-              <DataCoverageBanner coverage={displayData.dataCoverage} />
+              <DataCoverageBanner
+                coverage={displayData.dataCoverage}
+                requestedPeriod={
+                  !allTime && effectivePeriod ? effectivePeriod : undefined
+                }
+              />
               <p className="text-sm text-foreground/60">
                 {displayData.availability === "NOT_CONNECTED"
                   ? "Nenhuma conta elegível para este filtro."

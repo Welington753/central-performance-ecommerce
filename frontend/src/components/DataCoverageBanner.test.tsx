@@ -66,6 +66,26 @@ describe("DataCoverageBanner", () => {
     );
   });
 
+  it("shows the requested period and the 'only synchronized periods' disclaimer for a partial custom period (Fase 4, item 4)", () => {
+    render(
+      <DataCoverageBanner
+        coverage={{
+          status: "partial",
+          synchronizedIntervals: [{ from: "2026-07-04", to: "2026-09-04" }],
+          selectedPeriodComplete: false,
+          comparisonPeriodComplete: true,
+        }}
+        requestedPeriod={{ from: "2024-01-01", to: "2026-09-04" }}
+      />,
+    );
+    const banner = screen.getByRole("status");
+    expect(banner).toHaveTextContent(/período solicitado/i);
+    expect(banner).toHaveTextContent("01/01/2024");
+    expect(banner).toHaveTextContent(
+      /o total abaixo considera somente os per.odos j. sincronizados/i,
+    );
+  });
+
   it("describes two disjoint intervals separately — never as a single continuous range", () => {
     render(
       <DataCoverageBanner

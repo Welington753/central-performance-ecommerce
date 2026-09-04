@@ -214,6 +214,27 @@ export class MarketplaceOrdersPersistenceService {
   }
 
   /**
+   * Primeira e última venda REALMENTE persistida para uma conta (Fase 4,
+   * "Completar histórico") — só para exibição (ex.: painel de
+   * sincronizações); nunca usado como prova de cobertura contínua (isso
+   * continua sendo `getAccountSyncCoverage`/`mergeIntervals`).
+   */
+  async getAccountOrderDateRange(
+    accountId: string,
+  ): Promise<{ first: Date; last: Date } | null> {
+    const [row] = await this.dataSource.query<
+      Array<{ min_date: Date | null; max_date: Date | null }>
+    >(
+      `SELECT MIN(date_created) AS min_date, MAX(date_created) AS max_date
+         FROM marketplace_orders
+        WHERE marketplace_account_id = $1`,
+      [accountId],
+    );
+    if (!row?.min_date || !row.max_date) return null;
+    return { first: row.min_date, last: row.max_date };
+  }
+
+  /**
    * Recupera `sync_runs` presos em `RUNNING` (processo derrubado/reiniciado
    * no meio de uma sincronização) marcando-os `FAILED` — sem isso, o índice
    * único parcial `UQ_sync_runs_active_run_per_account` bloquearia PARA

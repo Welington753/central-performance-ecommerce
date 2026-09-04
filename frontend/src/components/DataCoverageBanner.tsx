@@ -3,6 +3,12 @@ import type { AnalyticsDataCoverage } from "@/types/marketplace-analytics";
 
 interface DataCoverageBannerProps {
   coverage: AnalyticsDataCoverage;
+  /**
+   * Período CUSTOM pedido pelo usuário (Fase 4, item 4) — nunca usado no
+   * modo "Todo o período" (esse já mostra seu próprio texto em
+   * `DateRangeFilter`). `undefined` quando não aplicável.
+   */
+  requestedPeriod?: { from: string; to: string };
 }
 
 /**
@@ -10,7 +16,9 @@ interface DataCoverageBannerProps {
  * — nunca resume vários intervalos separados como um único período
  * contínuo. Um intervalo: "de X a Y". Vários: "de X a Y e de W a Z".
  */
-function describeIntervals(intervals: AnalyticsDataCoverage["synchronizedIntervals"]): string {
+export function describeIntervals(
+  intervals: AnalyticsDataCoverage["synchronizedIntervals"],
+): string {
   return intervals
     .map((interval) => `${formatCalendarDate(interval.from)} a ${formatCalendarDate(interval.to)}`)
     .join(" e de ")
@@ -22,7 +30,10 @@ function describeIntervals(intervals: AnalyticsDataCoverage["synchronizedInterva
  * nunca apresenta um período parcial como se fosse completo, e nunca funde
  * intervalos separados numa única faixa contínua enganosa.
  */
-export function DataCoverageBanner({ coverage }: DataCoverageBannerProps) {
+export function DataCoverageBanner({
+  coverage,
+  requestedPeriod,
+}: DataCoverageBannerProps) {
   if (coverage.status === "complete") {
     return (
       <p className="text-xs text-foreground/50">
@@ -49,6 +60,15 @@ export function DataCoverageBanner({ coverage }: DataCoverageBannerProps) {
       role="status"
       className="flex flex-col gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
     >
+      {requestedPeriod ? (
+        <p>
+          Período solicitado:{" "}
+          <span className="font-medium">
+            {formatCalendarDate(requestedPeriod.from)} a{" "}
+            {formatCalendarDate(requestedPeriod.to)}
+          </span>
+        </p>
+      ) : null}
       <p>
         Cobertura parcial: dados sincronizados{" "}
         {coverage.synchronizedIntervals.length > 0
@@ -62,6 +82,7 @@ export function DataCoverageBanner({ coverage }: DataCoverageBannerProps) {
       {!coverage.comparisonPeriodComplete ? (
         <p>O período de comparação não está totalmente sincronizado.</p>
       ) : null}
+      <p>O total abaixo considera somente os períodos já sincronizados.</p>
     </div>
   );
 }

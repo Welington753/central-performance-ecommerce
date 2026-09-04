@@ -1,4 +1,5 @@
 import { Marketplace } from '../contracts/marketplace.enum';
+import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
 import {
   MarketplaceAccount,
   MarketplaceAccountStatus,
@@ -38,12 +39,37 @@ function account(
   };
 }
 
+function syncRun(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'run-1',
+    marketplaceAccountId: 'acc-1',
+    marketplace: Marketplace.MERCADO_LIVRE,
+    type: SyncRunType.INITIAL,
+    status: SyncRunStatus.SUCCESS,
+    startedAt: new Date('2026-06-01T00:00:00.000Z'),
+    finishedAt: new Date('2026-06-01T00:01:00.000Z'),
+    dateFrom: new Date('2026-05-02T00:00:00.000Z'),
+    dateTo: new Date('2026-06-01T00:00:00.000Z'),
+    recordsRead: 5,
+    recordsCreated: 5,
+    recordsUpdated: 0,
+    recordsFailed: 0,
+    errorCode: null,
+    pagesFetched: 1,
+    itemsPersisted: 5,
+    errorSummary: null,
+    createdAt: new Date('2026-06-01T00:01:00.000Z'),
+    ...overrides,
+  };
+}
+
 function buildService(
   overrides: {
     marketplaceAccountsService?: Record<string, jest.Mock>;
     persistence?: Record<string, jest.Mock>;
     mlSyncService?: Record<string, jest.Mock>;
     amazonSyncService?: Record<string, jest.Mock>;
+    syncRunsService?: Record<string, jest.Mock>;
   } = {},
 ) {
   const marketplaceAccountsService = {
@@ -62,6 +88,10 @@ function buildService(
       oldestFrom: new Date('2026-06-01T00:00:00.000Z'),
       oldestRunRecordsRead: 5,
     }),
+    getAccountOrderDateRange: jest.fn().mockResolvedValue({
+      first: new Date('2026-06-01T00:00:00.000Z'),
+      last: new Date('2026-06-30T00:00:00.000Z'),
+    }),
     ...overrides.persistence,
   };
   const mlSyncService = {
@@ -72,12 +102,17 @@ function buildService(
     syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 3 }),
     ...overrides.amazonSyncService,
   };
+  const syncRunsService = {
+    findAll: jest.fn().mockResolvedValue([syncRun()]),
+    ...overrides.syncRunsService,
+  };
 
   const service = new MarketplaceBackfillService(
     marketplaceAccountsService as never,
     persistence as never,
     mlSyncService as never,
     amazonSyncService as never,
+    syncRunsService as never,
   );
 
   return {
@@ -86,35 +121,13 @@ function buildService(
     persistence,
     mlSyncService,
     amazonSyncService,
+    syncRunsService,
   };
 }
 
 describe('MarketplaceBackfillService', () => {
   describe('getStatus', () => {
-    it('reports the oldest covered date and historyComplete = false when the oldest run still had orders', async () => {
-      const { service } = buildService();
-      const status = await service.getStatus('acc-1');
-      expect(status).toEqual({
-        oldestCoveredAt: '2026-05-31',
-        historyComplete: false,
-      });
-    });
-
-    it('reports historyComplete = true when the oldest run returned zero orders', async () => {
-      const { service } = buildService({
-        persistence: {
-          getAccountSyncCoverage: jest.fn().mockResolvedValue({
-            intervals: [],
-            oldestFrom: new Date('2026-01-01T00:00:00.000Z'),
-            oldestRunRecordsRead: 0,
-          }),
-        },
-      });
-      const status = await service.getStatus('acc-1');
-      expect(status.historyComplete).toBe(true);
-    });
-
-    it('reports oldestCoveredAt = null for an account never synced', async () => {
+    it('reports NOT_STARTED for an account never synced', async () => {
       const { service } = buildService({
         persistence: {
           getAccountSyncCoverage: jest.fn().mockResolvedValue({
@@ -125,7 +138,77 @@ describe('MarketplaceBackfillService', () => {
         },
       });
       const status = await service.getStatus('acc-1');
-      expect(status).toEqual({ oldestCoveredAt: null, historyComplete: false });
+      expect(status).toEqual({
+        status: 'NOT_STARTED',
+        oldestCoveredAt: null,
+        firstOrderAt: null,
+        lastOrderAt: null,
+        synchronizedIntervals: [],
+        lastProcessedChunk: null,
+        lastRunErrorCode: null,
+      });
+    });
+
+    it('reports IN_PROGRESS with firstOrderAt/lastOrderAt/intervals/last chunk when there is coverage and room before the safety floor', async () => {
+      const { service } = buildService();
+      const status = await service.getStatus('acc-1');
+      expect(status.status).toBe('IN_PROGRESS');
+      expect(status.oldestCoveredAt).toBe('2026-05-31');
+      expect(status.firstOrderAt).toBe('2026-05-31');
+      expect(status.lastOrderAt).toBe('2026-06-29');
+      expect(status.synchronizedIntervals).toEqual([
+        { from: '2026-05-31', to: '2026-06-30' },
+      ]);
+      expect(status.lastProcessedChunk).toEqual({
+        from: '2026-05-01',
+        to: '2026-05-31',
+        ordersFetched: 5,
+      });
+    });
+
+    it('never marks status as complete/safety-limit just because the oldest run had zero records (an empty chunk is not proof of the history start)', async () => {
+      const { service } = buildService({
+        persistence: {
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [],
+            oldestFrom: new Date('2026-06-01T00:00:00.000Z'),
+            oldestRunRecordsRead: 0,
+          }),
+        },
+      });
+      const status = await service.getStatus('acc-1');
+      expect(status.status).toBe('IN_PROGRESS');
+    });
+
+    it('reports SAFETY_LIMIT_REACHED once the next chunk window would cross the defensive floor, never claiming it proves the true start of history', async () => {
+      const { service } = buildService({
+        persistence: {
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [],
+            oldestFrom: new Date('2011-01-01T00:00:00.000Z'),
+            oldestRunRecordsRead: 0,
+          }),
+          getAccountOrderDateRange: jest.fn().mockResolvedValue(null),
+        },
+      });
+      const status = await service.getStatus('acc-1');
+      expect(status.status).toBe('SAFETY_LIMIT_REACHED');
+    });
+
+    it('reports ERROR with the last run error code when the most recent run failed (transient failure, retryable)', async () => {
+      const { service } = buildService({
+        syncRunsService: {
+          findAll: jest.fn().mockResolvedValue([
+            syncRun({
+              status: SyncRunStatus.FAILED,
+              errorCode: 'STALE_RUN_RECOVERED',
+            }),
+          ]),
+        },
+      });
+      const status = await service.getStatus('acc-1');
+      expect(status.status).toBe('ERROR');
+      expect(status.lastRunErrorCode).toBe('STALE_RUN_RECOVERED');
     });
   });
 
@@ -166,13 +249,53 @@ describe('MarketplaceBackfillService', () => {
       });
     });
 
-    it('is idempotent: returns hasMoreHistory=false without calling the provider once history is already proven complete', async () => {
+    it('never stops on a single empty chunk: hasMoreHistory stays true even when the chunk returned zero orders', async () => {
+      const { service, mlSyncService } = buildService({
+        mlSyncService: {
+          syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 0 }),
+        },
+      });
+      const result = await service.runNextChunk('acc-1');
+      expect(result.hasMoreHistory).toBe(true);
+      expect(result.ordersFetched).toBe(0);
+      expect(mlSyncService.syncOrders).toHaveBeenCalled();
+    });
+
+    it('keeps walking backwards across multiple consecutive empty chunks without ever stopping prematurely', async () => {
+      const { service, persistence, mlSyncService } = buildService({
+        mlSyncService: {
+          syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 0 }),
+        },
+      });
+
+      let oldestFrom = new Date('2026-06-01T00:00:00.000Z');
+      persistence.getAccountSyncCoverage.mockImplementation(() =>
+        Promise.resolve({
+          intervals: [],
+          oldestFrom,
+          oldestRunRecordsRead: 0,
+        }),
+      );
+
+      const first = await service.runNextChunk('acc-1');
+      expect(first.hasMoreHistory).toBe(true);
+      oldestFrom = new Date(first.oldestCoveredAt + 'T00:00:00.000Z');
+
+      const second = await service.runNextChunk('acc-1');
+      expect(second.hasMoreHistory).toBe(true);
+      expect(new Date(second.oldestCoveredAt).getTime()).toBeLessThan(
+        oldestFrom.getTime(),
+      );
+      expect(mlSyncService.syncOrders).toHaveBeenCalledTimes(2);
+    });
+
+    it('returns hasMoreHistory=false without calling the provider once the next chunk would cross the defensive safety floor', async () => {
       const { service, mlSyncService } = buildService({
         persistence: {
           recoverStaleRunningRuns: jest.fn().mockResolvedValue(0),
           getAccountSyncCoverage: jest.fn().mockResolvedValue({
             intervals: [],
-            oldestFrom: new Date('2026-01-01T00:00:00.000Z'),
+            oldestFrom: new Date('2011-01-01T00:00:00.000Z'),
             oldestRunRecordsRead: 0,
           }),
         },
@@ -182,7 +305,7 @@ describe('MarketplaceBackfillService', () => {
 
       expect(result).toEqual({
         hasMoreHistory: false,
-        oldestCoveredAt: '2025-12-31',
+        oldestCoveredAt: '2010-12-31',
         ordersFetched: 0,
       });
       expect(mlSyncService.syncOrders).not.toHaveBeenCalled();
@@ -226,7 +349,7 @@ describe('MarketplaceBackfillService', () => {
       );
     });
 
-    it('reports hasMoreHistory=true when the chunk returned orders', async () => {
+    it('reports hasMoreHistory=true and the fetched count when the chunk returned orders', async () => {
       const { service } = buildService({
         mlSyncService: {
           syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 12 }),
@@ -235,16 +358,6 @@ describe('MarketplaceBackfillService', () => {
       const result = await service.runNextChunk('acc-1');
       expect(result.hasMoreHistory).toBe(true);
       expect(result.ordersFetched).toBe(12);
-    });
-
-    it('reports hasMoreHistory=false when the chunk itself came back with zero orders (edge of history found)', async () => {
-      const { service } = buildService({
-        mlSyncService: {
-          syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 0 }),
-        },
-      });
-      const result = await service.runNextChunk('acc-1');
-      expect(result.hasMoreHistory).toBe(false);
     });
 
     it('maps SyncAlreadyRunningError to BACKFILL_ALREADY_RUNNING', async () => {

@@ -5,13 +5,29 @@ import {
   ApiFetchError,
   apiFetch,
   fetchAmazonSetupStatus,
+  fetchBackfillStatus,
   fetchMarketplaceAccounts,
+  runBackfillNextChunk,
   syncAmazonOrders,
   syncMercadoLivreOrders,
 } from "@/lib/api";
 import { SyncTable } from "@/components/SyncTable";
+import {
+  BackfillAccountPanel,
+  type BackfillProgress,
+} from "@/components/BackfillAccountPanel";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
+import type { BackfillStatusDto } from "@/types/marketplace-backfill";
 import type { SyncRun } from "@/types/sync-run";
+
+// Backoff defensivo (Fase 4, "falha transitória → retry") — cada chunk é
+// idempotente (recalcula a janela a partir do estado atual do banco), então
+// tentar de novo o mesmo chunk após uma falha nunca duplica nem perde nada.
+const BACKFILL_RETRY_DELAYS_MS = [2000, 5000, 15000];
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function isSyncRunArray(value: unknown): value is SyncRun[] {
   return Array.isArray(value);
@@ -71,6 +87,109 @@ export default function SincronizacoesPage() {
   );
   const runningRef = useRef(false);
 
+  const [mlAccounts, setMlAccounts] = useState<
+    Array<{ accountId: string; label: string }>
+  >([]);
+  const [backfillStatuses, setBackfillStatuses] = useState<
+    Record<string, BackfillStatusDto | null>
+  >({});
+  const [backfillLoadErrors, setBackfillLoadErrors] = useState<
+    Record<string, boolean>
+  >({});
+  const [backfillProgress, setBackfillProgress] = useState<
+    Record<string, BackfillProgress | null>
+  >({});
+  const [backfillErrors, setBackfillErrors] = useState<
+    Record<string, string | null>
+  >({});
+  const [runningAccountId, setRunningAccountId] = useState<string | null>(null);
+  const [runningAllBackfill, setRunningAllBackfill] = useState(false);
+  const backfillStoppedRef = useRef(false);
+
+  useEffect(() => {
+    return () => {
+      backfillStoppedRef.current = true;
+    };
+  }, []);
+
+  const loadBackfillStatus = useCallback(async (accountId: string) => {
+    try {
+      const status = await fetchBackfillStatus(accountId);
+      setBackfillStatuses((prev) => ({ ...prev, [accountId]: status }));
+      setBackfillLoadErrors((prev) => ({ ...prev, [accountId]: false }));
+    } catch {
+      setBackfillLoadErrors((prev) => ({ ...prev, [accountId]: true }));
+    }
+  }, []);
+
+  const runBackfillChunkWithRetry = useCallback(async (accountId: string) => {
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= BACKFILL_RETRY_DELAYS_MS.length; attempt += 1) {
+      try {
+        return await runBackfillNextChunk(accountId);
+      } catch (error) {
+        lastError = error;
+        if (attempt < BACKFILL_RETRY_DELAYS_MS.length) {
+          await sleep(BACKFILL_RETRY_DELAYS_MS[attempt]);
+        }
+      }
+    }
+    throw lastError;
+  }, []);
+
+  // Um chunk por vez, sequencial (nunca paginações concorrentes da mesma
+  // conta) — retoma exatamente de onde `oldestCoveredAt` parou, então
+  // fechar a aba ou reiniciar o backend no meio nunca perde progresso.
+  const runBackfillLoop = useCallback(
+    async (accountId: string) => {
+      setRunningAccountId(accountId);
+      setBackfillErrors((prev) => ({ ...prev, [accountId]: null }));
+      setBackfillProgress((prev) => ({
+        ...prev,
+        [accountId]: { chunksProcessed: 0, oldestReached: null },
+      }));
+
+      let chunksProcessed = 0;
+      try {
+        while (!backfillStoppedRef.current) {
+          const result = await runBackfillChunkWithRetry(accountId);
+          chunksProcessed += 1;
+          setBackfillProgress((prev) => ({
+            ...prev,
+            [accountId]: {
+              chunksProcessed,
+              oldestReached: result.oldestCoveredAt,
+            },
+          }));
+          if (!result.hasMoreHistory) break;
+        }
+      } catch (error) {
+        const message =
+          error instanceof ApiFetchError
+            ? error.message
+            : "Não foi possível continuar o histórico agora.";
+        setBackfillErrors((prev) => ({ ...prev, [accountId]: message }));
+      } finally {
+        setBackfillProgress((prev) => ({ ...prev, [accountId]: null }));
+        setRunningAccountId(null);
+        await loadBackfillStatus(accountId);
+      }
+    },
+    [runBackfillChunkWithRetry, loadBackfillStatus],
+  );
+
+  async function handleCompleteAllHistory() {
+    if (runningAccountId || runningAllBackfill || mlAccounts.length === 0) {
+      return;
+    }
+    setRunningAllBackfill(true);
+    for (const mlAccount of mlAccounts) {
+      if (backfillStoppedRef.current) break;
+      await runBackfillLoop(mlAccount.accountId);
+    }
+    setRunningAllBackfill(false);
+  }
+
   const loadSyncRuns = useCallback(async () => {
     try {
       const response = await apiFetch("/sync-runs", { method: "GET" });
@@ -124,10 +243,23 @@ export default function SincronizacoesPage() {
 
       setRows(next);
       setRowsLoadError(false);
+
+      const connectedMl = accounts.filter(
+        (item) =>
+          item.marketplace === "MERCADO_LIVRE" && item.status === "CONNECTED",
+      );
+      const nextMlAccounts = connectedMl.map((item) => ({
+        accountId: item.id,
+        label: accountLabel(item),
+      }));
+      setMlAccounts(nextMlAccounts);
+      await Promise.all(
+        nextMlAccounts.map((item) => loadBackfillStatus(item.accountId)),
+      );
     } catch {
       setRowsLoadError(true);
     }
-  }, []);
+  }, [loadBackfillStatus]);
 
   useEffect(() => {
     void (async () => {
@@ -259,6 +391,57 @@ export default function SincronizacoesPage() {
               </li>
             ))}
           </ul>
+        )}
+      </section>
+
+      <section className="flex flex-col gap-4 rounded-xl border border-border-subtle bg-surface p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">Completar histórico</h2>
+            <p className="mt-1 text-sm text-foreground/60">
+              Busca vendas antigas do Mercado Livre até o primeiro período
+              disponível para cada conta — diferente de &quot;Sincronizar
+              agora&quot;, que atualiza somente vendas recentes e alterações.
+            </p>
+          </div>
+          {mlAccounts.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => void handleCompleteAllHistory()}
+              disabled={runningAccountId !== null || runningAllBackfill}
+              className="rounded-md border border-brand bg-brand/10 px-4 py-2 text-sm font-semibold text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {runningAllBackfill
+                ? "Completando histórico de todas as lojas..."
+                : "Completar histórico de todas as lojas"}
+            </button>
+          ) : null}
+        </div>
+
+        {mlAccounts.length === 0 ? (
+          <p className="text-sm text-foreground/60">
+            Nenhuma conta do Mercado Livre conectada ainda.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {mlAccounts.map((mlAccount) => (
+              <BackfillAccountPanel
+                key={mlAccount.accountId}
+                label={mlAccount.label}
+                status={backfillStatuses[mlAccount.accountId] ?? null}
+                loadError={backfillLoadErrors[mlAccount.accountId] ?? false}
+                progress={backfillProgress[mlAccount.accountId] ?? null}
+                isRunning={runningAccountId === mlAccount.accountId}
+                disabled={
+                  runningAllBackfill ||
+                  (runningAccountId !== null &&
+                    runningAccountId !== mlAccount.accountId)
+                }
+                errorMessage={backfillErrors[mlAccount.accountId] ?? null}
+                onStart={() => void runBackfillLoop(mlAccount.accountId)}
+              />
+            ))}
+          </div>
         )}
       </section>
 

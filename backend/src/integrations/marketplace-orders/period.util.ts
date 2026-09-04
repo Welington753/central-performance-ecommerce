@@ -102,6 +102,31 @@ export function computeBackfillChunkWindow(
   };
 }
 
+// Teto defensivo, nunca uma prova do início real do histórico da conta no
+// marketplace — auditoria (Fase 4, "Completar histórico") não encontrou
+// nenhum sinal documentado do Mercado Livre que confirme "não há pedido mais
+// antigo que isto" (todo erro de rede/resposta cai em `provider_unavailable`/
+// `invalid_response`, indistinguível de um período genuinamente sem vendas).
+// Existe só para o backfill nunca percorrer o histórico indefinidamente
+// quando o provedor nunca confirma exaustão.
+export const BACKFILL_SAFETY_FLOOR_YEARS = 15;
+
+/**
+ * Um chunk vazio (zero pedidos) NUNCA prova que não há pedido mais antigo —
+ * podem existir meses sem vendas e períodos anteriores com vendas. A única
+ * razão válida para parar de retroceder é o teto defensivo acima; qualquer
+ * outra condição de parada precisa continuar retrocedendo.
+ */
+export function hasReachedBackfillSafetyFloor(
+  windowFrom: Date,
+  referenceNow: Date,
+  years: number = BACKFILL_SAFETY_FLOOR_YEARS,
+): boolean {
+  const floor = new Date(referenceNow.getTime());
+  floor.setUTCFullYear(floor.getUTCFullYear() - years);
+  return windowFrom.getTime() <= floor.getTime();
+}
+
 /**
  * Checkpoint 2 (filtros de data): vocabulário fechado de erro de validação
  * do período — a mensagem da exceção É o código, nunca inclui a query string
