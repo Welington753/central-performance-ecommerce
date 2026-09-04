@@ -232,62 +232,96 @@ describe('MercadoLivreHttpClient', () => {
     expect(sentBody).toContain('refresh_token=TG-old');
   });
 
-  it('refreshToken: maps a 400 invalid_grant to definitive_error (the refresh token itself was rejected)', async () => {
+  it('refreshToken: maps a 400 invalid_grant to invalid_grant (the refresh token itself was rejected — the only confirmed case requiring reconnection)', async () => {
     const fetchImpl = jest
       .fn()
       .mockResolvedValue(jsonResponse(400, { error: 'invalid_grant' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'definitive_error',
+      kind: 'invalid_grant',
     });
   });
 
-  it('refreshToken: maps a 400 invalid_client to client_configuration_error — NEVER definitive_error (must not turn a valid refresh token into TOKEN_EXPIRED because our own client credentials are misconfigured); Task 20 treats this the same as unknown_result (REFRESH_RESULT_UNKNOWN), never TOKEN_EXPIRED', async () => {
+  it("refreshToken: maps a 400 invalid_client to invalid_client — a global app misconfiguration, never proof that this account's refresh token is invalid", async () => {
     const fetchImpl = jest
       .fn()
       .mockResolvedValue(jsonResponse(400, { error: 'invalid_client' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'client_configuration_error',
+      kind: 'invalid_client',
     });
   });
 
-  it('refreshToken: maps a 408 to unknown_result', async () => {
+  it('refreshToken: maps an unrecognized 4xx error code to outcome_unknown, not temporary_failure (a complete response was received, its meaning is just unknown)', async () => {
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValue(
+        jsonResponse(400, { error: 'unsupported_grant_type' }),
+      );
+    const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
+
+    expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
+      kind: 'outcome_unknown',
+    });
+  });
+
+  it('refreshToken: maps a 408 to temporary_failure with retryAfterMs null', async () => {
     const fetchImpl = jest
       .fn()
       .mockResolvedValue(jsonResponse(408, { error: 'request_timeout' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'unknown_result',
+      kind: 'temporary_failure',
+      retryAfterMs: null,
     });
   });
 
-  it('refreshToken: maps a 429 to unknown_result', async () => {
+  it('refreshToken: maps a 429 to temporary_failure and parses a valid Retry-After header', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(
+      new Response(JSON.stringify({ error: 'too_many_requests' }), {
+        status: 429,
+        headers: {
+          'content-type': 'application/json',
+          'retry-after': '30',
+        },
+      }),
+    );
+    const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
+
+    expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
+      kind: 'temporary_failure',
+      retryAfterMs: 30000,
+    });
+  });
+
+  it('refreshToken: 429 without a valid Retry-After falls back to retryAfterMs null', async () => {
     const fetchImpl = jest
       .fn()
       .mockResolvedValue(jsonResponse(429, { error: 'too_many_requests' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'unknown_result',
+      kind: 'temporary_failure',
+      retryAfterMs: null,
     });
   });
 
-  it('refreshToken: maps a 500 to unknown_result', async () => {
+  it('refreshToken: maps a 500 to temporary_failure', async () => {
     const fetchImpl = jest
       .fn()
       .mockResolvedValue(jsonResponse(500, { error: 'internal' }));
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'unknown_result',
+      kind: 'temporary_failure',
+      retryAfterMs: null,
     });
   });
 
-  it('refreshToken: maps a network/timeout error to unknown_result', async () => {
+  it('refreshToken: maps a network/timeout error (no response at all) to temporary_failure — DNS/connection-refused/timeout-before-response', async () => {
     const fetchImpl = jest.fn(
       (_url: RequestInfo | URL, options?: RequestInit) =>
         new Promise<Response>((_resolve, reject) => {
@@ -299,11 +333,12 @@ describe('MercadoLivreHttpClient', () => {
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'unknown_result',
+      kind: 'temporary_failure',
+      retryAfterMs: null,
     });
   });
 
-  it('refreshToken: maps a 200 response with invalid JSON to invalid_response, not unknown_result', async () => {
+  it('refreshToken: maps a 200 response with invalid JSON to outcome_unknown — malformed success body, never treated as a clean network failure', async () => {
     const fetchImpl = jest.fn().mockResolvedValue(
       new Response('this is not json at all', {
         status: 200,
@@ -313,7 +348,33 @@ describe('MercadoLivreHttpClient', () => {
     const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
 
     expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
-      kind: 'invalid_response',
+      kind: 'outcome_unknown',
+    });
+  });
+
+  it('refreshToken: a connection interrupted while reading an already-received 200 body maps to outcome_unknown, not temporary_failure', async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const fetchImpl = jest.fn(
+      (_url: RequestInfo | URL, options?: RequestInit) => {
+        capturedSignal = options?.signal ?? undefined;
+        const response = {
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: () =>
+            new Promise((_resolve, reject) => {
+              capturedSignal?.addEventListener('abort', () =>
+                reject(new DOMException('Aborted', 'AbortError')),
+              );
+            }),
+        } as unknown as Response;
+        return Promise.resolve(response);
+      },
+    );
+    const client = new MercadoLivreHttpClient(makeConfigService(), fetchImpl);
+
+    expect(await client.refreshToken({ refreshToken: 'TG-old' })).toEqual({
+      kind: 'outcome_unknown',
     });
   });
 

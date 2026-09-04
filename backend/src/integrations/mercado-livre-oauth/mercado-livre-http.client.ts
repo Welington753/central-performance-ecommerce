@@ -12,6 +12,32 @@ export type TokenExchangeOutcome =
   | { kind: 'unknown_result' }
   | { kind: 'invalid_response' };
 
+/**
+ * Vocabulário fechado EXCLUSIVO de `refreshToken` (correção de resiliência
+ * OAuth) — nunca reagrupado de volta ao `TokenExchangeOutcome` do
+ * `exchangeCode`, que serve um contrato diferente (callback de uma
+ * autorização nova, sem conta a preservar). Quatro resultados, nunca
+ * fundidos entre si:
+ * - `invalid_grant`: o PRÓPRIO refresh_token foi rejeitado pelo Mercado
+ *   Livre — a única confirmação real de que a autorização não vale mais.
+ * - `invalid_client`: nosso `client_id`/`client_secret` está errado — erro
+ *   GLOBAL da aplicação, nunca prova nada sobre o refresh_token desta conta.
+ * - `temporary_failure`: DNS, conexão recusada, timeout antes de qualquer
+ *   resposta, 429 ou 5xx — sempre recuperável automaticamente, nunca exige
+ *   reconexão.
+ * - `outcome_unknown`: a conexão morreu DEPOIS de já termos uma resposta
+ *   (corpo cortado no meio da leitura) ou um 200 estruturalmente
+ *   incompleto/malformado — o provedor pode ter processado a requisição
+ *   mesmo assim, então é ambíguo, mas ainda assim recuperável (nunca vira
+ *   reconexão imediata).
+ */
+export type RefreshTokenOutcome =
+  | { kind: 'success'; token: MercadoLivreTokenResponse }
+  | { kind: 'invalid_grant' }
+  | { kind: 'invalid_client' }
+  | { kind: 'temporary_failure'; retryAfterMs: number | null }
+  | { kind: 'outcome_unknown' };
+
 export type IdentityLookupOutcome =
   { kind: 'success'; externalUserId: number } | { kind: 'failure' };
 
@@ -28,6 +54,23 @@ const IDENTITY_ENDPOINT = 'https://api.mercadolibre.com/users/me';
  * dependencies of MercadoLivreHttpClient (?, ConfigService)".
  */
 export const ML_FETCH = Symbol('ML_FETCH');
+
+/**
+ * Resultado bruto e interno de `postToken` — nunca exposto fora deste
+ * arquivo. `exchangeCode` e `refreshToken` mapeiam este MESMO resultado
+ * para dois vocabulários fechados diferentes (`toTokenExchangeOutcome`/
+ * `toRefreshTokenOutcome`), sem duplicar a lógica de rede/parsing abaixo.
+ */
+type PostTokenRawOutcome =
+  | { kind: 'success'; token: MercadoLivreTokenResponse }
+  | { kind: 'network_failure' }
+  | { kind: 'rate_limited'; retryAfterMs: number | null }
+  | { kind: 'server_error' }
+  | { kind: 'invalid_grant' }
+  | { kind: 'invalid_client' }
+  | { kind: 'other_client_error' }
+  | { kind: 'read_interrupted' }
+  | { kind: 'malformed_success_body' };
 
 /**
  * Único ponto do sistema que faz chamadas HTTP reais ao Mercado Livre
@@ -53,21 +96,23 @@ export class MercadoLivreHttpClient {
     code: string;
     codeVerifier: string;
   }): Promise<TokenExchangeOutcome> {
-    return this.postToken({
+    const raw = await this.postToken({
       grant_type: 'authorization_code',
       code: input.code,
       code_verifier: input.codeVerifier,
       redirect_uri: this.configService.getOrThrow<string>('ML_REDIRECT_URI'),
     });
+    return this.toTokenExchangeOutcome(raw);
   }
 
   async refreshToken(input: {
     refreshToken: string;
-  }): Promise<TokenExchangeOutcome> {
-    return this.postToken({
+  }): Promise<RefreshTokenOutcome> {
+    const raw = await this.postToken({
       grant_type: 'refresh_token',
       refresh_token: input.refreshToken,
     });
+    return this.toRefreshTokenOutcome(raw);
   }
 
   async fetchIdentity(accessToken: string): Promise<IdentityLookupOutcome> {
@@ -97,9 +142,67 @@ export class MercadoLivreHttpClient {
     }
   }
 
+  /**
+   * Mapeamento usado pelo callback de uma autorização NOVA (Task 19) —
+   * preservado byte a byte do comportamento anterior à correção de
+   * resiliência: `invalid_client` aqui vira o MESMO `client_configuration_error`
+   * de sempre (nunca `definitive_error`), e qualquer falha de rede/429/5xx/
+   * corpo cortado no meio da leitura continua caindo em `unknown_result`.
+   */
+  private toTokenExchangeOutcome(
+    raw: PostTokenRawOutcome,
+  ): TokenExchangeOutcome {
+    switch (raw.kind) {
+      case 'success':
+        return raw;
+      case 'invalid_grant':
+        return { kind: 'definitive_error' };
+      case 'invalid_client':
+        return { kind: 'client_configuration_error' };
+      case 'malformed_success_body':
+        return { kind: 'invalid_response' };
+      case 'network_failure':
+      case 'rate_limited':
+      case 'server_error':
+      case 'other_client_error':
+      case 'read_interrupted':
+        return { kind: 'unknown_result' };
+    }
+  }
+
+  /**
+   * Mapeamento usado pela RENOVAÇÃO (correção de resiliência OAuth) — ver o
+   * comentário de `RefreshTokenOutcome` para a justificativa de cada balde.
+   * `other_client_error` (um 4xx com um `error` que não reconhecemos) entra
+   * em `outcome_unknown`, não `temporary_failure`: recebemos uma resposta
+   * completa e legível do provedor, só não sabemos o que ela significa —
+   * bem diferente de uma falha de rede/rate-limit onde sabemos exatamente
+   * a causa e que é seguro tentar de novo.
+   */
+  private toRefreshTokenOutcome(raw: PostTokenRawOutcome): RefreshTokenOutcome {
+    switch (raw.kind) {
+      case 'success':
+        return raw;
+      case 'invalid_grant':
+        return { kind: 'invalid_grant' };
+      case 'invalid_client':
+        return { kind: 'invalid_client' };
+      case 'network_failure':
+        return { kind: 'temporary_failure', retryAfterMs: null };
+      case 'rate_limited':
+        return { kind: 'temporary_failure', retryAfterMs: raw.retryAfterMs };
+      case 'server_error':
+        return { kind: 'temporary_failure', retryAfterMs: null };
+      case 'other_client_error':
+      case 'read_interrupted':
+      case 'malformed_success_body':
+        return { kind: 'outcome_unknown' };
+    }
+  }
+
   private async postToken(
     params: Record<string, string>,
-  ): Promise<TokenExchangeOutcome> {
+  ): Promise<PostTokenRawOutcome> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.timeoutMs);
 
@@ -111,13 +214,10 @@ export class MercadoLivreHttpClient {
 
     // O `clearTimeout` só roda no `finally` MAIS EXTERNO — o timeout cobre a
     // operação INTEIRA (fetch + leitura do corpo + validação), não só o
-    // retorno dos headers do `fetch`. Uma versão anterior deste método
-    // limpava o timer logo após o `fetch` resolver, antes de
-    // `response.json()` terminar — um corpo lento a ler corria então sem
-    // limite de tempo nenhum, apesar de `ML_HTTP_TIMEOUT_MS` existir. O
-    // corpo/mensagem bruta do provedor NUNCA é logado nem armazenado em
-    // nenhum ramo abaixo — só o campo `error` estruturado é inspecionado,
-    // em memória, quando necessário para classificar o resultado.
+    // retorno dos headers do `fetch`. O corpo/mensagem bruta do provedor
+    // NUNCA é logado nem armazenado em nenhum ramo abaixo — só o campo
+    // `error` estruturado é inspecionado, em memória, quando necessário para
+    // classificar o resultado.
     try {
       let response: Response;
       try {
@@ -131,41 +231,30 @@ export class MercadoLivreHttpClient {
           signal: controller.signal,
         });
       } catch {
-        // Timeout (abort) ou falha de rede antes mesmo de haver resposta —
-        // resultado DESCONHECIDO (design §6.2), nunca reenviado como
-        // rejeição definitiva do code/refresh_token.
-        return { kind: 'unknown_result' };
+        // Nenhuma resposta chegou a existir: DNS, conexão recusada, ou
+        // nosso próprio timeout disparando antes de qualquer byte de volta.
+        // Nunca prova que o provedor processou a requisição — sempre seguro
+        // reenviar o MESMO refresh_token depois.
+        return { kind: 'network_failure' };
       }
 
-      // 408 (timeout do lado do provedor) e 429 (rate limit) são falhas do
-      // PROVEDOR, não uma rejeição do code/refresh_token apresentado —
-      // sempre resultado desconhecido/transitório.
-      if (response.status === 408 || response.status === 429) {
-        return { kind: 'unknown_result' };
+      // 408 (timeout do lado do provedor): o provedor respondeu, mas nunca
+      // chegou a avaliar o refresh_token — mesmo balde de 5xx.
+      if (response.status === 408) return { kind: 'server_error' };
+      if (response.status === 429) {
+        return {
+          kind: 'rate_limited',
+          retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
+        };
       }
 
       if (response.status >= 400 && response.status < 500) {
-        // Só `invalid_grant` é uma rejeição DEFINITIVA do code/refresh_token
-        // em si (design §7/§8: mapeia para TOKEN_EXCHANGE_FAILED no
-        // callback, REFRESH_TOKEN_REJECTED/TOKEN_EXPIRED no refresh).
-        //
-        // `invalid_client` (client_id/client_secret mal configurados no
-        // nosso lado) é um resultado ESTRUTURALMENTE DIFERENTE, nem
-        // definitivo nem puramente desconhecido: o design §6.2 passo 7 o
-        // cita ao lado de `invalid_grant` como falha definitiva de
-        // callback (→ TOKEN_EXCHANGE_FAILED), mas no refresh (design §6.4)
-        // ele NÃO prova que o refresh_token foi rejeitado — tratá-lo como
-        // `definitive_error` ali faria um refresh_token perfeitamente
-        // válido virar TOKEN_EXPIRED só porque a credencial do app está
-        // errada, destruindo a conexão do usuário sem causa real no token
-        // dele. Por isso ganha seu próprio `kind: 'client_configuration_error'`,
-        // permitindo que cada chamador (Task 19 x Task 20) escolha o
-        // mapeamento correto para o seu contexto, sem reintroduzir a
-        // ambiguidade que `unknown_result` teria aqui.
-        //
-        // Qualquer outro código de erro 4xx, ou um corpo que nem chega a
-        // ser JSON válido, permanece `unknown_result` — já aprovado no
-        // design para timeout/5xx/resultado ambíguo.
+        // Só `invalid_grant` é uma rejeição DEFINITIVA do refresh_token em
+        // si. `invalid_client` (client_id/client_secret mal configurados no
+        // nosso lado) nunca prova nada sobre o refresh_token do usuário.
+        // Qualquer outro código de erro 4xx reconhecível permanece
+        // `other_client_error` — resposta completa, significado
+        // desconhecido, nunca tratado como falha de rede segura de repetir.
         let errorCode: unknown;
         try {
           const errorBody = (await response.json()) as Record<string, unknown>;
@@ -173,40 +262,52 @@ export class MercadoLivreHttpClient {
         } catch {
           errorCode = undefined;
         }
-        // Um abort (timeout) no meio da leitura deste corpo de erro não é
-        // prova de corpo malformado — é a mesma condição "desconhecida" de
-        // qualquer outro timeout, então tem prioridade sobre a falta de
-        // `errorCode`.
-        if (controller.signal.aborted) return { kind: 'unknown_result' };
-        if (errorCode === 'invalid_grant') return { kind: 'definitive_error' };
-        if (errorCode === 'invalid_client')
-          return { kind: 'client_configuration_error' };
-        return { kind: 'unknown_result' };
+        // Um abort (timeout) no meio da leitura deste corpo de erro prova
+        // que JÁ recebemos os headers/status — connection interrompida
+        // DEPOIS do envio, nunca confundida com uma falha de rede limpa.
+        if (controller.signal.aborted) return { kind: 'read_interrupted' };
+        if (errorCode === 'invalid_grant') return { kind: 'invalid_grant' };
+        if (errorCode === 'invalid_client') return { kind: 'invalid_client' };
+        return { kind: 'other_client_error' };
       }
 
       if (!response.ok) {
         // 5xx e qualquer outro status não coberto acima.
-        return { kind: 'unknown_result' };
+        return { kind: 'server_error' };
       }
 
-      // Um 200 cujo corpo não é JSON válido é estruturalmente inválido — não
-      // ambíguo como um timeout — então vira invalid_response. A exceção é
-      // um abort no meio desta leitura: aí a causa é o timeout, não um
-      // corpo malformado, então continua sendo unknown_result.
+      // Um 200 cujo corpo não é JSON válido: se o abort disparou durante a
+      // leitura, a causa é a conexão interrompida DEPOIS de já termos uma
+      // resposta 200 (read_interrupted), nunca um corpo malformado por si só.
       let json: unknown;
       try {
         json = await response.json();
       } catch {
-        if (controller.signal.aborted) return { kind: 'unknown_result' };
-        return { kind: 'invalid_response' };
+        if (controller.signal.aborted) return { kind: 'read_interrupted' };
+        return { kind: 'malformed_success_body' };
       }
 
       const validation = validateTokenResponseBody(json);
-      if (!validation.valid) return { kind: 'invalid_response' };
+      if (!validation.valid) return { kind: 'malformed_success_body' };
 
       return { kind: 'success', token: validation.token };
     } finally {
       clearTimeout(timeout);
     }
   }
+}
+
+/**
+ * `Retry-After` só é honrado quando é um inteiro de segundos válido e não
+ * negativo (formato HTTP-date não é suportado — nunca inventa um valor).
+ * Duplicado deliberadamente do equivalente em `amazon-sp-api.client.ts`
+ * (não extraído para um util compartilhado) para nunca tocar o módulo
+ * Amazon nesta correção.
+ */
+function parseRetryAfterMs(headerValue: string | null): number | null {
+  if (headerValue === null) return null;
+  if (!/^\d+$/.test(headerValue)) return null;
+  const seconds = Number(headerValue);
+  if (!Number.isSafeInteger(seconds) || seconds < 0) return null;
+  return seconds * 1000;
 }

@@ -21,10 +21,38 @@ import { buildCallbackRedirectUrl } from './callback-redirect-url';
 import { mapFailureCodeToPublicReason } from './callback-reason.mapper';
 import type { MercadoLivreOAuthFailureCode } from './mercado-livre-oauth-failure-code';
 import { MercadoLivreHttpClient } from './mercado-livre-http.client';
+import { computeRefreshBackoffDelayMs } from './mercado-livre-refresh-backoff.util';
 import {
   OAuthAuthorizationRequestsService,
   OAuthConnectionInProgressError,
 } from './oauth-authorization-requests.service';
+
+type RecoverableFailureCode =
+  | 'REFRESH_TEMPORARY_FAILURE'
+  | 'REFRESH_OUTCOME_UNKNOWN'
+  | 'ML_APP_CONFIGURATION_ERROR';
+
+// Códigos aceitos como "recuperável" pelo endpoint de recuperação — inclui
+// o legado `REFRESH_RESULT_UNKNOWN` (nunca mais escrito, mas ainda pode
+// existir em contas presas no incidente anterior a esta correção).
+const RECOVERABLE_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'REFRESH_RESULT_UNKNOWN',
+  'REFRESH_TEMPORARY_FAILURE',
+  'REFRESH_OUTCOME_UNKNOWN',
+  'ML_APP_CONFIGURATION_ERROR',
+]);
+
+export type RecoverConnectionOutcome =
+  'RECOVERED' | 'PENDING_RETRY' | 'RECONNECT_REQUIRED' | 'CONFIGURATION_ERROR';
+
+type AttemptRefreshResult =
+  | { kind: 'success'; accessToken: string }
+  | { kind: 'invalid_grant' }
+  | { kind: 'invalid_client' }
+  | { kind: 'temporary_failure' }
+  | { kind: 'outcome_unknown' }
+  | { kind: 'retry_scheduled' }
+  | { kind: 'not_committed' };
 
 const CONNECTABLE_STATUSES: MarketplaceAccountStatus[] = [
   MarketplaceAccountStatus.DISCONNECTED,
@@ -36,6 +64,16 @@ const CONNECTABLE_STATUSES: MarketplaceAccountStatus[] = [
 @Injectable()
 export class MercadoLivreOAuthService {
   private readonly logger = new Logger(MercadoLivreOAuthService.name);
+
+  // Circuito temporário para `invalid_client` (correção de resiliência
+  // OAuth): quando o client_id/client_secret configurado está errado, TODA
+  // conta bateria no mesmo erro — sem isto, um ciclo de sincronização
+  // automática com várias contas repetiria a mesma chamada de rede fadada
+  // ao fracasso para cada uma. Em memória, por instância do processo
+  // (nunca persistido) — reinicia limpo a cada deploy/restart, e uma
+  // renovação bem-sucedida em qualquer conta também o fecha.
+  private mlAppConfigCircuitOpenUntil: number | null = null;
+  private static readonly ML_APP_CONFIG_CIRCUIT_COOLDOWN_MS = 5 * 60 * 1000;
 
   constructor(
     private readonly marketplaceAccountsService: MarketplaceAccountsService,
@@ -431,8 +469,16 @@ export class MercadoLivreOAuthService {
    * design §6.4: fast path sem lock quando o token atual ainda está fora da
    * janela de leeway; caso contrário, adquire o advisory lock (mesmo do
    * callback, §3), relê e revalida a conta, renova no ML fora de transação
-   * e aplica CAS por `tokenVersion`. Nunca reutiliza automaticamente um
-   * refresh token após um resultado ambíguo, nunca faz retry cego.
+   * e aplica CAS por `tokenVersion`.
+   *
+   * Correção de resiliência OAuth: uma falha RECUPERÁVEL de renovação
+   * (`temporary_failure`/`outcome_unknown`/`invalid_client`) nunca muda o
+   * status da conta nem apaga tokens — se o token atual ainda não expirou
+   * de fato, esta chamada devolve o mesmo token de sempre (a sincronização
+   * segue normalmente, só adiada até a próxima janela de leeway); se já
+   * expirou, lança um `ConflictException` recuperável específico (nunca um
+   * 500, nunca `REFRESH_RESULT_UNKNOWN` genérico). Só `invalid_grant`
+   * confirmado pelo Mercado Livre marca TOKEN_EXPIRED de verdade.
    */
   async ensureValidAccessToken(accountId: string): Promise<string> {
     const leewayMs = this.configService.get<number>(
@@ -462,90 +508,293 @@ export class MercadoLivreOAuthService {
         );
       }
 
-      const refreshTokenPlain = await this.decryptOrMarkError(
-        reread,
-        reread.encryptedRefreshToken as string,
-      );
-
-      const refreshOutcome = await this.httpClient.refreshToken({
-        refreshToken: refreshTokenPlain,
-      });
-
-      if (refreshOutcome.kind === 'definitive_error') {
-        await this.marketplaceAccountsService.markTokenExpired({
-          id: accountId,
-          expectedTokenVersion: reread.tokenVersion,
-          failureCode: 'REFRESH_TOKEN_REJECTED',
-          errorSummary:
-            'O Mercado Livre rejeitou o refresh token. Reconexão necessária.',
-        });
-        throw new ConflictException('REFRESH_TOKEN_REJECTED');
+      const result = await this.attemptRefresh(reread, { force: false });
+      switch (result.kind) {
+        case 'success':
+          return result.accessToken;
+        case 'invalid_grant':
+          throw new ConflictException('REFRESH_TOKEN_REJECTED');
+        case 'invalid_client':
+          return this.returnCurrentTokenOrThrow(
+            reread,
+            'ML_APP_CONFIGURATION_ERROR',
+          );
+        case 'temporary_failure':
+          return this.returnCurrentTokenOrThrow(
+            reread,
+            'REFRESH_TEMPORARY_FAILURE',
+          );
+        case 'outcome_unknown':
+          return this.returnCurrentTokenOrThrow(
+            reread,
+            'REFRESH_OUTCOME_UNKNOWN',
+          );
+        case 'retry_scheduled':
+          return this.returnCurrentTokenOrThrow(
+            reread,
+            reread.failureCode ?? 'REFRESH_TEMPORARY_FAILURE',
+          );
+        case 'not_committed':
+          throw new ConflictException('REFRESH_RESULT_NOT_COMMITTED');
       }
-
-      if (
-        refreshOutcome.kind === 'unknown_result' ||
-        refreshOutcome.kind === 'invalid_response' ||
-        refreshOutcome.kind === 'client_configuration_error'
-      ) {
-        // design §7: a tabela de status de conta para falhas de renovação
-        // só define REFRESH_TOKEN_REJECTED / REFRESH_RESULT_UNKNOWN /
-        // REFRESH_RESULT_NOT_COMMITTED / CREDENTIAL_DECRYPTION_FAILED — não
-        // INVALID_TOKEN_RESPONSE. Uma resposta 200 estruturalmente inválida
-        // durante o refresh é tratada como REFRESH_RESULT_UNKNOWN também: o
-        // provedor pode ter rotacionado o refresh token mesmo com uma
-        // resposta malformada, então o resultado é ambíguo, nunca
-        // "claramente inofensivo". `client_configuration_error`
-        // (invalid_client) entra no MESMO ramo por razão distinta: um
-        // client_id/client_secret mal configurado no nosso lado não prova
-        // nada sobre o refresh_token apresentado — tratá-lo como
-        // REFRESH_TOKEN_REJECTED forçaria a conta para TOKEN_EXPIRED sem
-        // causa real no token do usuário, exigindo reconexão desnecessária.
-        // Fail-closed: a conta vai para ERROR (nunca TOKEN_EXPIRED) e o
-        // refresh token antigo nunca é reutilizado/reenviado.
-        await this.marketplaceAccountsService.markError({
-          id: accountId,
-          expectedTokenVersion: reread.tokenVersion,
-          failureCode: 'REFRESH_RESULT_UNKNOWN',
-          errorSummary: 'Não foi possível confirmar a renovação do token.',
-        });
-        throw new ConflictException('REFRESH_RESULT_UNKNOWN');
-      }
-
-      const applied =
-        await this.marketplaceAccountsService.applyRefreshedTokens({
-          id: accountId,
-          expectedTokenVersion: reread.tokenVersion,
-          encryptedAccessToken: this.encryptionService.encrypt(
-            refreshOutcome.token.accessToken,
-          ),
-          encryptedRefreshToken: this.encryptionService.encrypt(
-            refreshOutcome.token.refreshToken,
-          ),
-          tokenExpiresAt: new Date(
-            Date.now() + refreshOutcome.token.expiresInSeconds * 1000,
-          ),
-        });
-
-      if (!applied) {
-        // REFRESH_RESULT_NOT_COMMITTED (design §6.4/§7): outra operação já
-        // mudou a tokenVersion (ex.: reconexão concorrente). Relê de
-        // verdade a conta (não é só um comentário) e preserva
-        // integralmente o que encontrar — NUNCA sobrescreve, NUNCA força
-        // nenhum status, só alerta sobre a chamada atual.
-        const currentState =
-          await this.marketplaceAccountsService.findByIdOrFail(accountId);
-        this.logger.warn('mercado_livre_refresh_result_not_committed', {
-          accountId,
-          currentStatus: currentState.status,
-          currentTokenVersion: currentState.tokenVersion,
-        });
-        throw new ConflictException('REFRESH_RESULT_NOT_COMMITTED');
-      }
-
-      return refreshOutcome.token.accessToken;
     } finally {
       await lock.release();
     }
+  }
+
+  /**
+   * Recuperação compatível para contas presas em `ERROR` por uma falha
+   * recuperável de renovação (incluindo o legado `REFRESH_RESULT_UNKNOWN`,
+   * de antes desta correção) — nunca para `TOKEN_EXPIRED`/`invalid_grant`
+   * confirmado, que exige reconexão OAuth completa de verdade. Uma
+   * tentativa CONTROLADA: mesmo lock/CAS de `ensureValidAccessToken`, mas
+   * `force: true` ignora `refresh_retry_at`/o circuito de `invalid_client`
+   * — o usuário pediu explicitamente "Tentar agora", uma ação já
+   * rate-limited no controller, não um retry automático em massa.
+   */
+  async recoverConnection(
+    accountId: string,
+  ): Promise<RecoverConnectionOutcome> {
+    const account =
+      await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    if (account.marketplace !== Marketplace.MERCADO_LIVRE) {
+      throw new NotFoundException('Conta de marketplace não encontrada.');
+    }
+    this.assertRecoverable(account);
+
+    const lock = await this.advisoryLockService.tryAcquire(accountId);
+    if (!lock) {
+      throw new ConflictException('ACCOUNT_BUSY');
+    }
+
+    try {
+      const reread =
+        await this.marketplaceAccountsService.findByIdOrFail(accountId);
+      this.assertRecoverable(reread);
+
+      const result = await this.attemptRefresh(reread, { force: true });
+      switch (result.kind) {
+        case 'success':
+          return 'RECOVERED';
+        case 'invalid_grant':
+          return 'RECONNECT_REQUIRED';
+        case 'invalid_client':
+          return 'CONFIGURATION_ERROR';
+        case 'temporary_failure':
+        case 'outcome_unknown':
+        case 'retry_scheduled':
+        case 'not_committed':
+          return 'PENDING_RETRY';
+      }
+    } finally {
+      await lock.release();
+    }
+  }
+
+  private assertRecoverable(account: MarketplaceAccount): void {
+    if (
+      account.status !== MarketplaceAccountStatus.ERROR ||
+      !account.failureCode ||
+      !RECOVERABLE_FAILURE_CODES.has(account.failureCode) ||
+      !account.encryptedAccessToken ||
+      !account.encryptedRefreshToken
+    ) {
+      throw new ConflictException('ACCOUNT_NOT_RECOVERABLE');
+    }
+  }
+
+  /**
+   * Núcleo único da tentativa de renovação — usado tanto pelo caminho
+   * passivo (`ensureValidAccessToken`) quanto pela recuperação manual
+   * (`recoverConnection`). Nunca lança para um resultado RECUPERÁVEL
+   * (`invalid_client`/`temporary_failure`/`outcome_unknown`/
+   * `retry_scheduled`) — cada persistência já foi feita aqui dentro; o
+   * chamador só decide o que DEVOLVER (token atual vs. erro específico).
+   */
+  private async attemptRefresh(
+    reread: MarketplaceAccount,
+    options: { force: boolean },
+  ): Promise<AttemptRefreshResult> {
+    if (
+      !options.force &&
+      reread.refreshRetryAt &&
+      reread.refreshRetryAt.getTime() > Date.now()
+    ) {
+      return { kind: 'retry_scheduled' };
+    }
+
+    if (!options.force && this.isMlAppConfigCircuitOpen()) {
+      await this.recordDeferredFailure(
+        reread,
+        'ML_APP_CONFIGURATION_ERROR',
+        'Credenciais da aplicação Mercado Livre (client_id/client_secret) inválidas.',
+        this.mlAppConfigCircuitRetryAt(),
+      );
+      return { kind: 'invalid_client' };
+    }
+
+    const refreshTokenPlain = await this.decryptOrMarkError(
+      reread,
+      reread.encryptedRefreshToken as string,
+    );
+
+    const outcome = await this.httpClient.refreshToken({
+      refreshToken: refreshTokenPlain,
+    });
+
+    if (outcome.kind === 'invalid_grant') {
+      // A ÚNICA confirmação real do provedor de que a autorização não vale
+      // mais — nunca inferida de timeout/erro de configuração/ambiguidade.
+      await this.marketplaceAccountsService.markTokenExpired({
+        id: reread.id,
+        expectedTokenVersion: reread.tokenVersion,
+        failureCode: 'REFRESH_TOKEN_REJECTED',
+        errorSummary:
+          'O Mercado Livre rejeitou o refresh token. Reconexão necessária.',
+      });
+      return { kind: 'invalid_grant' };
+    }
+
+    if (outcome.kind === 'invalid_client') {
+      // Erro GLOBAL da aplicação — reconectar ESTA conta nunca resolve.
+      // Abre o circuito para que as próximas contas do mesmo ciclo nem
+      // cheguem a tentar a mesma chamada fadada ao fracasso.
+      this.openMlAppConfigCircuit();
+      await this.recordDeferredFailure(
+        reread,
+        'ML_APP_CONFIGURATION_ERROR',
+        'Credenciais da aplicação Mercado Livre (client_id/client_secret) inválidas.',
+        this.mlAppConfigCircuitRetryAt(),
+      );
+      return { kind: 'invalid_client' };
+    }
+
+    if (
+      outcome.kind === 'temporary_failure' ||
+      outcome.kind === 'outcome_unknown'
+    ) {
+      const failureCode: RecoverableFailureCode =
+        outcome.kind === 'temporary_failure'
+          ? 'REFRESH_TEMPORARY_FAILURE'
+          : 'REFRESH_OUTCOME_UNKNOWN';
+      const delayMs =
+        outcome.kind === 'temporary_failure' && outcome.retryAfterMs !== null
+          ? outcome.retryAfterMs
+          : computeRefreshBackoffDelayMs(reread.refreshFailureCount + 1);
+      await this.recordDeferredFailure(
+        reread,
+        failureCode,
+        outcome.kind === 'temporary_failure'
+          ? 'Falha temporária (rede/indisponibilidade) ao renovar o token. Nova tentativa automática agendada.'
+          : 'Resultado ambíguo ao renovar o token (conexão interrompida ou resposta incompleta). Nova tentativa automática agendada.',
+        new Date(Date.now() + delayMs),
+      );
+      return { kind: outcome.kind };
+    }
+
+    // success
+    const applied = await this.marketplaceAccountsService.applyRefreshedTokens({
+      id: reread.id,
+      expectedTokenVersion: reread.tokenVersion,
+      encryptedAccessToken: this.encryptionService.encrypt(
+        outcome.token.accessToken,
+      ),
+      encryptedRefreshToken: this.encryptionService.encrypt(
+        outcome.token.refreshToken,
+      ),
+      tokenExpiresAt: new Date(
+        Date.now() + outcome.token.expiresInSeconds * 1000,
+      ),
+    });
+
+    if (!applied) {
+      // REFRESH_RESULT_NOT_COMMITTED (design §6.4/§7): outra operação já
+      // mudou a tokenVersion (ex.: reconexão concorrente, ou outra chamada
+      // já aplicou uma renovação mais nova). Relê de verdade a conta e
+      // preserva integralmente o que encontrar — NUNCA sobrescreve, NUNCA
+      // força nenhum status, só alerta sobre a chamada atual. O refresh
+      // token recém-obtido do provedor nunca é reenviado/reutilizado.
+      const currentState = await this.marketplaceAccountsService.findByIdOrFail(
+        reread.id,
+      );
+      this.logger.warn('mercado_livre_refresh_result_not_committed', {
+        accountId: reread.id,
+        currentStatus: currentState.status,
+        currentTokenVersion: currentState.tokenVersion,
+      });
+      return { kind: 'not_committed' };
+    }
+
+    // Sucesso em QUALQUER conta prova que as credenciais da aplicação estão
+    // boas agora — fecha o circuito imediatamente, sem esperar o cooldown.
+    this.mlAppConfigCircuitOpenUntil = null;
+
+    return { kind: 'success', accessToken: outcome.token.accessToken };
+  }
+
+  /**
+   * Falha recuperável e o token ATUAL ainda não expirou de fato (só está
+   * perto, dentro do leeway): devolve o mesmo token de sempre — a
+   * sincronização desta conta segue normalmente, só adiada até a próxima
+   * janela. Só lança quando o token já expirou e não há nada válido para
+   * devolver — nunca devolve um token vencido.
+   */
+  private async returnCurrentTokenOrThrow(
+    reread: MarketplaceAccount,
+    code: string,
+  ): Promise<string> {
+    if (reread.tokenExpiresAt && reread.tokenExpiresAt.getTime() > Date.now()) {
+      return this.decryptOrMarkError(
+        reread,
+        reread.encryptedAccessToken as string,
+      );
+    }
+    throw new ConflictException(code);
+  }
+
+  private async recordDeferredFailure(
+    reread: MarketplaceAccount,
+    failureCode: RecoverableFailureCode,
+    errorSummary: string,
+    refreshRetryAt: Date,
+  ): Promise<void> {
+    const applied = await this.marketplaceAccountsService.markRefreshDeferred({
+      id: reread.id,
+      expectedTokenVersion: reread.tokenVersion,
+      failureCode,
+      errorSummary,
+      refreshRetryAt,
+    });
+    if (!applied) {
+      // CAS perdeu a corrida: outra chamada concorrente já aplicou um
+      // sucesso (ou outra falha) para esta conta enquanto esta estava em
+      // voo — uma resposta atrasada NUNCA sobrescreve um estado mais novo.
+      this.logger.warn(
+        'mercado_livre_refresh_deferred_write_skipped_stale_version',
+        {
+          accountId: reread.id,
+        },
+      );
+    }
+  }
+
+  private isMlAppConfigCircuitOpen(): boolean {
+    return (
+      this.mlAppConfigCircuitOpenUntil !== null &&
+      Date.now() < this.mlAppConfigCircuitOpenUntil
+    );
+  }
+
+  private openMlAppConfigCircuit(): void {
+    this.mlAppConfigCircuitOpenUntil =
+      Date.now() + MercadoLivreOAuthService.ML_APP_CONFIG_CIRCUIT_COOLDOWN_MS;
+  }
+
+  private mlAppConfigCircuitRetryAt(): Date {
+    return new Date(
+      this.mlAppConfigCircuitOpenUntil ??
+        Date.now() + MercadoLivreOAuthService.ML_APP_CONFIG_CIRCUIT_COOLDOWN_MS,
+    );
   }
 
   private isWithinLeeway(

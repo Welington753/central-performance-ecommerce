@@ -16,10 +16,20 @@ export const ML_OAUTH_FAILURE_CODES = [
   'ACCOUNT_ALREADY_CONNECTED',
   'ACCOUNT_STATE_CONFLICT',
   'TOKEN_RESULT_NOT_COMMITTED',
+  // Legado (pré correção de resiliência OAuth) — nunca mais ESCRITO pelo
+  // código atual, mas ainda pode existir em linhas antigas do banco. Tratado
+  // como equivalente a `REFRESH_OUTCOME_UNKNOWN` para fins de exibição/
+  // recuperação (ver `mercado-livre-oauth.service.ts#recoverConnection` e o
+  // mapeamento de UI).
   'REFRESH_RESULT_UNKNOWN',
   'REFRESH_TOKEN_REJECTED',
   'REFRESH_RESULT_NOT_COMMITTED',
   'CREDENTIAL_DECRYPTION_FAILED',
+  // Correção de resiliência OAuth — vocabulário fechado da renovação,
+  // nunca agrupado de volta em REFRESH_RESULT_UNKNOWN:
+  'REFRESH_TEMPORARY_FAILURE',
+  'REFRESH_OUTCOME_UNKNOWN',
+  'ML_APP_CONFIGURATION_ERROR',
 ] as const;
 
 export type MercadoLivreOAuthFailureCode =

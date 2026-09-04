@@ -1,5 +1,5 @@
 import { ConfigService } from '@nestjs/config';
-import { ConflictException, NotFoundException } from '@nestjs/common';
+import { ConflictException, Logger, NotFoundException } from '@nestjs/common';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
   MarketplaceAccount,
@@ -24,6 +24,9 @@ function account(
     encryptedCredentialMetadata: null,
     connectedByUserId: null,
     tokenVersion: 0,
+    refreshFailureCount: 0,
+    refreshRetryAt: null,
+    lastRefreshAttemptAt: null,
     tokenExpiresAt: null,
     lastSuccessfulSyncAt: null,
     createdAt: new Date(),
@@ -799,6 +802,7 @@ describe('MercadoLivreOAuthService.ensureValidAccessToken', () => {
         applyRefreshedTokens: jest.fn().mockResolvedValue(true),
         markTokenExpired: jest.fn().mockResolvedValue(true),
         markError: jest.fn().mockResolvedValue(true),
+        markRefreshDeferred: jest.fn().mockResolvedValue(true),
       },
       authorizationRequestsService: {},
       advisoryLockService: {
@@ -927,9 +931,9 @@ describe('MercadoLivreOAuthService.ensureValidAccessToken', () => {
     );
   });
 
-  it('refresh token rejected definitively (invalid_grant) -> marks TOKEN_EXPIRED with REFRESH_TOKEN_REJECTED, never reuses the old refresh token', async () => {
+  it('refresh token rejected definitively (invalid_grant) -> marks TOKEN_EXPIRED with REFRESH_TOKEN_REJECTED, never reuses the old refresh token — the ONLY confirmed rejection that requires reconnection', async () => {
     const c = makeTokenCollaborators();
-    c.httpClient.refreshToken.mockResolvedValue({ kind: 'definitive_error' });
+    c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_grant' });
     const service = buildTokenService(c);
 
     await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
@@ -941,60 +945,279 @@ describe('MercadoLivreOAuthService.ensureValidAccessToken', () => {
         failureCode: 'REFRESH_TOKEN_REJECTED',
       }),
     );
+    expect(
+      c.marketplaceAccountsService.markRefreshDeferred,
+    ).not.toHaveBeenCalled();
   });
 
-  it('refresh outcome unknown (timeout) -> marks ERROR with REFRESH_RESULT_UNKNOWN, no blind retry', async () => {
-    const c = makeTokenCollaborators();
-    c.httpClient.refreshToken.mockResolvedValue({ kind: 'unknown_result' });
-    const service = buildTokenService(c);
+  describe('temporary_failure (timeout/DNS/429/5xx) — never requires reconnection', () => {
+    it('token not yet actually expired (still within leeway grace) -> returns the CURRENT token, defers the sync, status stays CONNECTED', async () => {
+      const c = makeTokenCollaborators();
+      c.httpClient.refreshToken.mockResolvedValue({
+        kind: 'temporary_failure',
+        retryAfterMs: null,
+      });
+      const service = buildTokenService(c);
 
-    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
-      /REFRESH_RESULT_UNKNOWN/,
-    );
-    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'acc-1',
-        failureCode: 'REFRESH_RESULT_UNKNOWN',
-      }),
-    );
-    expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+      const token = await service.ensureValidAccessToken('acc-1');
+
+      expect(token).toBe('old-access');
+      expect(c.marketplaceAccountsService.markError).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markTokenExpired,
+      ).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markRefreshDeferred,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'acc-1',
+          failureCode: 'REFRESH_TEMPORARY_FAILURE',
+        }),
+      );
+      const [deferredCall] = c.marketplaceAccountsService.markRefreshDeferred
+        .mock.calls[0] as [{ refreshRetryAt: unknown }];
+      expect(deferredCall.refreshRetryAt).toBeInstanceOf(Date);
+    });
+
+    it('token already expired -> throws REFRESH_TEMPORARY_FAILURE (never a token, never REFRESH_RESULT_UNKNOWN), status stays CONNECTED', async () => {
+      const c = makeTokenCollaborators();
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({ tokenExpiresAt: new Date(Date.now() - 1000) }),
+      );
+      c.httpClient.refreshToken.mockResolvedValue({
+        kind: 'temporary_failure',
+        retryAfterMs: null,
+      });
+      const service = buildTokenService(c);
+
+      await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+        /REFRESH_TEMPORARY_FAILURE/,
+      );
+      expect(c.marketplaceAccountsService.markError).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markTokenExpired,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('respects Retry-After for the next refreshRetryAt when provided', async () => {
+      const c = makeTokenCollaborators();
+      c.httpClient.refreshToken.mockResolvedValue({
+        kind: 'temporary_failure',
+        retryAfterMs: 45_000,
+      });
+      const service = buildTokenService(c);
+      const before = Date.now();
+
+      await service.ensureValidAccessToken('acc-1');
+
+      const [call] = c.marketplaceAccountsService.markRefreshDeferred.mock
+        .calls[0] as [{ refreshRetryAt: Date }];
+      expect(call.refreshRetryAt.getTime()).toBeGreaterThanOrEqual(
+        before + 45_000,
+      );
+      expect(call.refreshRetryAt.getTime()).toBeLessThan(before + 46_000);
+    });
+
+    it('without Retry-After, falls back to exponential backoff with jitter based on refreshFailureCount', async () => {
+      const c = makeTokenCollaborators();
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({ refreshFailureCount: 3 }),
+      );
+      c.httpClient.refreshToken.mockResolvedValue({
+        kind: 'temporary_failure',
+        retryAfterMs: null,
+      });
+      const service = buildTokenService(c);
+      const before = Date.now();
+
+      await service.ensureValidAccessToken('acc-1');
+
+      const [call] = c.marketplaceAccountsService.markRefreshDeferred.mock
+        .calls[0] as [{ refreshRetryAt: Date }];
+      // failureCount+1=4 -> base 30s * 2^3 = 240s, +0-50% jitter.
+      expect(call.refreshRetryAt.getTime()).toBeGreaterThanOrEqual(
+        before + 240_000,
+      );
+      expect(call.refreshRetryAt.getTime()).toBeLessThan(before + 360_001);
+    });
+
+    it('never attempts the network again before refreshRetryAt — respects the persisted backoff instead of retrying every call', async () => {
+      const c = makeTokenCollaborators();
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({
+          failureCode: 'REFRESH_TEMPORARY_FAILURE',
+          refreshRetryAt: new Date(Date.now() + 60_000),
+        }),
+      );
+      const service = buildTokenService(c);
+
+      const token = await service.ensureValidAccessToken('acc-1');
+
+      expect(token).toBe('old-access');
+      expect(c.httpClient.refreshToken).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markRefreshDeferred,
+      ).not.toHaveBeenCalled();
+    });
   });
 
-  it("refresh outcome is a structurally invalid 200 body -> ALSO maps to REFRESH_RESULT_UNKNOWN (design §7's account-status table has no entry for INVALID_TOKEN_RESPONSE — the provider may have rotated the refresh token even with a malformed response, so it is treated as ambiguous, never as harmless)", async () => {
-    const c = makeTokenCollaborators();
-    c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_response' });
-    const service = buildTokenService(c);
+  describe('outcome_unknown (connection interrupted after send / malformed 200) — ambiguous but recoverable', () => {
+    it('preserves tokens, never marks ERROR/TOKEN_EXPIRED, never retries blindly within the same call', async () => {
+      const c = makeTokenCollaborators();
+      c.httpClient.refreshToken.mockResolvedValue({ kind: 'outcome_unknown' });
+      const service = buildTokenService(c);
 
-    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
-      /REFRESH_RESULT_UNKNOWN/,
-    );
-    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'acc-1',
-        failureCode: 'REFRESH_RESULT_UNKNOWN',
-      }),
-    );
+      const token = await service.ensureValidAccessToken('acc-1');
+
+      expect(token).toBe('old-access');
+      expect(c.marketplaceAccountsService.markError).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markTokenExpired,
+      ).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.applyRefreshedTokens,
+      ).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markRefreshDeferred,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'acc-1',
+          failureCode: 'REFRESH_OUTCOME_UNKNOWN',
+        }),
+      );
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+    });
+
+    it('token already expired -> throws REFRESH_OUTCOME_UNKNOWN, never a token', async () => {
+      const c = makeTokenCollaborators();
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({ tokenExpiresAt: new Date(Date.now() - 1000) }),
+      );
+      c.httpClient.refreshToken.mockResolvedValue({ kind: 'outcome_unknown' });
+      const service = buildTokenService(c);
+
+      await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
+        /REFRESH_OUTCOME_UNKNOWN/,
+      );
+    });
   });
 
-  it('refresh outcome is client_configuration_error (invalid_client) -> maps to REFRESH_RESULT_UNKNOWN, account goes to ERROR by CAS, NEVER TOKEN_EXPIRED (a misconfigured client_id/client_secret does not prove the refresh token itself was rejected)', async () => {
+  describe("invalid_client (ML_APP_CONFIGURATION_ERROR) — global app misconfiguration, never this account's fault", () => {
+    it('never marks TOKEN_EXPIRED, keeps status CONNECTED, records ML_APP_CONFIGURATION_ERROR', async () => {
+      const c = makeTokenCollaborators();
+      c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_client' });
+      const service = buildTokenService(c);
+
+      const token = await service.ensureValidAccessToken('acc-1');
+
+      expect(token).toBe('old-access');
+      expect(
+        c.marketplaceAccountsService.markTokenExpired,
+      ).not.toHaveBeenCalled();
+      expect(c.marketplaceAccountsService.markError).not.toHaveBeenCalled();
+      expect(
+        c.marketplaceAccountsService.markRefreshDeferred,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'acc-1',
+          failureCode: 'ML_APP_CONFIGURATION_ERROR',
+        }),
+      );
+    });
+
+    it('opens a temporary circuit: a SECOND account never even calls the network while the circuit is open', async () => {
+      const c = makeTokenCollaborators();
+      c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_client' });
+      const service = buildTokenService(c);
+
+      await service.ensureValidAccessToken('acc-1');
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+
+      await service.ensureValidAccessToken('acc-2');
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1); // não bateu na rede de novo
+      // O mock de `findByIdOrFail` devolve o MESMO fixture (id 'acc-1')
+      // independente do accountId pedido — a asserção usa o `id` do
+      // registro, não o parâmetro da chamada (em produção são sempre
+      // iguais, é a mesma linha).
+      expect(
+        c.marketplaceAccountsService.markRefreshDeferred,
+      ).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: 'acc-1',
+          failureCode: 'ML_APP_CONFIGURATION_ERROR',
+        }),
+      );
+    });
+
+    it('a successful refresh (e.g. via manual recovery) closes an open circuit immediately — the next account is unblocked before the cooldown would naturally expire', async () => {
+      const c = makeTokenCollaborators();
+      const service = buildTokenService(c);
+
+      c.httpClient.refreshToken.mockResolvedValueOnce({
+        kind: 'invalid_client',
+      });
+      await service.ensureValidAccessToken('acc-1');
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+
+      // Ainda dentro do cooldown: acc-2 nem chega a chamar a rede.
+      await service.ensureValidAccessToken('acc-2');
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+
+      // Reconexão manual força uma tentativa real (ignora o circuito) e
+      // desta vez tem sucesso — fecha o circuito imediatamente.
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({
+          status: MarketplaceAccountStatus.ERROR,
+          failureCode: 'ML_APP_CONFIGURATION_ERROR',
+        }),
+      );
+      c.httpClient.refreshToken.mockResolvedValueOnce({
+        kind: 'success',
+        token: {
+          accessToken: 'APP_USR-recovered',
+          refreshToken: 'TG-recovered',
+          expiresInSeconds: 10800,
+          userId: 42,
+          tokenType: 'bearer',
+          scope: 'offline_access read',
+        },
+      });
+      await service.recoverConnection('acc-1');
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(2);
+
+      // Circuito fechado: acc-3, no fluxo passivo normal, volta a poder
+      // tentar a rede de verdade — não é bloqueada pelo cooldown antigo.
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount(),
+      );
+      c.httpClient.refreshToken.mockResolvedValueOnce({
+        kind: 'success',
+        token: {
+          accessToken: 'APP_USR-acc3',
+          refreshToken: 'TG-acc3',
+          expiresInSeconds: 10800,
+          userId: 42,
+          tokenType: 'bearer',
+          scope: 'offline_access read',
+        },
+      });
+      await service.ensureValidAccessToken('acc-3');
+      expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(3);
+    });
+  });
+
+  it('a CAS-stale markRefreshDeferred write (concurrent success already applied) is silently discarded, never rethrown', async () => {
     const c = makeTokenCollaborators();
     c.httpClient.refreshToken.mockResolvedValue({
-      kind: 'client_configuration_error',
+      kind: 'temporary_failure',
+      retryAfterMs: null,
     });
+    c.marketplaceAccountsService.markRefreshDeferred.mockResolvedValue(false);
     const service = buildTokenService(c);
 
-    await expect(service.ensureValidAccessToken('acc-1')).rejects.toThrow(
-      /REFRESH_RESULT_UNKNOWN/,
+    await expect(service.ensureValidAccessToken('acc-1')).resolves.toBe(
+      'old-access',
     );
-    expect(c.marketplaceAccountsService.markError).toHaveBeenCalledWith(
-      expect.objectContaining({
-        id: 'acc-1',
-        failureCode: 'REFRESH_RESULT_UNKNOWN',
-      }),
-    );
-    expect(
-      c.marketplaceAccountsService.markTokenExpired,
-    ).not.toHaveBeenCalled();
   });
 
   it('CAS fails after the ML already issued new tokens (REFRESH_RESULT_NOT_COMMITTED) -> re-reads the account for real, preserves whatever it finds, does NOT force any account status write', async () => {
@@ -1078,5 +1301,230 @@ describe('MercadoLivreOAuthService.ensureValidAccessToken', () => {
     );
     expect(c.httpClient.refreshToken).not.toHaveBeenCalled();
     expect(c.lockHandle.release).toHaveBeenCalled();
+  });
+});
+
+describe('MercadoLivreOAuthService.recoverConnection', () => {
+  function makeRecoveryCollaborators() {
+    const lockHandle = { release: jest.fn().mockResolvedValue(undefined) };
+    return {
+      marketplaceAccountsService: {
+        findByIdOrFail: jest.fn().mockResolvedValue(
+          connectedAccount({
+            status: MarketplaceAccountStatus.ERROR,
+            failureCode: 'REFRESH_TEMPORARY_FAILURE',
+          }),
+        ),
+        applyRefreshedTokens: jest.fn().mockResolvedValue(true),
+        markTokenExpired: jest.fn().mockResolvedValue(true),
+        markError: jest.fn().mockResolvedValue(true),
+        markRefreshDeferred: jest.fn().mockResolvedValue(true),
+      },
+      authorizationRequestsService: {},
+      advisoryLockService: {
+        tryAcquire: jest.fn().mockResolvedValue(lockHandle),
+      },
+      httpClient: {
+        refreshToken: jest.fn().mockResolvedValue({
+          kind: 'success',
+          token: {
+            accessToken: 'APP_USR-recovered',
+            refreshToken: 'TG-recovered',
+            expiresInSeconds: 10800,
+            userId: 42,
+            tokenType: 'bearer',
+            scope: 'offline_access read',
+          },
+        }),
+      },
+      encryptionService: {
+        encrypt: jest.fn((v: string) => `enc:${v}`),
+        decrypt: jest.fn((v: string) => v.replace('enc:', '')),
+      },
+      configService: {
+        getOrThrow: () => undefined,
+        get: (_key: string, fallback?: unknown) => fallback,
+      } as unknown as ConfigService,
+      lockHandle,
+    };
+  }
+
+  function buildRecoveryService(
+    c: ReturnType<typeof makeRecoveryCollaborators>,
+  ) {
+    return new MercadoLivreOAuthService(
+      c.marketplaceAccountsService as never,
+      c.authorizationRequestsService as never,
+      c.advisoryLockService as never,
+      c.httpClient as never,
+      c.encryptionService as never,
+      c.configService,
+      {} as never,
+    );
+  }
+
+  it('recovers a REFRESH_TEMPORARY_FAILURE account on success -> RECOVERED, applies the new tokens', async () => {
+    const c = makeRecoveryCollaborators();
+    const service = buildRecoveryService(c);
+
+    const outcome = await service.recoverConnection('acc-1');
+
+    expect(outcome).toBe('RECOVERED');
+    expect(
+      c.marketplaceAccountsService.applyRefreshedTokens,
+    ).toHaveBeenCalled();
+  });
+
+  it('recovers a legacy REFRESH_RESULT_UNKNOWN account (pre-fix incident) the same way', async () => {
+    const c = makeRecoveryCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        status: MarketplaceAccountStatus.ERROR,
+        failureCode: 'REFRESH_RESULT_UNKNOWN',
+      }),
+    );
+    const service = buildRecoveryService(c);
+
+    expect(await service.recoverConnection('acc-1')).toBe('RECOVERED');
+  });
+
+  it('a still-failing temporary/unknown outcome -> PENDING_RETRY, never throws, schedules a new attempt', async () => {
+    const c = makeRecoveryCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({
+      kind: 'temporary_failure',
+      retryAfterMs: null,
+    });
+    const service = buildRecoveryService(c);
+
+    expect(await service.recoverConnection('acc-1')).toBe('PENDING_RETRY');
+    expect(c.marketplaceAccountsService.markRefreshDeferred).toHaveBeenCalled();
+  });
+
+  it('a confirmed invalid_grant -> RECONNECT_REQUIRED, marks TOKEN_EXPIRED', async () => {
+    const c = makeRecoveryCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_grant' });
+    const service = buildRecoveryService(c);
+
+    expect(await service.recoverConnection('acc-1')).toBe('RECONNECT_REQUIRED');
+    expect(c.marketplaceAccountsService.markTokenExpired).toHaveBeenCalled();
+  });
+
+  it('invalid_client -> CONFIGURATION_ERROR, never RECONNECT_REQUIRED', async () => {
+    const c = makeRecoveryCollaborators();
+    c.httpClient.refreshToken.mockResolvedValue({ kind: 'invalid_client' });
+    const service = buildRecoveryService(c);
+
+    expect(await service.recoverConnection('acc-1')).toBe(
+      'CONFIGURATION_ERROR',
+    );
+    expect(
+      c.marketplaceAccountsService.markTokenExpired,
+    ).not.toHaveBeenCalled();
+  });
+
+  it('bypasses refresh_retry_at (force) — a manual "Tentar agora" click always attempts the network', async () => {
+    const c = makeRecoveryCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        status: MarketplaceAccountStatus.ERROR,
+        failureCode: 'REFRESH_TEMPORARY_FAILURE',
+        refreshRetryAt: new Date(Date.now() + 60_000),
+      }),
+    );
+    const service = buildRecoveryService(c);
+
+    await service.recoverConnection('acc-1');
+    expect(c.httpClient.refreshToken).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
+    MarketplaceAccountStatus.CONNECTED,
+    MarketplaceAccountStatus.DISCONNECTED,
+  ])(
+    'rejects with ACCOUNT_NOT_RECOVERABLE when status is %s (only ERROR is recoverable)',
+    async (status) => {
+      const c = makeRecoveryCollaborators();
+      c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+        connectedAccount({ status }),
+      );
+      const service = buildRecoveryService(c);
+
+      await expect(service.recoverConnection('acc-1')).rejects.toThrow(
+        /ACCOUNT_NOT_RECOVERABLE/,
+      );
+      expect(c.advisoryLockService.tryAcquire).not.toHaveBeenCalled();
+    },
+  );
+
+  it('rejects with ACCOUNT_NOT_RECOVERABLE for an ERROR account whose failure requires real reconnection (REFRESH_TOKEN_REJECTED)', async () => {
+    const c = makeRecoveryCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        status: MarketplaceAccountStatus.ERROR,
+        failureCode: 'REFRESH_TOKEN_REJECTED',
+      }),
+    );
+    const service = buildRecoveryService(c);
+
+    await expect(service.recoverConnection('acc-1')).rejects.toThrow(
+      /ACCOUNT_NOT_RECOVERABLE/,
+    );
+  });
+
+  it('rejects with ACCOUNT_NOT_RECOVERABLE when tokens are missing', async () => {
+    const c = makeRecoveryCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        status: MarketplaceAccountStatus.ERROR,
+        failureCode: 'REFRESH_TEMPORARY_FAILURE',
+        encryptedRefreshToken: null,
+      }),
+    );
+    const service = buildRecoveryService(c);
+
+    await expect(service.recoverConnection('acc-1')).rejects.toThrow(
+      /ACCOUNT_NOT_RECOVERABLE/,
+    );
+  });
+
+  it('rethrows ACCOUNT_BUSY when the lock cannot be acquired — concurrent recovery attempts never race', async () => {
+    const c = makeRecoveryCollaborators();
+    c.advisoryLockService.tryAcquire.mockResolvedValue(null);
+    const service = buildRecoveryService(c);
+
+    await expect(service.recoverConnection('acc-1')).rejects.toThrow(
+      /ACCOUNT_BUSY/,
+    );
+    expect(c.httpClient.refreshToken).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-Mercado-Livre account with NotFoundException', async () => {
+    const c = makeRecoveryCollaborators();
+    c.marketplaceAccountsService.findByIdOrFail.mockResolvedValue(
+      connectedAccount({
+        marketplace: Marketplace.AMAZON,
+        status: MarketplaceAccountStatus.ERROR,
+        failureCode: 'REFRESH_TEMPORARY_FAILURE',
+      }),
+    );
+    const service = buildRecoveryService(c);
+
+    await expect(service.recoverConnection('acc-1')).rejects.toBeInstanceOf(
+      NotFoundException,
+    );
+  });
+
+  it('never logs or exposes the refresh/access token values themselves', async () => {
+    const c = makeRecoveryCollaborators();
+    const logSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+    const service = buildRecoveryService(c);
+
+    await service.recoverConnection('acc-1');
+
+    const loggedText = logSpy.mock.calls.flat().map(String).join(' ');
+    expect(loggedText).not.toContain('old-refresh');
+    expect(loggedText).not.toContain('APP_USR-recovered');
+    expect(loggedText).not.toContain('TG-recovered');
+    logSpy.mockRestore();
   });
 });
