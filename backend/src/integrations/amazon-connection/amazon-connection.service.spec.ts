@@ -192,6 +192,12 @@ describe('AmazonConnectionService.getSetupStatus', () => {
         'externalSellerId',
         'nickname',
         'status',
+        // Fase 4 (correção de resiliência OAuth do Mercado Livre): sinal
+        // sanitizado adicionado ao DTO compartilhado — para uma conta
+        // Amazon, sempre RECONNECT_REQUIRED/null (comportamento inalterado,
+        // ver marketplace-account-response.dto.ts).
+        'recoveryHint',
+        'nextRetryAt',
         'tokenExpiresAt',
         'lastSuccessfulSyncAt',
         'createdAt',
