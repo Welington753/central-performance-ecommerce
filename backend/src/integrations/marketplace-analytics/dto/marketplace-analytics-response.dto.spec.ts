@@ -52,6 +52,7 @@ function aggregate(
       comparisonPeriodComplete: false,
     },
     lastSync: null,
+    full: null,
     ...overrides,
   };
 }

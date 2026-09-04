@@ -91,11 +91,12 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
     totalAmount: string;
     dateCreated: Date;
     items: SeedOrderItemInput[];
+    logisticsClassification?: string;
   }): Promise<void> {
     const [order] = await dataSource.query<Array<{ id: string }>>(
       `INSERT INTO marketplace_orders
-          (marketplace_account_id, external_order_id, status, currency_id, total_amount, date_created)
-        VALUES ($1, $2, $3, 'BRL', $4, $5)
+          (marketplace_account_id, external_order_id, status, currency_id, total_amount, date_created, logistics_classification)
+        VALUES ($1, $2, $3, 'BRL', $4, $5, $6)
         RETURNING id`,
       [
         input.accountId,
@@ -103,6 +104,7 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
         input.status,
         input.totalAmount,
         input.dateCreated,
+        input.logisticsClassification ?? 'UNKNOWN',
       ],
     );
 
@@ -1521,6 +1523,379 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
 
       expect(dto.summary?.orders).toBe(1);
       expect(dto.summary?.grossRevenue).toBe('42.00');
+    });
+  });
+
+  describe('Mercado Livre Full (Fase 4)', () => {
+    it('a paid Full order counts in full.summary — a non-Full paid order never leaks in', async () => {
+      const accountId = await seedAccount({ externalSellerId: '111' });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-1',
+        status: 'paid',
+        totalAmount: '200.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-FULL',
+            title: 'Produto Full',
+            quantity: 2,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'seller-1',
+        status: 'paid',
+        totalAmount: '80.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB2',
+            sellerSku: 'SKU-SELLER',
+            title: 'Produto Seller',
+            quantity: 1,
+            unitPrice: '80.00',
+          },
+        ],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.summary?.paidOrders).toBe(1);
+      expect(dto.full?.summary?.paidRevenue).toBe('200.00');
+      expect(dto.full?.summary?.paidUnits).toBe(2);
+      // Faturamento pago total no escopo é 280.00 (200 Full + 80 Seller) —
+      // participação do Full = 200/280.
+      expect(dto.full?.summary?.shareOfPaidRevenuePct).toBeCloseTo(71.4, 1);
+    });
+
+    it('a cancelled Full order with a valid amount counts in cancellations, never in paid totals', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-cancelled',
+        status: 'cancelled',
+        totalAmount: '150.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-1',
+            title: 'Produto',
+            quantity: 1,
+            unitPrice: '150.00',
+          },
+        ],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.summary?.paidOrders).toBe(0);
+      expect(dto.full?.summary?.cancelledOrders).toBe(1);
+      expect(dto.full?.summary?.cancelledUnits).toBe(1);
+      expect(dto.full?.summary?.cancelledRevenue).toBe('150.00');
+      expect(dto.full?.summary?.grossSalesOrders).toBe(1);
+      expect(dto.full?.summary?.grossSalesRevenue).toBe('150.00');
+    });
+
+    it('a non-Full order (SELLER_FULFILLED) never appears in full.summary at all', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'seller-only',
+        status: 'paid',
+        totalAmount: '90.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-1',
+            title: 'Produto',
+            quantity: 1,
+            unitPrice: '90.00',
+          },
+        ],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      // Nenhum pedido Full no escopo — nunca mostra zero como se fosse dado
+      // completo, `summary` sai `null`.
+      expect(dto.full?.summary).toBeNull();
+      expect(dto.full?.classifiedOrders).toBe(1);
+      expect(dto.full?.unclassifiedOrders).toBe(0);
+      expect(dto.full?.coverage).toBe('complete');
+    });
+
+    it('an UNKNOWN order counts toward unclassifiedOrders and drives coverage to "partial"', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'unknown-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'UNKNOWN',
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.classifiedOrders).toBe(1);
+      expect(dto.full?.unclassifiedOrders).toBe(1);
+      expect(dto.full?.coverage).toBe('partial');
+    });
+
+    it('is null when the account has no proven data at all (mirrors the root summary/current rule)', async () => {
+      const accountId = await seedAccount();
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary).toBeNull();
+      expect(dto.full).toBeNull();
+    });
+
+    it('consolidates two Mercado Livre accounts (Meli 1 + Meli 2) into a single Full total', async () => {
+      const accountA = await seedAccount({ externalSellerId: '111' });
+      const accountB = await seedAccount({ externalSellerId: '222' });
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: 'a-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLA1',
+            sellerSku: 'SKU-1',
+            title: 'Produto',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrder({
+        accountId: accountB,
+        externalOrderId: 'b-1',
+        status: 'paid',
+        totalAmount: '60.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB1',
+            sellerSku: 'SKU-1',
+            title: 'Produto',
+            quantity: 1,
+            unitPrice: '60.00',
+          },
+        ],
+      });
+
+      const aggregateA = await analyticsService.getAggregate(
+        { accountId: accountA },
+        REFERENCE_NOW,
+      );
+      const aggregateB = await analyticsService.getAggregate(
+        { accountId: accountB },
+        REFERENCE_NOW,
+      );
+      const aggregateAll = await analyticsService.getAggregate(
+        { marketplace: 'MERCADO_LIVRE' },
+        REFERENCE_NOW,
+      );
+
+      const dtoA = toMarketplaceAnalyticsResponse(aggregateA);
+      const dtoB = toMarketplaceAnalyticsResponse(aggregateB);
+      const dtoAll = toMarketplaceAnalyticsResponse(aggregateAll);
+
+      expect(dtoA.full?.summary?.paidRevenue).toBe('100.00');
+      expect(dtoB.full?.summary?.paidRevenue).toBe('60.00');
+      expect(dtoAll.full?.summary?.paidRevenue).toBe('160.00');
+      // Ranking consolidado funde o mesmo SKU entre as duas contas.
+      expect(dtoAll.full?.ranking).toHaveLength(1);
+      expect(dtoAll.full?.ranking[0].orders).toBe(2);
+      expect(dtoAll.full?.ranking[0].units).toBe(2);
+    });
+
+    it('the same SKU listed under two different item ids still consolidates into one ranking row', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'r-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB-VARIANT-A',
+            sellerSku: 'SKU-SAME',
+            title: 'Produto (anúncio A)',
+            quantity: 1,
+            unitPrice: '50.00',
+          },
+        ],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'r-2',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLB-VARIANT-B',
+            sellerSku: 'sku-same',
+            title: 'Produto (anúncio B)',
+            quantity: 1,
+            unitPrice: '50.00',
+          },
+        ],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.ranking).toHaveLength(1);
+      expect(dto.full?.ranking[0].distinctListings).toBe(2);
+      expect(dto.full?.ranking[0].orders).toBe(2);
+      expect(dto.full?.ranking[0].units).toBe(2);
+    });
+
+    it('never divides by zero — shareOfPaidRevenuePct/unitsSharePct are 0 when the denominator is 0', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-only-cancelled',
+        status: 'cancelled',
+        totalAmount: '0.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      // Cancelado com valor 0 nunca entra em vendas brutas (regra existente
+      // de "vendas brutas") — mas o pedido cancelado em si é real e aparece
+      // em cancelledOrders/cancelledRevenue; sem nenhum pedido pago, as
+      // participações percentuais nunca dividem por zero.
+      expect(dto.full?.summary?.cancelledOrders).toBe(1);
+      expect(dto.full?.summary?.grossSalesOrders).toBe(0);
+      expect(dto.full?.summary?.paidOrders).toBe(0);
+      expect(dto.full?.summary?.shareOfPaidRevenuePct).toBe(0);
+      expect(dto.full?.summary?.shareOfPaidUnitsPct).toBe(0);
+    });
+
+    it('respects the selected period — an order outside the window never leaks into full totals', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'outside-window',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: new Date('2020-01-01T00:00:00.000Z'),
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.summary).toBeNull();
+      expect(dto.full?.coverage).toBe('unknown');
+    });
+
+    it('"Todo o período" (allTime) includes the Full order regardless of date and never computes a comparison', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old-full',
+        status: 'paid',
+        totalAmount: '77.00',
+        dateCreated: new Date('2020-01-01T00:00:00.000Z'),
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { allTime: true, accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.summary?.paidRevenue).toBe('77.00');
+      expect(dto.full?.comparison).toBeNull();
+    });
+
+    it('is structurally present (never undefined) even for an Amazon-only scope with no Full concept', async () => {
+      const accountId = await seedAccount({ marketplace: Marketplace.AMAZON });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full).not.toBeNull();
+      expect(dto.full?.coverage).toBe('unknown');
+      expect(dto.full?.summary).toBeNull();
     });
   });
 });

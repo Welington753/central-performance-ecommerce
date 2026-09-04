@@ -20,7 +20,12 @@ import type { ConsolidatedCoverageStatus } from '../consolidated-coverage.util';
 import type {
   AnalyticsAccountTotals,
   AnalyticsDailyPointRaw,
+  AnalyticsFullAggregate,
+  AnalyticsFullDailyPointRaw,
+  AnalyticsFullPeriodTotals,
+  AnalyticsFullRankingEntryRaw,
   AnalyticsPeriodTotals,
+  FullClassificationCoverage,
   MarketplaceAnalyticsAggregate,
 } from '../marketplace-analytics.service';
 
@@ -145,6 +150,72 @@ export interface AnalyticsDataCoverage {
 }
 
 /**
+ * "Mercado Livre Full" (Fase 4) — restrito a pedidos com classificação
+ * logística `MARKETPLACE_FULFILLED`. Nunca inclui Flex nem pedidos ainda não
+ * classificados.
+ */
+export interface AnalyticsFullSummary {
+  grossSalesRevenue: string;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  paidRevenue: string;
+  paidOrders: number;
+  paidUnits: number;
+  averageTicket: string;
+  /** % do faturamento pago TOTAL (todas as modalidades) que veio do Full. */
+  shareOfPaidRevenuePct: number;
+  /** % das unidades pagas TOTAIS (todas as modalidades) vendidas no Full. */
+  shareOfPaidUnitsPct: number;
+  cancelledOrders: number;
+  cancelledUnits: number;
+  cancelledRevenue: string;
+}
+
+export interface AnalyticsFullComparison {
+  grossSalesRevenuePct: number | null;
+  grossSalesOrdersPct: number | null;
+  grossSalesUnitsPct: number | null;
+  paidRevenuePct: number | null;
+  paidOrdersPct: number | null;
+  paidUnitsPct: number | null;
+  averageTicketPct: number | null;
+  cancelledOrdersPct: number | null;
+  cancelledUnitsPct: number | null;
+  cancelledRevenuePct: number | null;
+}
+
+export interface AnalyticsFullDailyPoint {
+  date: string;
+  paidRevenue: string;
+  paidOrders: number;
+  units: number;
+  cancelledOrders: number;
+}
+
+export interface AnalyticsFullRankingEntry {
+  sku: string | null;
+  title: string;
+  distinctListings: number;
+  orders: number;
+  units: number;
+  paidRevenue: string;
+  grossSalesRevenue: string;
+  unitsSharePct: number;
+}
+
+export interface MarketplaceAnalyticsFull {
+  /** "complete": todo pedido pago/cancelado do escopo já foi classificado. "partial": parte. "unknown": nenhuma prova de classificação. */
+  coverage: FullClassificationCoverage;
+  classifiedOrders: number;
+  unclassifiedOrders: number;
+  /** `null` nas MESMAS condições de `summary` no nível raiz (sem prova real de dado no escopo). */
+  summary: AnalyticsFullSummary | null;
+  comparison: AnalyticsFullComparison | null;
+  dailySeries: AnalyticsFullDailyPoint[];
+  ranking: AnalyticsFullRankingEntry[];
+}
+
+/**
  * Contrato genérico multi-marketplace (Checkpoint 3). Nunca inclui token,
  * credencial cifrada, `connectedByUserId`, `failureCode`, comprador, pedido
  * individual ou qualquer resposta bruta de marketplace — só agregados.
@@ -173,6 +244,7 @@ export interface MarketplaceAnalyticsKpisResponseDto {
   sources: AnalyticsSourceCoverage[];
   dataCoverage: AnalyticsDataCoverage;
   lastSync: string | null;
+  full: MarketplaceAnalyticsFull | null;
 }
 
 /**
@@ -256,7 +328,138 @@ export function toMarketplaceAnalyticsResponse(
       comparisonPeriodComplete: aggregate.dataCoverage.comparisonPeriodComplete,
     },
     lastSync: aggregate.lastSync ? aggregate.lastSync.toISOString() : null,
+    full: aggregate.full
+      ? toFullAggregate(aggregate.full, aggregate.current)
+      : null,
   };
+}
+
+function toFullAggregate(
+  full: AnalyticsFullAggregate,
+  totalCurrent: AnalyticsPeriodTotals | null,
+): MarketplaceAnalyticsFull {
+  const hasData =
+    full.current.grossSalesOrders > 0 || full.current.cancelledOrders > 0;
+  return {
+    coverage: full.coverage,
+    classifiedOrders: full.classifiedOrders,
+    unclassifiedOrders: full.unclassifiedOrders,
+    summary: hasData ? toFullSummary(full.current, totalCurrent) : null,
+    comparison:
+      hasData && full.previous
+        ? toFullComparison(full.current, full.previous)
+        : null,
+    dailySeries: full.dailySeries.map(toFullDailyPoint),
+    ranking: full.ranking.map((row) =>
+      toFullRankingEntry(row, full.current.grossSalesUnits),
+    ),
+  };
+}
+
+function toFullSummary(
+  totals: AnalyticsFullPeriodTotals,
+  totalCurrent: AnalyticsPeriodTotals | null,
+): AnalyticsFullSummary {
+  return {
+    grossSalesRevenue: centsToDecimalString(totals.grossSalesRevenueCents),
+    grossSalesOrders: totals.grossSalesOrders,
+    grossSalesUnits: totals.grossSalesUnits,
+    paidRevenue: centsToDecimalString(totals.paidRevenueCents),
+    paidOrders: totals.paidOrders,
+    paidUnits: totals.paidUnits,
+    averageTicket: divideCents(
+      totals.paidRevenueCents,
+      BigInt(totals.paidOrders),
+    ),
+    shareOfPaidRevenuePct: shareOfCents(
+      totals.paidRevenueCents,
+      totalCurrent?.grossRevenueCents ?? 0n,
+    ),
+    shareOfPaidUnitsPct: shareOf(totals.paidUnits, totalCurrent?.units ?? 0),
+    cancelledOrders: totals.cancelledOrders,
+    cancelledUnits: totals.cancelledUnits,
+    cancelledRevenue: centsToDecimalString(totals.cancelledRevenueCents),
+  };
+}
+
+function toFullComparison(
+  current: AnalyticsFullPeriodTotals,
+  previous: AnalyticsFullPeriodTotals,
+): AnalyticsFullComparison {
+  return {
+    grossSalesRevenuePct: percentChange(
+      Number(current.grossSalesRevenueCents),
+      Number(previous.grossSalesRevenueCents),
+    ),
+    grossSalesOrdersPct: percentChange(
+      current.grossSalesOrders,
+      previous.grossSalesOrders,
+    ),
+    grossSalesUnitsPct: percentChange(
+      current.grossSalesUnits,
+      previous.grossSalesUnits,
+    ),
+    paidRevenuePct: percentChange(
+      Number(current.paidRevenueCents),
+      Number(previous.paidRevenueCents),
+    ),
+    paidOrdersPct: percentChange(current.paidOrders, previous.paidOrders),
+    paidUnitsPct: percentChange(current.paidUnits, previous.paidUnits),
+    averageTicketPct: percentChange(
+      fullAverageTicketApprox(current),
+      fullAverageTicketApprox(previous),
+    ),
+    cancelledOrdersPct: percentChange(
+      current.cancelledOrders,
+      previous.cancelledOrders,
+    ),
+    cancelledUnitsPct: percentChange(
+      current.cancelledUnits,
+      previous.cancelledUnits,
+    ),
+    cancelledRevenuePct: percentChange(
+      Number(current.cancelledRevenueCents),
+      Number(previous.cancelledRevenueCents),
+    ),
+  };
+}
+
+function fullAverageTicketApprox(totals: AnalyticsFullPeriodTotals): number {
+  if (totals.paidOrders === 0) return 0;
+  return Number(totals.paidRevenueCents) / totals.paidOrders;
+}
+
+function toFullDailyPoint(
+  point: AnalyticsFullDailyPointRaw,
+): AnalyticsFullDailyPoint {
+  return {
+    date: point.date,
+    paidRevenue: centsToDecimalString(point.paidRevenueCents),
+    paidOrders: point.paidOrders,
+    units: point.units,
+    cancelledOrders: point.cancelledOrders,
+  };
+}
+
+function toFullRankingEntry(
+  row: AnalyticsFullRankingEntryRaw,
+  totalFullUnitsInPeriod: number,
+): AnalyticsFullRankingEntry {
+  return {
+    sku: row.sku,
+    title: row.title,
+    distinctListings: row.distinctListings,
+    orders: row.orders,
+    units: row.units,
+    paidRevenue: centsToDecimalString(row.paidRevenueCents),
+    grossSalesRevenue: centsToDecimalString(row.grossSalesRevenueCents),
+    unitsSharePct: shareOf(row.units, totalFullUnitsInPeriod),
+  };
+}
+
+function shareOfCents(part: bigint, total: bigint): number {
+  if (total === 0n) return 0;
+  return roundTo((Number(part) / Number(total)) * 100, 1);
 }
 
 function toSummary(totals: AnalyticsPeriodTotals): AnalyticsKpiSummary {

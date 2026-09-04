@@ -28,6 +28,7 @@ function emptyAggregate(): MarketplaceAnalyticsAggregate {
       comparisonPeriodComplete: false,
     },
     lastSync: null,
+    full: null,
   };
 }
 
