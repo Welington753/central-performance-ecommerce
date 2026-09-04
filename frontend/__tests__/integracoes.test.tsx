@@ -41,6 +41,8 @@ function mlAccount(
     externalSellerId: null,
     nickname: null,
     status: "DISCONNECTED",
+    recoveryHint: null,
+    nextRetryAt: null,
     tokenExpiresAt: null,
     lastSuccessfulSyncAt: null,
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -58,6 +60,8 @@ function amazonAccount(
     externalSellerId: null,
     nickname: null,
     status: "DISCONNECTED",
+    recoveryHint: null,
+    nextRetryAt: null,
     tokenExpiresAt: null,
     lastSuccessfulSyncAt: null,
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -717,5 +721,155 @@ describe("IntegracoesPage — Amazon (Checkpoint 4-C)", () => {
       expect(api.renameMarketplaceAccount).toHaveBeenCalledWith("acc-1", null),
     );
     expect(within(card).getByText(/conta 111/i)).toBeInTheDocument();
+  });
+});
+
+describe("IntegracoesPage — recuperação de falha temporária (Fase 4, resiliência OAuth)", () => {
+  it("shows 'Tentar agora' (never 'Reconectar') for TEMPORARY_RETRY, with the scheduled retry time", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({
+        id: "acc-1",
+        status: "ERROR",
+        recoveryHint: "TEMPORARY_RETRY",
+        nextRetryAt: "2026-09-04T12:30:00.000Z",
+      }),
+    ]);
+
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    expect(
+      within(card).getByText("Status: Conexão temporariamente indisponível"),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByText(/nova tentativa automática em/i),
+    ).toBeInTheDocument();
+    expect(
+      within(card).getByRole("button", { name: /tentar agora/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: /^reconectar$/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("clicking 'Tentar agora' calls the recover endpoint and reloads the account list", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock)
+      .mockResolvedValueOnce([
+        mlAccount({
+          id: "acc-1",
+          status: "ERROR",
+          recoveryHint: "TEMPORARY_RETRY",
+        }),
+      ])
+      .mockResolvedValueOnce([
+        mlAccount({ id: "acc-1", status: "CONNECTED", recoveryHint: null }),
+      ]);
+    (api.recoverMercadoLivreConnection as jest.Mock).mockResolvedValue({
+      outcome: "RECOVERED",
+    });
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /tentar agora/i }));
+
+    await waitFor(() =>
+      expect(api.recoverMercadoLivreConnection).toHaveBeenCalledWith("acc-1"),
+    );
+    await waitFor(() =>
+      expect(
+        within(
+          screen.getByTestId("marketplace-account-acc-1"),
+        ).getByText("Status: Conectado"),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("a still-pending recovery (PENDING_RETRY) reloads without an error banner", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({
+        id: "acc-1",
+        status: "ERROR",
+        recoveryHint: "TEMPORARY_RETRY",
+      }),
+    ]);
+    (api.recoverMercadoLivreConnection as jest.Mock).mockResolvedValue({
+      outcome: "PENDING_RETRY",
+    });
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /tentar agora/i }));
+
+    await waitFor(() =>
+      expect(api.recoverMercadoLivreConnection).toHaveBeenCalled(),
+    );
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("RECONNECT_REQUIRED after a recovery attempt shows a clear message instead of silently retrying", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({
+        id: "acc-1",
+        status: "ERROR",
+        recoveryHint: "TEMPORARY_RETRY",
+      }),
+    ]);
+    (api.recoverMercadoLivreConnection as jest.Mock).mockResolvedValue({
+      outcome: "RECONNECT_REQUIRED",
+    });
+
+    const user = userEvent.setup();
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    await user.click(within(card).getByRole("button", { name: /tentar agora/i }));
+
+    expect(
+      await screen.findByText(/precisa ser reconectada/i),
+    ).toBeInTheDocument();
+  });
+
+  it("CONFIGURATION_ERROR shows 'Verifique as credenciais', never a 'Reconectar' primary action", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({
+        id: "acc-1",
+        status: "ERROR",
+        recoveryHint: "CONFIGURATION_ERROR",
+      }),
+    ]);
+
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    expect(
+      within(card).getByText(/verifique as credenciais/i),
+    ).toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: /^reconectar$/i }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(card).queryByRole("button", { name: /tentar agora/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("RECONNECT_REQUIRED (no recoveryHint override, e.g. TOKEN_EXPIRED) still shows 'Reconectar' as before", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({
+        id: "acc-1",
+        status: "TOKEN_EXPIRED",
+        recoveryHint: "RECONNECT_REQUIRED",
+      }),
+    ]);
+
+    render(<IntegracoesPage />);
+
+    const card = await screen.findByTestId("marketplace-account-acc-1");
+    expect(
+      within(card).getByRole("button", { name: /^reconectar$/i }),
+    ).toBeInTheDocument();
   });
 });

@@ -12,10 +12,12 @@ import {
   createMarketplaceAccount,
   fetchAmazonSetupStatus,
   fetchMarketplaceAccounts,
+  recoverMercadoLivreConnection,
   redirectTo,
   renameMarketplaceAccount,
   syncAmazonOrders,
 } from "@/lib/api";
+import { formatDateTimeSaoPaulo } from "@/lib/kpi-format";
 import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 
@@ -72,6 +74,35 @@ function accountLabel(account: MarketplaceAccountDto): string {
   return `Conta ${account.id.slice(0, 8)}`;
 }
 
+// Correção de resiliência OAuth (Fase 4): uma falha RECUPERÁVEL de
+// renovação nunca mostra "Reconectar" como ação principal — só uma falha
+// confirmada (invalid_grant/TOKEN_EXPIRED) ou qualquer outro ERROR sem
+// recoveryHint específico pede reconexão de verdade.
+function mlStatusLabel(account: MarketplaceAccountDto): string {
+  if (account.recoveryHint === "TEMPORARY_RETRY") {
+    return "Conexão temporariamente indisponível";
+  }
+  if (account.recoveryHint === "CONFIGURATION_ERROR") {
+    return "Configuração da aplicação inválida";
+  }
+  return STATUS_LABELS[account.status];
+}
+
+function mlStatusDescription(account: MarketplaceAccountDto): string {
+  if (account.recoveryHint === "TEMPORARY_RETRY") {
+    const retryLabel = account.nextRetryAt
+      ? formatDateTimeSaoPaulo(account.nextRetryAt)
+      : null;
+    return retryLabel
+      ? `Nova tentativa automática em ${retryLabel}.`
+      : "Nova tentativa automática em breve.";
+  }
+  if (account.recoveryHint === "CONFIGURATION_ERROR") {
+    return "Verifique as credenciais da aplicação Mercado Livre no servidor. Reconectar esta conta não resolve.";
+  }
+  return STATUS_DESCRIPTIONS[account.status];
+}
+
 function IntegracoesContent() {
   const searchParams = useSearchParams();
   const [accounts, setAccounts] = useState<MarketplaceAccountDto[] | null>(
@@ -91,6 +122,10 @@ function IntegracoesContent() {
   // fechando essa janela por completo.
   const connectingRef = useRef<Set<string>>(new Set());
   const creatingRef = useRef(false);
+  const [recoveringAccountIds, setRecoveringAccountIds] = useState<
+    Set<string>
+  >(new Set());
+  const recoveringRef = useRef<Set<string>>(new Set());
 
   const [amazonStatus, setAmazonStatus] = useState<AmazonSetupStatusDto | null>(
     null,
@@ -169,6 +204,42 @@ function IntegracoesContent() {
       );
       connectingRef.current.delete(accountId);
       setConnectingAccountIds((prev) => {
+        const next = new Set(prev);
+        next.delete(accountId);
+        return next;
+      });
+    }
+  }
+
+  // "Tentar agora" (falha temporária/ambígua de renovação) — nunca uma
+  // reconexão OAuth completa; uma única tentativa controlada no backend.
+  // Sempre recarrega a lista ao final: `recoveryHint`/`status` podem ter
+  // mudado (RECOVERED volta a CONNECTED, RECONNECT_REQUIRED/
+  // CONFIGURATION_ERROR trocam a ação exibida) sem exigir reload da página.
+  async function handleRecover(accountId: string) {
+    if (recoveringRef.current.has(accountId)) return;
+    recoveringRef.current.add(accountId);
+    setActionError(null);
+    setRecoveringAccountIds((prev) => new Set(prev).add(accountId));
+    try {
+      const result = await recoverMercadoLivreConnection(accountId);
+      await loadAccounts();
+      if (result.outcome === "RECONNECT_REQUIRED") {
+        setActionError(
+          "Esta conta precisa ser reconectada — a autorização foi revogada ou expirou de verdade.",
+        );
+      } else if (result.outcome === "CONFIGURATION_ERROR") {
+        setActionError(
+          "Verifique as credenciais da aplicação Mercado Livre no servidor. Reconectar esta conta não resolve.",
+        );
+      }
+    } catch {
+      setActionError(
+        "Não foi possível verificar a conexão agora. Tente novamente.",
+      );
+    } finally {
+      recoveringRef.current.delete(accountId);
+      setRecoveringAccountIds((prev) => {
         const next = new Set(prev);
         next.delete(accountId);
         return next;
@@ -326,17 +397,28 @@ function IntegracoesContent() {
                 card={{
                   id: account.id,
                   name: `Mercado Livre — ${accountLabel(account)}`,
-                  statusLabel: STATUS_LABELS[account.status],
-                  description: STATUS_DESCRIPTIONS[account.status],
+                  statusLabel: mlStatusLabel(account),
+                  description: mlStatusDescription(account),
                   rename: renamePropsFor(account),
-                  cta: {
-                    label:
-                      account.status === "DISCONNECTED"
-                        ? "Conectar"
-                        : "Reconectar",
-                    disabled: connectingAccountIds.has(account.id),
-                    onClick: () => void handleConnect(account.id),
-                  },
+                  cta:
+                    account.recoveryHint === "TEMPORARY_RETRY"
+                      ? {
+                          label: recoveringAccountIds.has(account.id)
+                            ? "Verificando..."
+                            : "Tentar agora",
+                          disabled: recoveringAccountIds.has(account.id),
+                          onClick: () => void handleRecover(account.id),
+                        }
+                      : account.recoveryHint === "CONFIGURATION_ERROR"
+                        ? undefined
+                        : {
+                            label:
+                              account.status === "DISCONNECTED"
+                                ? "Conectar"
+                                : "Reconectar",
+                            disabled: connectingAccountIds.has(account.id),
+                            onClick: () => void handleConnect(account.id),
+                          },
                 }}
               />
             ))

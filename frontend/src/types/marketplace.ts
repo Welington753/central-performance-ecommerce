@@ -32,12 +32,24 @@ export interface MarketplaceCardData {
 // failureCode/errorSummary: design §7 os define como interno/auditoria,
 // nunca expostos ao navegador. O frontend deriva mensagens públicas fixas
 // só a partir de `status` (STATUS_LABELS/STATUS_DESCRIPTIONS na página).
+// Sinal sanitizado para decidir a ação principal — nunca o failureCode
+// interno (Fase 4, correção de resiliência OAuth). `TEMPORARY_RETRY` nunca
+// mostra "Reconectar" como ação principal; `CONFIGURATION_ERROR` não
+// orienta reconexão nenhuma.
+export type MarketplaceAccountRecoveryHint =
+  | "RECONNECT_REQUIRED"
+  | "TEMPORARY_RETRY"
+  | "CONFIGURATION_ERROR"
+  | null;
+
 export interface MarketplaceAccountDto {
   id: string;
   marketplace: "MERCADO_LIVRE" | "AMAZON" | "SHOPEE";
   externalSellerId: string | null;
   nickname: string | null;
   status: "DISCONNECTED" | "CONNECTED" | "TOKEN_EXPIRED" | "ERROR";
+  recoveryHint: MarketplaceAccountRecoveryHint;
+  nextRetryAt: string | null;
   tokenExpiresAt: string | null;
   lastSuccessfulSyncAt: string | null;
   createdAt: string;

@@ -133,6 +133,31 @@ export async function renameMarketplaceAccount(
   return (await response.json()) as MarketplaceAccountDto;
 }
 
+export interface RecoverConnectionResult {
+  outcome:
+    | "RECOVERED"
+    | "PENDING_RETRY"
+    | "RECONNECT_REQUIRED"
+    | "CONFIGURATION_ERROR";
+}
+
+export async function recoverMercadoLivreConnection(
+  accountId: string,
+): Promise<RecoverConnectionResult> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/mercado-livre/recover`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      "Não foi possível verificar a conexão agora. Tente novamente.",
+      code,
+    );
+  }
+  return (await response.json()) as RecoverConnectionResult;
+}
+
 export async function connectMercadoLivre(
   accountId: string,
 ): Promise<{ authorizationUrl: string }> {
