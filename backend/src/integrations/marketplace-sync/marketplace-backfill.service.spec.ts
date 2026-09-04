@@ -210,6 +210,33 @@ describe('MarketplaceBackfillService', () => {
       expect(status.status).toBe('ERROR');
       expect(status.lastRunErrorCode).toBe('STALE_RUN_RECOVERED');
     });
+
+    it('never omits synchronizedIntervals — always an array, empty or not, never undefined (regression: stale process serving the pre-Fase-4 contract)', async () => {
+      const { service: neverSynced } = buildService({
+        persistence: {
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [],
+            oldestFrom: null,
+            oldestRunRecordsRead: null,
+          }),
+        },
+      });
+      expect(
+        Array.isArray(
+          (await neverSynced.getStatus('acc-1')).synchronizedIntervals,
+        ),
+      ).toBe(true);
+      expect(
+        (await neverSynced.getStatus('acc-1')).synchronizedIntervals,
+      ).toEqual([]);
+
+      const { service: withCoverage } = buildService();
+      expect(
+        Array.isArray(
+          (await withCoverage.getStatus('acc-1')).synchronizedIntervals,
+        ),
+      ).toBe(true);
+    });
   });
 
   describe('runNextChunk', () => {

@@ -343,6 +343,49 @@ const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
   SYNC_FAILED: "Falha ao consultar o marketplace. Tente novamente.",
 };
 
+/**
+ * Normaliza a resposta de status do backfill (Fase 4, correção de
+ * regressão) — nunca deixa `synchronizedIntervals`/campos opcionais
+ * ausentes/`undefined` chegarem ao componente. Existe para tolerar uma
+ * resposta de um backend ainda não reiniciado com o contrato antigo
+ * (`{ oldestCoveredAt, historyComplete }`, sem os campos novos) durante um
+ * deploy — nunca para mascarar um bug real de contrato; o servidor atual
+ * SEMPRE devolve o formato completo (`getAccountSyncCoverage` nunca retorna
+ * `intervals` ausente).
+ */
+function normalizeBackfillStatus(raw: unknown): BackfillStatusDto {
+  const value = (raw && typeof raw === "object" ? raw : {}) as Partial<
+    Record<keyof BackfillStatusDto, unknown>
+  >;
+  const oldestCoveredAt =
+    typeof value.oldestCoveredAt === "string" ? value.oldestCoveredAt : null;
+  return {
+    status:
+      typeof value.status === "string"
+        ? (value.status as BackfillStatusDto["status"])
+        : oldestCoveredAt
+          ? "IN_PROGRESS"
+          : "NOT_STARTED",
+    oldestCoveredAt,
+    firstOrderAt:
+      typeof value.firstOrderAt === "string" ? value.firstOrderAt : null,
+    lastOrderAt:
+      typeof value.lastOrderAt === "string" ? value.lastOrderAt : null,
+    synchronizedIntervals: Array.isArray(value.synchronizedIntervals)
+      ? (value.synchronizedIntervals as BackfillStatusDto["synchronizedIntervals"])
+      : [],
+    lastProcessedChunk:
+      value.lastProcessedChunk &&
+      typeof value.lastProcessedChunk === "object"
+        ? (value.lastProcessedChunk as BackfillStatusDto["lastProcessedChunk"])
+        : null,
+    lastRunErrorCode:
+      typeof value.lastRunErrorCode === "string"
+        ? value.lastRunErrorCode
+        : null,
+  };
+}
+
 export async function fetchBackfillStatus(
   accountId: string,
 ): Promise<BackfillStatusDto> {
@@ -354,7 +397,7 @@ export async function fetchBackfillStatus(
       "Não foi possível carregar o status do histórico.",
     );
   }
-  return (await response.json()) as BackfillStatusDto;
+  return normalizeBackfillStatus(await response.json());
 }
 
 /**

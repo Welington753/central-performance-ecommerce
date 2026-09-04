@@ -191,6 +191,28 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
     ).toBeInTheDocument();
   });
 
+  it("a status-fetch failure for one Mercado Livre account never crashes the page — only that account's panel shows the error, the other renders normally", async () => {
+    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+      mlAccount({ id: "ml-1", nickname: "Meli 1" }),
+      mlAccount({ id: "ml-2", nickname: "Meli 2" }),
+    ]);
+    (api.fetchBackfillStatus as jest.Mock).mockImplementation(
+      (accountId: string) =>
+        accountId === "ml-1"
+          ? Promise.reject(new Error("boom"))
+          : Promise.resolve(backfillStatus()),
+    );
+
+    render(<SincronizacoesPage />);
+
+    const panel1 = await screen.findByTestId("backfill-panel-Meli 1");
+    const panel2 = await screen.findByTestId("backfill-panel-Meli 2");
+    expect(
+      within(panel1).getByText(/não foi possível carregar/i),
+    ).toBeInTheDocument();
+    expect(within(panel2).getByText("Parcial")).toBeInTheDocument();
+  });
+
   it("does not offer the backfill action before the account has ever been synced (NOT_STARTED)", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "ml-1" }),

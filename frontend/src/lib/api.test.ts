@@ -1,4 +1,4 @@
-import { ApiFetchError, syncMercadoLivreOrders } from "./api";
+import { ApiFetchError, fetchBackfillStatus, syncMercadoLivreOrders } from "./api";
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -49,5 +49,73 @@ describe("syncMercadoLivreOrders", () => {
     global.fetch = jest.fn().mockResolvedValue(jsonResponse(200, summary));
 
     await expect(syncMercadoLivreOrders("acc-1")).resolves.toEqual(summary);
+  });
+});
+
+describe("fetchBackfillStatus (normalização — correção de regressão)", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("passa adiante uma resposta já completa sem alterá-la", async () => {
+    const full = {
+      status: "IN_PROGRESS",
+      oldestCoveredAt: "2026-07-04",
+      firstOrderAt: "2026-07-04",
+      lastOrderAt: "2026-09-04",
+      synchronizedIntervals: [{ from: "2026-07-04", to: "2026-09-04" }],
+      lastProcessedChunk: null,
+      lastRunErrorCode: null,
+    };
+    global.fetch = jest.fn().mockResolvedValue(jsonResponse(200, full));
+
+    await expect(fetchBackfillStatus("acc-1")).resolves.toEqual(full);
+  });
+
+  it("normaliza synchronizedIntervals ausente para [] em vez de deixar undefined (contrato antigo/backend não reiniciado)", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      jsonResponse(200, { oldestCoveredAt: "2026-07-04", historyComplete: false }),
+    );
+
+    const status = await fetchBackfillStatus("acc-1");
+
+    expect(status.synchronizedIntervals).toEqual([]);
+    expect(status.status).toBe("IN_PROGRESS");
+  });
+
+  it("normaliza uma resposta totalmente vazia sem lançar — nenhum campo obrigatório fica undefined", async () => {
+    global.fetch = jest.fn().mockResolvedValue(jsonResponse(200, {}));
+
+    const status = await fetchBackfillStatus("acc-1");
+
+    expect(status).toEqual({
+      status: "NOT_STARTED",
+      oldestCoveredAt: null,
+      firstOrderAt: null,
+      lastOrderAt: null,
+      synchronizedIntervals: [],
+      lastProcessedChunk: null,
+      lastRunErrorCode: null,
+    });
+  });
+
+  it("preserva synchronizedIntervals quando já vem como array vazio", async () => {
+    global.fetch = jest.fn().mockResolvedValue(
+      jsonResponse(200, {
+        status: "NOT_STARTED",
+        oldestCoveredAt: null,
+        firstOrderAt: null,
+        lastOrderAt: null,
+        synchronizedIntervals: [],
+        lastProcessedChunk: null,
+        lastRunErrorCode: null,
+      }),
+    );
+
+    await expect(
+      fetchBackfillStatus("acc-1").then((s) => s.synchronizedIntervals),
+    ).resolves.toEqual([]);
   });
 });
