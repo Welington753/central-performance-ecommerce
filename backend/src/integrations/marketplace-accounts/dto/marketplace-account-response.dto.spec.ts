@@ -112,6 +112,26 @@ describe('toMarketplaceAccountResponse', () => {
       },
     );
 
+    it('exposes nextRetryAt only when recoveryHint is TEMPORARY_RETRY', () => {
+      const retryAt = new Date('2026-09-04T12:30:00.000Z');
+      const temporary = toMarketplaceAccountResponse(
+        account({
+          status: MarketplaceAccountStatus.ERROR,
+          failureCode: 'REFRESH_TEMPORARY_FAILURE',
+          refreshRetryAt: retryAt,
+        }),
+      );
+      expect(temporary.nextRetryAt).toBe('2026-09-04T12:30:00.000Z');
+
+      const reconnectRequired = toMarketplaceAccountResponse(
+        account({
+          status: MarketplaceAccountStatus.TOKEN_EXPIRED,
+          refreshRetryAt: retryAt,
+        }),
+      );
+      expect(reconnectRequired.nextRetryAt).toBeNull();
+    });
+
     it('is CONFIGURATION_ERROR for ML_APP_CONFIGURATION_ERROR — never RECONNECT_REQUIRED', () => {
       expect(
         toMarketplaceAccountResponse(

@@ -67,6 +67,9 @@ export interface MarketplaceAccountResponseDto {
   nickname: string | null;
   status: MarketplaceAccountStatus;
   recoveryHint: MarketplaceAccountRecoveryHint;
+  /** Só não-nulo quando `recoveryHint === 'TEMPORARY_RETRY'` — instante da
+   * próxima renovação automática já agendada (`refresh_retry_at`). */
+  nextRetryAt: string | null;
   tokenExpiresAt: string | null;
   lastSuccessfulSyncAt: string | null;
   createdAt: string;
@@ -76,13 +79,18 @@ export interface MarketplaceAccountResponseDto {
 export function toMarketplaceAccountResponse(
   account: MarketplaceAccount,
 ): MarketplaceAccountResponseDto {
+  const recoveryHint = computeRecoveryHint(account);
   return {
     id: account.id,
     marketplace: account.marketplace,
     externalSellerId: account.externalSellerId,
     nickname: account.nickname,
     status: account.status,
-    recoveryHint: computeRecoveryHint(account),
+    recoveryHint,
+    nextRetryAt:
+      recoveryHint === 'TEMPORARY_RETRY' && account.refreshRetryAt
+        ? account.refreshRetryAt.toISOString()
+        : null,
     tokenExpiresAt: account.tokenExpiresAt
       ? account.tokenExpiresAt.toISOString()
       : null,
