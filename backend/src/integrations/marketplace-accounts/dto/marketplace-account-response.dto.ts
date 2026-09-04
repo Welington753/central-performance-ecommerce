@@ -1,8 +1,54 @@
 import type { Marketplace } from '../../contracts/marketplace.enum';
-import type {
-  MarketplaceAccount,
+import {
   MarketplaceAccountStatus,
+  type MarketplaceAccount,
 } from '../marketplace-account.entity';
+
+/**
+ * Sinal PÚBLICO e sanitizado para a interface decidir a ação principal a
+ * mostrar — nunca o `failureCode` interno cru (design §7, "nunca exposto").
+ * - `RECONNECT_REQUIRED`: autorização confirmada como inválida/revogada
+ *   (`TOKEN_EXPIRED`), ou qualquer outro `ERROR` fora do vocabulário
+ *   recuperável abaixo — precisa do fluxo OAuth completo de novo.
+ * - `TEMPORARY_RETRY`: falha recuperável de renovação (correção de
+ *   resiliência OAuth, inclui o legado `REFRESH_RESULT_UNKNOWN`) — a
+ *   interface oferece "Tentar agora" (`POST .../recover`), nunca
+ *   "Reconectar" como ação principal.
+ * - `CONFIGURATION_ERROR`: client_id/client_secret da aplicação inválidos —
+ *   reconectar ESTA conta nunca resolve.
+ * - `null`: nada a recuperar (conta `CONNECTED`/`DISCONNECTED`).
+ */
+export type MarketplaceAccountRecoveryHint =
+  'RECONNECT_REQUIRED' | 'TEMPORARY_RETRY' | 'CONFIGURATION_ERROR' | null;
+
+const TEMPORARY_RETRY_FAILURE_CODES: ReadonlySet<string> = new Set([
+  'REFRESH_RESULT_UNKNOWN',
+  'REFRESH_TEMPORARY_FAILURE',
+  'REFRESH_OUTCOME_UNKNOWN',
+]);
+
+function computeRecoveryHint(
+  account: MarketplaceAccount,
+): MarketplaceAccountRecoveryHint {
+  if (account.status === MarketplaceAccountStatus.TOKEN_EXPIRED) {
+    return 'RECONNECT_REQUIRED';
+  }
+  if (account.status !== MarketplaceAccountStatus.ERROR) {
+    return null;
+  }
+  if (account.failureCode === 'ML_APP_CONFIGURATION_ERROR') {
+    return 'CONFIGURATION_ERROR';
+  }
+  if (
+    account.failureCode &&
+    TEMPORARY_RETRY_FAILURE_CODES.has(account.failureCode)
+  ) {
+    return 'TEMPORARY_RETRY';
+  }
+  // Qualquer outro ERROR (ex.: CREDENTIAL_DECRYPTION_FAILED, ou qualquer
+  // causa de conta Amazon) — comportamento inalterado: pede reconexão.
+  return 'RECONNECT_REQUIRED';
+}
 
 /**
  * Nunca inclui `encrypted*`, `connectedByUserId`, `tokenVersion`,
@@ -20,6 +66,7 @@ export interface MarketplaceAccountResponseDto {
   externalSellerId: string | null;
   nickname: string | null;
   status: MarketplaceAccountStatus;
+  recoveryHint: MarketplaceAccountRecoveryHint;
   tokenExpiresAt: string | null;
   lastSuccessfulSyncAt: string | null;
   createdAt: string;
@@ -35,6 +82,7 @@ export function toMarketplaceAccountResponse(
     externalSellerId: account.externalSellerId,
     nickname: account.nickname,
     status: account.status,
+    recoveryHint: computeRecoveryHint(account),
     tokenExpiresAt: account.tokenExpiresAt
       ? account.tokenExpiresAt.toISOString()
       : null,
