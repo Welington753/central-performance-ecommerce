@@ -41,6 +41,9 @@ class FakeMarketplaceAccountRepository {
       failureCode: null,
       connectedByUserId: null,
       tokenVersion: 0,
+      refreshFailureCount: 0,
+      refreshRetryAt: null,
+      lastRefreshAttemptAt: null,
     };
   }
 

@@ -83,6 +83,34 @@ export class MarketplaceAccount {
   @Column({ type: 'integer', default: 0 })
   tokenVersion!: number;
 
+  /**
+   * Resiliência da renovação OAuth (correção pós-incidente
+   * REFRESH_RESULT_UNKNOWN): contagem de falhas RECUPERÁVEIS consecutivas de
+   * renovação (`REFRESH_TEMPORARY_FAILURE`/`REFRESH_OUTCOME_UNKNOWN`/
+   * `ML_APP_CONFIGURATION_ERROR`), usada para o backoff exponencial de
+   * `refreshRetryAt`. Zerada em toda renovação bem-sucedida
+   * (`applyRefreshedTokens`) — nunca acumula entre ciclos de sucesso.
+   */
+  @Column({ type: 'integer', default: 0 })
+  refreshFailureCount!: number;
+
+  /**
+   * Antes deste instante, `ensureValidAccessToken` NUNCA tenta uma nova
+   * renovação de rede para esta conta — evita reenviar a cada 5 minutos
+   * (job de renovação) ignorando o backoff já calculado. `null` quando não
+   * há falha recuperável pendente.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  refreshRetryAt!: Date | null;
+
+  /**
+   * Observabilidade: quando a última TENTATIVA de renovação (sucesso ou
+   * falha) ocorreu — distinto de `updatedAt` (que muda em qualquer escrita
+   * na linha, não só tentativas de renovação).
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  lastRefreshAttemptAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

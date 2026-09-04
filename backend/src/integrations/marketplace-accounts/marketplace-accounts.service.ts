@@ -300,6 +300,9 @@ export class MarketplaceAccountsService {
               failure_code = NULL,
               error_summary = NULL,
               token_version = token_version + 1,
+              refresh_failure_count = 0,
+              refresh_retry_at = NULL,
+              last_refresh_attempt_at = now(),
               updated_at = now()
         WHERE id = $4 AND token_version = $5
         RETURNING id`,
@@ -322,13 +325,56 @@ export class MarketplaceAccountsService {
   }): Promise<boolean> {
     const rows = await this.queryReturning<{ id: string }>(
       `UPDATE marketplace_accounts
-          SET status = 'TOKEN_EXPIRED', failure_code = $2, error_summary = $3, updated_at = now()
+          SET status = 'TOKEN_EXPIRED', failure_code = $2, error_summary = $3,
+              refresh_retry_at = NULL, last_refresh_attempt_at = now(),
+              updated_at = now()
         WHERE id = $1 AND token_version = $4
         RETURNING id`,
       [
         input.id,
         input.failureCode,
         input.errorSummary,
+        input.expectedTokenVersion,
+      ],
+    );
+    return rows.length > 0;
+  }
+
+  /**
+   * Falha RECUPERÁVEL de renovação (correção de resiliência OAuth):
+   * `REFRESH_TEMPORARY_FAILURE`, `REFRESH_OUTCOME_UNKNOWN` ou
+   * `ML_APP_CONFIGURATION_ERROR` — NUNCA muda `status` nem toca tokens
+   * cifrados/`tokenVersion`. Só registra o motivo, incrementa o contador de
+   * falhas consecutivas e agenda a próxima tentativa. O CAS por
+   * `tokenVersion` garante que uma falha que chega atrasada nunca sobrescreve
+   * uma renovação bem-sucedida concorrente (que já teria incrementado
+   * `tokenVersion`) — quando o CAS falha aqui, a chamada é descartada em
+   * silêncio pelo chamador, nunca reaplicada.
+   */
+  async markRefreshDeferred(input: {
+    id: string;
+    expectedTokenVersion: number;
+    failureCode:
+      | 'REFRESH_TEMPORARY_FAILURE'
+      | 'REFRESH_OUTCOME_UNKNOWN'
+      | 'ML_APP_CONFIGURATION_ERROR';
+    errorSummary: string;
+    refreshRetryAt: Date;
+  }): Promise<boolean> {
+    const rows = await this.queryReturning<{ id: string }>(
+      `UPDATE marketplace_accounts
+          SET failure_code = $2, error_summary = $3,
+              refresh_failure_count = refresh_failure_count + 1,
+              refresh_retry_at = $4,
+              last_refresh_attempt_at = now(),
+              updated_at = now()
+        WHERE id = $1 AND token_version = $5
+        RETURNING id`,
+      [
+        input.id,
+        input.failureCode,
+        input.errorSummary,
+        input.refreshRetryAt,
         input.expectedTokenVersion,
       ],
     );
