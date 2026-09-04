@@ -32,6 +32,7 @@ export class MarketplaceAnalyticsController {
     @Query('marketplace') marketplace?: string,
     @Query('accountId') accountId?: string,
     @Query('allTime') allTime?: string,
+    @Query('logisticsScope') logisticsScope?: string,
   ): Promise<MarketplaceAnalyticsKpisResponseDto> {
     const query: MarketplaceAnalyticsQuery = {
       from,
@@ -39,6 +40,7 @@ export class MarketplaceAnalyticsController {
       marketplace,
       accountId,
       allTime: allTime === 'true',
+      logisticsScope,
     };
     try {
       const aggregate = await this.analyticsService.getAggregate(query);

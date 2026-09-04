@@ -12,6 +12,7 @@ import type { Marketplace } from '../../contracts/marketplace.enum';
 import type { MarketplaceAccountStatus } from '../../marketplace-accounts/marketplace-account.entity';
 import { intervalsToDto } from '../consolidated-coverage.util';
 import type { MarketplaceFilter } from '../marketplace-filter.util';
+import type { LogisticsScopeFilter } from '../logistics-scope-filter.util';
 import type {
   AccountAvailability,
   SourceAvailability,
@@ -203,6 +204,24 @@ export interface AnalyticsFullRankingEntry {
   unitsSharePct: number;
 }
 
+/**
+ * Grupo genérico (Fase 4, item 4 — comparativo Full x sem Full x total):
+ * mesmas 9 métricas de `AnalyticsFullSummary`, sem os percentuais de
+ * participação (que só fazem sentido para o grupo Full).
+ */
+export interface LogisticsGroupSummary {
+  grossSalesRevenue: string;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  paidRevenue: string;
+  paidOrders: number;
+  paidUnits: number;
+  averageTicket: string;
+  cancelledOrders: number;
+  cancelledUnits: number;
+  cancelledRevenue: string;
+}
+
 export interface MarketplaceAnalyticsFull {
   /** "complete": todo pedido pago/cancelado do escopo já foi classificado. "partial": parte. "unknown": nenhuma prova de classificação. */
   coverage: FullClassificationCoverage;
@@ -213,6 +232,16 @@ export interface MarketplaceAnalyticsFull {
   comparison: AnalyticsFullComparison | null;
   dailySeries: AnalyticsFullDailyPoint[];
   ranking: AnalyticsFullRankingEntry[];
+  /**
+   * Comparativo (Fase 4, item 4) — cada grupo é independentemente `null`
+   * quando não há nenhum pedido pago/cancelado com valor válido naquele
+   * grupo (nunca um zero fabricado). `total` é a soma real e SEMPRE
+   * calculada sem filtro de classificação — nunca afetada pelo
+   * `logisticsScope` do resto do dashboard.
+   */
+  nonFullSummary: LogisticsGroupSummary | null;
+  unknownSummary: LogisticsGroupSummary | null;
+  totalSummary: LogisticsGroupSummary | null;
 }
 
 /**
@@ -228,6 +257,8 @@ export interface MarketplaceAnalyticsKpisResponseDto {
      * `null` e `comparisonPeriod` não deve ser exibido — o frontend nunca
      * mostra percentuais comparativos neste modo. */
     allTime: boolean;
+    /** `ALL`/`FULL`/`NON_FULL` (Fase 4, "Full x sem Full") — sempre `ALL` fora do escopo Mercado Livre. */
+    logisticsScope: LogisticsScopeFilter;
   };
   availability: SourceAvailability;
   period: { days: number; timeZone: string; from: string; to: string };
@@ -328,23 +359,30 @@ export function toMarketplaceAnalyticsResponse(
       comparisonPeriodComplete: aggregate.dataCoverage.comparisonPeriodComplete,
     },
     lastSync: aggregate.lastSync ? aggregate.lastSync.toISOString() : null,
-    full: aggregate.full
-      ? toFullAggregate(aggregate.full, aggregate.current)
-      : null,
+    full: aggregate.full ? toFullAggregate(aggregate.full) : null,
   };
 }
 
+function hasGroupData(totals: AnalyticsFullPeriodTotals): boolean {
+  return totals.grossSalesOrders > 0 || totals.cancelledOrders > 0;
+}
+
+/**
+ * `totalCurrent` aqui é SEMPRE `full.totalCurrent` (a soma real,
+ * incondicional por classificação) — nunca `aggregate.current` do nível
+ * raiz, que passa a ser filtrado pelo `logisticsScope` selecionado no resto
+ * do dashboard (Fase 4, item 2). Usar o total raiz faria `shareOfPaidRevenuePct`
+ * virar 100% sempre que o usuário filtrasse por `FULL`.
+ */
 function toFullAggregate(
   full: AnalyticsFullAggregate,
-  totalCurrent: AnalyticsPeriodTotals | null,
 ): MarketplaceAnalyticsFull {
-  const hasData =
-    full.current.grossSalesOrders > 0 || full.current.cancelledOrders > 0;
+  const hasData = hasGroupData(full.current);
   return {
     coverage: full.coverage,
     classifiedOrders: full.classifiedOrders,
     unclassifiedOrders: full.unclassifiedOrders,
-    summary: hasData ? toFullSummary(full.current, totalCurrent) : null,
+    summary: hasData ? toFullSummary(full.current, full.totalCurrent) : null,
     comparison:
       hasData && full.previous
         ? toFullComparison(full.current, full.previous)
@@ -353,13 +391,21 @@ function toFullAggregate(
     ranking: full.ranking.map((row) =>
       toFullRankingEntry(row, full.current.grossSalesUnits),
     ),
+    nonFullSummary: hasGroupData(full.nonFullCurrent)
+      ? toGroupSummary(full.nonFullCurrent)
+      : null,
+    unknownSummary: hasGroupData(full.unknownCurrent)
+      ? toGroupSummary(full.unknownCurrent)
+      : null,
+    totalSummary: hasGroupData(full.totalCurrent)
+      ? toGroupSummary(full.totalCurrent)
+      : null,
   };
 }
 
-function toFullSummary(
+function toGroupSummary(
   totals: AnalyticsFullPeriodTotals,
-  totalCurrent: AnalyticsPeriodTotals | null,
-): AnalyticsFullSummary {
+): LogisticsGroupSummary {
   return {
     grossSalesRevenue: centsToDecimalString(totals.grossSalesRevenueCents),
     grossSalesOrders: totals.grossSalesOrders,
@@ -371,14 +417,23 @@ function toFullSummary(
       totals.paidRevenueCents,
       BigInt(totals.paidOrders),
     ),
-    shareOfPaidRevenuePct: shareOfCents(
-      totals.paidRevenueCents,
-      totalCurrent?.grossRevenueCents ?? 0n,
-    ),
-    shareOfPaidUnitsPct: shareOf(totals.paidUnits, totalCurrent?.units ?? 0),
     cancelledOrders: totals.cancelledOrders,
     cancelledUnits: totals.cancelledUnits,
     cancelledRevenue: centsToDecimalString(totals.cancelledRevenueCents),
+  };
+}
+
+function toFullSummary(
+  totals: AnalyticsFullPeriodTotals,
+  totalCurrent: AnalyticsFullPeriodTotals,
+): AnalyticsFullSummary {
+  return {
+    ...toGroupSummary(totals),
+    shareOfPaidRevenuePct: shareOfCents(
+      totals.paidRevenueCents,
+      totalCurrent.paidRevenueCents,
+    ),
+    shareOfPaidUnitsPct: shareOf(totals.paidUnits, totalCurrent.paidUnits),
   };
 }
 

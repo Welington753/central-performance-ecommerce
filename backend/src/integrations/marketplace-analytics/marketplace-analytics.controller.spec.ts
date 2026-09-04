@@ -8,7 +8,12 @@ import type { MarketplaceAnalyticsAggregate } from './marketplace-analytics.serv
 
 function emptyAggregate(): MarketplaceAnalyticsAggregate {
   return {
-    scope: { marketplace: 'ALL', accountId: null, allTime: false },
+    scope: {
+      marketplace: 'ALL',
+      accountId: null,
+      allTime: false,
+      logisticsScope: 'ALL',
+    },
     availability: 'NOT_CONNECTED',
     currentWindow: { from: new Date(0), to: new Date(0) },
     previousWindow: { from: new Date(0), to: new Date(0) },
@@ -59,6 +64,21 @@ describe('MarketplaceAnalyticsController', () => {
       accountId: 'acc-1',
       allTime: false,
     });
+  });
+
+  it('forwards logisticsScope to the service (Fase 4, "Full x sem Full")', async () => {
+    const { controller, service } = buildController();
+    await controller.getKpis(
+      undefined,
+      undefined,
+      'MERCADO_LIVRE',
+      'acc-1',
+      undefined,
+      'FULL',
+    );
+    expect(service.getAggregate).toHaveBeenCalledWith(
+      expect.objectContaining({ logisticsScope: 'FULL' }),
+    );
   });
 
   it('translates InvalidKpiPeriodError into a 400 carrying only the closed code', async () => {

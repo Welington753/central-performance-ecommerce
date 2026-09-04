@@ -38,8 +38,15 @@ import {
 } from './source-eligibility.util';
 import {
   LOGISTICS_MARKETPLACE_FULFILLED,
+  LOGISTICS_SELLER_FULFILLED,
   LOGISTICS_UNKNOWN,
 } from '../marketplace-orders/logistics-classification';
+import {
+  assertLogisticsScopeRequiresMercadoLivre,
+  classificationValuesForScope,
+  parseLogisticsScopeFilter,
+  type LogisticsScopeFilter,
+} from './logistics-scope-filter.util';
 
 const TOP_RANKING_LIMIT = 50;
 const FULL_RANKING_LIMIT = 50;
@@ -197,6 +204,19 @@ export interface AnalyticsFullAggregate {
   previous: AnalyticsFullPeriodTotals | null;
   dailySeries: AnalyticsFullDailyPointRaw[];
   ranking: AnalyticsFullRankingEntryRaw[];
+  /**
+   * Comparativo Full x sem Full x total (item 4, filtro `logisticsScope`) —
+   * SEMPRE calculados independentemente do `logisticsScope` selecionado no
+   * resto do dashboard (a seção "Mercado Livre Full" continua mostrando os
+   * três grupos mesmo quando o usuário filtrou só Full ou só sem Full nos
+   * KPIs principais). `nonFullCurrent`/`unknownCurrent`/`totalCurrent` vêm
+   * da MESMA consulta que `current` (`fetchLogisticsBreakdown`) — nunca
+   * podem divergir entre si por construção SQL (cada pedido cai em
+   * exatamente um dos três grupos; `total` nunca filtra por classificação).
+   */
+  nonFullCurrent: AnalyticsFullPeriodTotals;
+  unknownCurrent: AnalyticsFullPeriodTotals;
+  totalCurrent: AnalyticsFullPeriodTotals;
 }
 
 export interface MarketplaceAnalyticsAggregate {
@@ -204,6 +224,7 @@ export interface MarketplaceAnalyticsAggregate {
     marketplace: MarketplaceFilter;
     accountId: string | null;
     allTime: boolean;
+    logisticsScope: LogisticsScopeFilter;
   };
   availability: SourceAvailability;
   currentWindow: PeriodWindow;
@@ -242,6 +263,13 @@ export interface MarketplaceAnalyticsQuery {
    * `previous`/`comparison` saem `null` do início ao fim do pipeline.
    */
   allTime?: boolean;
+  /**
+   * `ALL`/`FULL`/`NON_FULL` (Fase 4, "Full x sem Full"): ausente/`ALL`
+   * preserva compatibilidade total com o comportamento anterior. `FULL`/
+   * `NON_FULL` só são aceitos quando `marketplace` resolve para
+   * `MERCADO_LIVRE` — ver `assertLogisticsScopeRequiresMercadoLivre`.
+   */
+  logisticsScope?: string;
 }
 
 /**
@@ -269,6 +297,9 @@ export class MarketplaceAnalyticsService {
     const marketplaceFilter = parseMarketplaceFilter(query.marketplace);
     const accountIdFilter = parseAccountIdFilter(query.accountId);
     const allTime = query.allTime === true;
+    const logisticsScope = parseLogisticsScopeFilter(query.logisticsScope);
+    assertLogisticsScopeRequiresMercadoLivre(logisticsScope, marketplaceFilter);
+    const classificationValues = classificationValuesForScope(logisticsScope);
 
     const allAccounts = await this.marketplaceAccountsService.findAll();
     const hasHistoryByAccountId = await this.fetchHasHistoryMap();
@@ -394,6 +425,7 @@ export class MarketplaceAnalyticsService {
           marketplace: marketplaceFilter,
           accountId: accountIdFilter,
           allTime,
+          logisticsScope,
         },
         availability: scopeAvailability,
         currentWindow: windows.current,
@@ -427,16 +459,39 @@ export class MarketplaceAnalyticsService {
       sources,
       full,
     ] = await Promise.all([
-      this.fetchPeriodTotals(scopedAccountIds, windows.current),
+      this.fetchPeriodTotals(
+        scopedAccountIds,
+        windows.current,
+        classificationValues,
+      ),
       // "Todo o período" nunca calcula comparação — `previous` sai `null`
       // sem sequer consultar o banco para o período anterior.
       allTime
         ? Promise.resolve(null)
-        : this.fetchPeriodTotals(scopedAccountIds, windows.previous),
-      this.fetchDailySeries(scopedAccountIds, windows.current),
-      this.fetchTopProductsBySku(scopedAccountIds, windows.current),
-      this.fetchTopListings(scopedAccountIds, windows.current),
+        : this.fetchPeriodTotals(
+            scopedAccountIds,
+            windows.previous,
+            classificationValues,
+          ),
+      this.fetchDailySeries(
+        scopedAccountIds,
+        windows.current,
+        classificationValues,
+      ),
+      this.fetchTopProductsBySku(
+        scopedAccountIds,
+        windows.current,
+        classificationValues,
+      ),
+      this.fetchTopListings(
+        scopedAccountIds,
+        windows.current,
+        classificationValues,
+      ),
       this.fetchSourceCoverage(scopedAccounts, windows),
+      // O comparativo Full x sem Full x total é sempre calculado no cenário
+      // completo — nunca filtrado pelo `logisticsScope` do resto do
+      // dashboard (ver doc de `AnalyticsFullAggregate`).
       this.fetchFullAggregate(scopedAccountIds, windows, allTime),
     ]);
 
@@ -449,6 +504,7 @@ export class MarketplaceAnalyticsService {
         marketplace: marketplaceFilter,
         accountId: accountIdFilter,
         allTime,
+        logisticsScope,
       },
       availability: scopeAvailability,
       currentWindow: windows.current,
@@ -591,10 +647,15 @@ export class MarketplaceAnalyticsService {
   private async fetchPeriodTotals(
     accountIds: string[],
     window: PeriodWindow,
+    classificationValues: string[] | null = null,
   ): Promise<AnalyticsPeriodTotals> {
     if (accountIds.length === 0) return zeroPeriodTotals();
 
-    await this.assertSingleCurrencyOrThrow(accountIds, window);
+    await this.assertSingleCurrencyOrThrow(
+      accountIds,
+      window,
+      classificationValues,
+    );
 
     const [orderRow] = await this.dataSource.query<
       Array<{
@@ -620,13 +681,15 @@ export class MarketplaceAnalyticsService {
         FROM marketplace_orders
         WHERE marketplace_account_id = ANY($1)
           AND date_created >= $2::timestamptz
-          AND date_created < $5::timestamptz`,
+          AND date_created < $5::timestamptz
+          AND ($6::varchar[] IS NULL OR logistics_classification = ANY($6::varchar[]))`,
       [
         accountIds,
         window.from,
         PAID_ORDER_STATUS,
         CANCELLED_ORDER_STATUS,
         window.to,
+        classificationValues,
       ],
     );
 
@@ -659,13 +722,15 @@ export class MarketplaceAnalyticsService {
         WHERE o.marketplace_account_id = ANY($1)
           AND o.status IN ($2, $5)
           AND o.date_created >= $3::timestamptz
-          AND o.date_created < $4::timestamptz`,
+          AND o.date_created < $4::timestamptz
+          AND ($6::varchar[] IS NULL OR o.logistics_classification = ANY($6::varchar[]))`,
       [
         accountIds,
         PAID_ORDER_STATUS,
         window.from,
         window.to,
         CANCELLED_ORDER_STATUS,
+        classificationValues,
       ],
     );
 
@@ -697,6 +762,7 @@ export class MarketplaceAnalyticsService {
   private async assertSingleCurrencyOrThrow(
     accountIds: string[],
     window: PeriodWindow,
+    classificationValues: string[] | null = null,
   ): Promise<void> {
     if (accountIds.length === 0) return;
 
@@ -706,8 +772,15 @@ export class MarketplaceAnalyticsService {
         WHERE marketplace_account_id = ANY($1)
           AND status = $2
           AND date_created >= $3::timestamptz
-          AND date_created < $4::timestamptz`,
-      [accountIds, PAID_ORDER_STATUS, window.from, window.to],
+          AND date_created < $4::timestamptz
+          AND ($5::varchar[] IS NULL OR logistics_classification = ANY($5::varchar[]))`,
+      [
+        accountIds,
+        PAID_ORDER_STATUS,
+        window.from,
+        window.to,
+        classificationValues,
+      ],
     );
 
     if (rows.length > 1) {
@@ -726,6 +799,7 @@ export class MarketplaceAnalyticsService {
   private async fetchTopProductsBySku(
     accountIds: string[],
     window: PeriodWindow,
+    classificationValues: string[] | null = null,
   ): Promise<AnalyticsTopProductBySkuRaw[]> {
     if (accountIds.length === 0) return [];
 
@@ -757,6 +831,7 @@ export class MarketplaceAnalyticsService {
             AND o.status = $2
             AND o.date_created >= $3::timestamptz
             AND o.date_created < $4::timestamptz
+            AND ($6::varchar[] IS NULL OR o.logistics_classification = ANY($6::varchar[]))
         )
         SELECT
           (array_agg(display_sku ORDER BY date_created DESC))[1] AS sku,
@@ -779,6 +854,7 @@ export class MarketplaceAnalyticsService {
         window.from,
         window.to,
         TOP_RANKING_LIMIT,
+        classificationValues,
       ],
     );
 
@@ -794,6 +870,7 @@ export class MarketplaceAnalyticsService {
   private async fetchTopListings(
     accountIds: string[],
     window: PeriodWindow,
+    classificationValues: string[] | null = null,
   ): Promise<AnalyticsTopListingRaw[]> {
     if (accountIds.length === 0) return [];
 
@@ -825,6 +902,7 @@ export class MarketplaceAnalyticsService {
           AND o.status = $2
           AND o.date_created >= $3::timestamptz
           AND o.date_created < $4::timestamptz
+          AND ($6::varchar[] IS NULL OR o.logistics_classification = ANY($6::varchar[]))
         GROUP BY ma.marketplace, o.marketplace_account_id, oi.external_item_id, oi.variation_id
         ORDER BY SUM(oi.quantity * oi.unit_price) DESC
         LIMIT $5`,
@@ -834,6 +912,7 @@ export class MarketplaceAnalyticsService {
         window.from,
         window.to,
         TOP_RANKING_LIMIT,
+        classificationValues,
       ],
     );
 
@@ -852,6 +931,7 @@ export class MarketplaceAnalyticsService {
   private async fetchDailySeries(
     accountIds: string[],
     window: PeriodWindow,
+    classificationValues: string[] | null = null,
   ): Promise<AnalyticsDailyPointRaw[]> {
     const days = listDaysInWindow(window);
     if (accountIds.length === 0) {
@@ -882,6 +962,7 @@ export class MarketplaceAnalyticsService {
           WHERE marketplace_account_id = ANY($1)
             AND date_created >= $2::timestamptz
             AND date_created < $3::timestamptz
+            AND ($6::varchar[] IS NULL OR logistics_classification = ANY($6::varchar[]))
           GROUP BY day_index`,
         [
           accountIds,
@@ -889,6 +970,7 @@ export class MarketplaceAnalyticsService {
           window.to,
           PAID_ORDER_STATUS,
           CANCELLED_ORDER_STATUS,
+          classificationValues,
         ],
       ),
       this.dataSource.query<Array<{ day_index: number; units: string }>>(
@@ -901,8 +983,15 @@ export class MarketplaceAnalyticsService {
             AND o.status = $4
             AND o.date_created >= $2::timestamptz
             AND o.date_created < $3::timestamptz
+            AND ($5::varchar[] IS NULL OR o.logistics_classification = ANY($5::varchar[]))
           GROUP BY day_index`,
-        [accountIds, window.from, window.to, PAID_ORDER_STATUS],
+        [
+          accountIds,
+          window.from,
+          window.to,
+          PAID_ORDER_STATUS,
+          classificationValues,
+        ],
       ),
     ]);
 
@@ -977,147 +1066,172 @@ export class MarketplaceAnalyticsService {
     windows: KpiWindows,
     allTime: boolean,
   ): Promise<AnalyticsFullAggregate> {
-    const [current, previous, classification, dailySeries, ranking] =
+    const [currentBreakdown, previousBreakdown, dailySeries, ranking] =
       await Promise.all([
-        this.fetchFullPeriodTotals(accountIds, windows.current),
+        this.fetchLogisticsBreakdown(accountIds, windows.current),
         allTime
           ? Promise.resolve(null)
-          : this.fetchFullPeriodTotals(accountIds, windows.previous),
-        this.fetchFullClassificationCounts(accountIds, windows.current),
+          : this.fetchLogisticsBreakdown(accountIds, windows.previous),
         this.fetchFullDailySeries(accountIds, windows.current),
         this.fetchFullRankingBySku(accountIds, windows.current),
       ]);
 
     return {
       coverage: computeFullCoverage(
-        classification.classified,
-        classification.unclassified,
+        currentBreakdown.classifiedOrders,
+        currentBreakdown.unclassifiedOrders,
       ),
-      classifiedOrders: classification.classified,
-      unclassifiedOrders: classification.unclassified,
-      current,
-      previous,
+      classifiedOrders: currentBreakdown.classifiedOrders,
+      unclassifiedOrders: currentBreakdown.unclassifiedOrders,
+      current: currentBreakdown.full,
+      previous: previousBreakdown?.full ?? null,
       dailySeries,
       ranking,
+      nonFullCurrent: currentBreakdown.nonFull,
+      unknownCurrent: currentBreakdown.unknown,
+      totalCurrent: currentBreakdown.total,
     };
   }
 
-  private async fetchFullClassificationCounts(
+  /**
+   * Fonte ÚNICA dos totais Full/sem Full/não classificado/total (Fase 4,
+   * item 5: "calcule a partir da mesma consulta/CTE para evitar
+   * divergências") — uma única ida ao banco (2 queries: pedido e item,
+   * nunca 4x) com `FILTER` por grupo. `total` nunca filtra por
+   * classificação, então `total = full + nonFull + unknown` vale por
+   * construção (cada linha cai em exatamente um dos três grupos, coluna NOT
+   * NULL de 3 valores possíveis). `classifiedOrders`/`unclassifiedOrders`
+   * contam TODO pedido pago/cancelado (sem o filtro de valor válido de
+   * "vendas brutas") — a métrica de cobertura, distinta de
+   * `grossSalesOrders`.
+   */
+  private async fetchLogisticsBreakdown(
     accountIds: string[],
     window: PeriodWindow,
-  ): Promise<{ classified: number; unclassified: number }> {
-    if (accountIds.length === 0) return { classified: 0, unclassified: 0 };
+  ): Promise<{
+    full: AnalyticsFullPeriodTotals;
+    nonFull: AnalyticsFullPeriodTotals;
+    unknown: AnalyticsFullPeriodTotals;
+    total: AnalyticsFullPeriodTotals;
+    classifiedOrders: number;
+    unclassifiedOrders: number;
+  }> {
+    if (accountIds.length === 0) {
+      return {
+        full: zeroFullPeriodTotals(),
+        nonFull: zeroFullPeriodTotals(),
+        unknown: zeroFullPeriodTotals(),
+        total: zeroFullPeriodTotals(),
+        classifiedOrders: 0,
+        unclassifiedOrders: 0,
+      };
+    }
 
-    const [row] = await this.dataSource.query<
-      Array<{ classified: string; unclassified: string }>
-    >(
-      `SELECT
-          COUNT(*) FILTER (WHERE logistics_classification <> $5)::text AS classified,
-          COUNT(*) FILTER (WHERE logistics_classification = $5)::text AS unclassified
-        FROM marketplace_orders
-        WHERE marketplace_account_id = ANY($1)
-          AND status IN ($2, $3)
-          AND date_created >= $4::timestamptz
-          AND date_created < $6::timestamptz`,
-      [
-        accountIds,
-        PAID_ORDER_STATUS,
-        CANCELLED_ORDER_STATUS,
-        window.from,
-        LOGISTICS_UNKNOWN,
-        window.to,
-      ],
-    );
-    return {
-      classified: Number(row.classified),
-      unclassified: Number(row.unclassified),
-    };
-  }
+    const params = [
+      accountIds,
+      window.from,
+      PAID_ORDER_STATUS,
+      CANCELLED_ORDER_STATUS,
+      window.to,
+      LOGISTICS_MARKETPLACE_FULFILLED,
+      LOGISTICS_SELLER_FULFILLED,
+      LOGISTICS_UNKNOWN,
+    ];
 
-  private async fetchFullPeriodTotals(
-    accountIds: string[],
-    window: PeriodWindow,
-  ): Promise<AnalyticsFullPeriodTotals> {
-    if (accountIds.length === 0) return zeroFullPeriodTotals();
+    // Cada bucket (`full`/`non_full`/`unknown`/`total`) gera colunas com
+    // aliases ÚNICOS e prefixados — nunca colunas sem nome, que o driver
+    // `pg` colidiria sob a chave genérica `?column?` e faria uma sobrescrever
+    // a outra silenciosamente.
+    function bucketOrderColumns(
+      prefix: string,
+      classificationCondition: string,
+    ): string {
+      return `
+          COALESCE(SUM(total_amount) FILTER (WHERE status = $3${classificationCondition}), 0)::text AS ${prefix}_paid_revenue,
+          COUNT(*) FILTER (WHERE status = $3${classificationCondition})::text AS ${prefix}_paid_orders,
+          COUNT(*) FILTER (WHERE status = $4${classificationCondition})::text AS ${prefix}_cancelled_orders,
+          COALESCE(SUM(total_amount) FILTER (WHERE status = $4${classificationCondition}), 0)::text AS ${prefix}_cancelled_revenue,
+          COALESCE(SUM(total_amount) FILTER (
+            WHERE (status = $3 OR (status = $4 AND total_amount > 0))${classificationCondition}
+          ), 0)::text AS ${prefix}_gross_sales_revenue,
+          COUNT(*) FILTER (
+            WHERE (status = $3 OR (status = $4 AND total_amount > 0))${classificationCondition}
+          )::text AS ${prefix}_gross_sales_orders,
+          COUNT(*) FILTER (WHERE (status = $3 OR status = $4)${classificationCondition})::text AS ${prefix}_raw_orders`;
+    }
 
     const [orderRow] = await this.dataSource.query<
-      Array<{
-        paid_revenue: string;
-        paid_orders: string;
-        cancelled_orders: string;
-        cancelled_revenue: string;
-        gross_sales_revenue: string;
-        gross_sales_orders: string;
-      }>
+      Array<Record<string, string>>
     >(
       `SELECT
-          COALESCE(SUM(total_amount) FILTER (WHERE status = $3), 0)::text AS paid_revenue,
-          COUNT(*) FILTER (WHERE status = $3)::text AS paid_orders,
-          COUNT(*) FILTER (WHERE status = $4)::text AS cancelled_orders,
-          COALESCE(SUM(total_amount) FILTER (WHERE status = $4), 0)::text AS cancelled_revenue,
-          COALESCE(SUM(total_amount) FILTER (
-            WHERE status = $3 OR (status = $4 AND total_amount > 0)
-          ), 0)::text AS gross_sales_revenue,
-          COUNT(*) FILTER (
-            WHERE status = $3 OR (status = $4 AND total_amount > 0)
-          )::text AS gross_sales_orders
+          ${bucketOrderColumns('full', ' AND logistics_classification = $6')},
+          ${bucketOrderColumns('non_full', ' AND logistics_classification = $7')},
+          ${bucketOrderColumns('unknown', ' AND logistics_classification = $8')},
+          ${bucketOrderColumns('total', '')}
         FROM marketplace_orders
         WHERE marketplace_account_id = ANY($1)
-          AND logistics_classification = $6
           AND date_created >= $2::timestamptz
           AND date_created < $5::timestamptz`,
-      [
-        accountIds,
-        window.from,
-        PAID_ORDER_STATUS,
-        CANCELLED_ORDER_STATUS,
-        window.to,
-        LOGISTICS_MARKETPLACE_FULFILLED,
-      ],
+      params,
     );
 
+    function bucketItemColumns(
+      prefix: string,
+      classificationCondition: string,
+    ): string {
+      return `
+          COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = $3${classificationCondition}), 0)::text AS ${prefix}_paid_units,
+          COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = $4${classificationCondition}), 0)::text AS ${prefix}_cancelled_units,
+          COALESCE(SUM(oi.quantity) FILTER (
+            WHERE (o.status = $3 OR (o.status = $4 AND o.total_amount > 0))${classificationCondition}
+          ), 0)::text AS ${prefix}_gross_sales_units`;
+    }
+
     const [itemRow] = await this.dataSource.query<
-      Array<{
-        paid_units: string;
-        cancelled_units: string;
-        gross_sales_units: string;
-      }>
+      Array<Record<string, string>>
     >(
       `SELECT
-          COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = $2), 0)::text AS paid_units,
-          COALESCE(SUM(oi.quantity) FILTER (WHERE o.status = $5), 0)::text AS cancelled_units,
-          COALESCE(SUM(oi.quantity) FILTER (
-            WHERE o.status = $2 OR (o.status = $5 AND o.total_amount > 0)
-          ), 0)::text AS gross_sales_units
+          ${bucketItemColumns('full', ' AND o.logistics_classification = $6')},
+          ${bucketItemColumns('non_full', ' AND o.logistics_classification = $7')},
+          ${bucketItemColumns('unknown', ' AND o.logistics_classification = $8')},
+          ${bucketItemColumns('total', '')}
         FROM marketplace_order_items oi
         INNER JOIN marketplace_orders o ON o.id = oi.order_id
         WHERE o.marketplace_account_id = ANY($1)
-          AND o.logistics_classification = $6
-          AND o.status IN ($2, $5)
-          AND o.date_created >= $3::timestamptz
-          AND o.date_created < $4::timestamptz`,
-      [
-        accountIds,
-        PAID_ORDER_STATUS,
-        window.from,
-        window.to,
-        CANCELLED_ORDER_STATUS,
-        LOGISTICS_MARKETPLACE_FULFILLED,
-      ],
+          AND o.status IN ($3, $4)
+          AND o.date_created >= $2::timestamptz
+          AND o.date_created < $5::timestamptz`,
+      params,
     );
 
+    function buildGroup(prefix: string): AnalyticsFullPeriodTotals {
+      return {
+        paidRevenueCents: decimalCurrencyToCents(
+          orderRow[`${prefix}_paid_revenue`],
+        ),
+        paidOrders: Number(orderRow[`${prefix}_paid_orders`]),
+        paidUnits: Number(itemRow[`${prefix}_paid_units`]),
+        cancelledOrders: Number(orderRow[`${prefix}_cancelled_orders`]),
+        cancelledRevenueCents: decimalCurrencyToCents(
+          orderRow[`${prefix}_cancelled_revenue`],
+        ),
+        cancelledUnits: Number(itemRow[`${prefix}_cancelled_units`]),
+        grossSalesRevenueCents: decimalCurrencyToCents(
+          orderRow[`${prefix}_gross_sales_revenue`],
+        ),
+        grossSalesOrders: Number(orderRow[`${prefix}_gross_sales_orders`]),
+        grossSalesUnits: Number(itemRow[`${prefix}_gross_sales_units`]),
+      };
+    }
+
     return {
-      paidRevenueCents: decimalCurrencyToCents(orderRow.paid_revenue),
-      paidOrders: Number(orderRow.paid_orders),
-      paidUnits: Number(itemRow.paid_units),
-      grossSalesRevenueCents: decimalCurrencyToCents(
-        orderRow.gross_sales_revenue,
-      ),
-      grossSalesOrders: Number(orderRow.gross_sales_orders),
-      grossSalesUnits: Number(itemRow.gross_sales_units),
-      cancelledOrders: Number(orderRow.cancelled_orders),
-      cancelledUnits: Number(itemRow.cancelled_units),
-      cancelledRevenueCents: decimalCurrencyToCents(orderRow.cancelled_revenue),
+      full: buildGroup('full'),
+      nonFull: buildGroup('non_full'),
+      unknown: buildGroup('unknown'),
+      total: buildGroup('total'),
+      classifiedOrders:
+        Number(orderRow.full_raw_orders) + Number(orderRow.non_full_raw_orders),
+      unclassifiedOrders: Number(orderRow.unknown_raw_orders),
     };
   }
 

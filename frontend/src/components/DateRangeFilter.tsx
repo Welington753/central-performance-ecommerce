@@ -10,11 +10,18 @@ import {
   validateDateRangeStrings,
   type PeriodPresetKey,
 } from "@/lib/date-range";
+import { formatCalendarDate } from "@/lib/kpi-format";
 
 interface DateRangeFilterProps {
   from: string;
   to: string;
   allTime?: boolean;
+  /**
+   * Datas REAIS aplicadas pelo backend quando `allTime` está ativo (Fase 4,
+   * item 1) — vêm de `period.from`/`period.to` da resposta, nunca inventadas
+   * no cliente. `undefined` enquanto a resposta ainda não chegou.
+   */
+  resolvedAllTimePeriod?: { from: string; to: string };
   onChange: (range: { from: string; to: string }) => void;
   onAllTimeChange?: () => void;
 }
@@ -39,6 +46,7 @@ export function DateRangeFilter({
   from,
   to,
   allTime = false,
+  resolvedAllTimePeriod,
   onChange,
   onAllTimeChange,
 }: DateRangeFilterProps) {
@@ -149,10 +157,25 @@ export function DateRangeFilter({
       </div>
 
       {allTime ? (
-        <p className="border-t border-border-subtle pt-3 text-sm text-foreground/60">
-          Consultando da primeira à última venda registrada — sem comparação
-          com período anterior.
-        </p>
+        <div className="flex flex-col gap-1 border-t border-border-subtle pt-3 text-sm text-foreground/60">
+          {resolvedAllTimePeriod ? (
+            <p>
+              Período consultado:{" "}
+              <span className="font-medium text-foreground">
+                {formatCalendarDate(resolvedAllTimePeriod.from)} a{" "}
+                {formatCalendarDate(resolvedAllTimePeriod.to)}
+              </span>
+            </p>
+          ) : null}
+          <p>
+            Consultando da primeira à última venda registrada — sem
+            comparação com período anterior.
+          </p>
+          <p>
+            Todo o período disponível no sistema — pode não representar todo
+            o histórico da conta no marketplace.
+          </p>
+        </div>
       ) : customOpen ? (
         <div className="flex flex-col gap-3 border-t border-border-subtle pt-3 sm:flex-row sm:items-end sm:gap-4">
           <label className="flex flex-col gap-1 text-sm">

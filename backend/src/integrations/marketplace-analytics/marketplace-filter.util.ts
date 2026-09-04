@@ -11,7 +11,10 @@ export const MARKETPLACE_FILTER_ALL = 'ALL' as const;
 export type MarketplaceFilter = typeof MARKETPLACE_FILTER_ALL | Marketplace;
 
 export type MarketplaceAnalyticsErrorCode =
-  'INVALID_MARKETPLACE' | 'INVALID_ACCOUNT_ID' | 'ACCOUNT_MARKETPLACE_CONFLICT';
+  | 'INVALID_MARKETPLACE'
+  | 'INVALID_ACCOUNT_ID'
+  | 'ACCOUNT_MARKETPLACE_CONFLICT'
+  | 'INVALID_LOGISTICS_SCOPE';
 
 /**
  * Vocabulário fechado de erro — a mensagem da exceção É o código; nunca

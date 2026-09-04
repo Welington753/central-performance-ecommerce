@@ -193,6 +193,21 @@ export interface AnalyticsFullRankingEntry {
   unitsSharePct: number;
 }
 
+// "Full x sem Full" (Fase 4): grupo genérico sem os percentuais de
+// participação (só fazem sentido para o grupo Full em si).
+export interface LogisticsGroupSummary {
+  grossSalesRevenue: string;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  paidRevenue: string;
+  paidOrders: number;
+  paidUnits: number;
+  averageTicket: string;
+  cancelledOrders: number;
+  cancelledUnits: number;
+  cancelledRevenue: string;
+}
+
 export interface MarketplaceAnalyticsFull {
   coverage: FullClassificationCoverage;
   classifiedOrders: number;
@@ -201,13 +216,19 @@ export interface MarketplaceAnalyticsFull {
   comparison: AnalyticsFullComparison | null;
   dailySeries: AnalyticsFullDailyPoint[];
   ranking: AnalyticsFullRankingEntry[];
+  nonFullSummary: LogisticsGroupSummary | null;
+  unknownSummary: LogisticsGroupSummary | null;
+  totalSummary: LogisticsGroupSummary | null;
 }
+
+export type LogisticsScopeFilter = "ALL" | "FULL" | "NON_FULL";
 
 export interface MarketplaceAnalyticsKpisDto {
   scope: {
     marketplace: MarketplaceFilter;
     accountId: string | null;
     allTime: boolean;
+    logisticsScope: LogisticsScopeFilter;
   };
   availability: SourceAvailability;
   period: { days: number; timeZone: string; from: string; to: string };

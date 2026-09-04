@@ -18,6 +18,7 @@ import { mapAmazonOrder } from '../amazon-orders/amazon-order.mapper';
 import { MarketplaceOrdersPersistenceService } from '../marketplace-orders/marketplace-orders-persistence.service';
 import { MarketplaceAnalyticsService } from './marketplace-analytics.service';
 import { toMarketplaceAnalyticsResponse } from './dto/marketplace-analytics-response.dto';
+import { MarketplaceAnalyticsFilterError } from './marketplace-filter.util';
 
 const REFERENCE_NOW = new Date('2026-09-01T12:00:00.000Z');
 const IN_CURRENT = new Date('2026-08-20T12:00:00.000Z');
@@ -1896,6 +1897,342 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(dto.full).not.toBeNull();
       expect(dto.full?.coverage).toBe('unknown');
       expect(dto.full?.summary).toBeNull();
+    });
+  });
+
+  describe('logisticsScope (Fase 4, "Full x sem Full")', () => {
+    async function seedThreeGroupOrders(accountId: string) {
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLA1',
+            sellerSku: 'SKU-FULL',
+            title: 'Produto Full',
+            quantity: 1,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'seller-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [
+          {
+            externalItemId: 'MLA2',
+            sellerSku: 'SKU-SELLER',
+            title: 'Produto Seller',
+            quantity: 1,
+            unitPrice: '50.00',
+          },
+        ],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'unknown-1',
+        status: 'paid',
+        totalAmount: '20.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'UNKNOWN',
+        items: [
+          {
+            externalItemId: 'MLA3',
+            sellerSku: 'SKU-UNKNOWN',
+            title: 'Produto Não Classificado',
+            quantity: 1,
+            unitPrice: '20.00',
+          },
+        ],
+      });
+    }
+
+    it('ALL (default) never filters — root summary matches the sum of all three groups', async () => {
+      const accountId = await seedAccount();
+      await seedThreeGroupOrders(accountId);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.scope.logisticsScope).toBe('ALL');
+      expect(dto.summary?.grossRevenue).toBe('170.00');
+      expect(dto.summary?.orders).toBe(3);
+    });
+
+    it('FULL restricts the root summary/ranking to MARKETPLACE_FULFILLED only', async () => {
+      const accountId = await seedAccount();
+      await seedThreeGroupOrders(accountId);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId, marketplace: 'MERCADO_LIVRE', logisticsScope: 'FULL' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.scope.logisticsScope).toBe('FULL');
+      expect(dto.summary?.grossRevenue).toBe('100.00');
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.topProductsBySku).toHaveLength(1);
+      expect(dto.topProductsBySku[0].sku).toBe('SKU-FULL');
+    });
+
+    it('NON_FULL restricts the root summary to SELLER_FULFILLED only — UNKNOWN never leaks in', async () => {
+      const accountId = await seedAccount();
+      await seedThreeGroupOrders(accountId);
+
+      const aggregate = await analyticsService.getAggregate(
+        {
+          accountId,
+          marketplace: 'MERCADO_LIVRE',
+          logisticsScope: 'NON_FULL',
+        },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.grossRevenue).toBe('50.00');
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.topProductsBySku.map((p) => p.sku)).toEqual(['SKU-SELLER']);
+      expect(dto.topProductsBySku.map((p) => p.sku)).not.toContain(
+        'SKU-UNKNOWN',
+      );
+    });
+
+    it('rejects FULL/NON_FULL when marketplace is not MERCADO_LIVRE (e.g. ALL)', async () => {
+      const accountId = await seedAccount();
+      await expect(
+        analyticsService.getAggregate(
+          { accountId, logisticsScope: 'FULL' },
+          REFERENCE_NOW,
+        ),
+      ).rejects.toBeInstanceOf(MarketplaceAnalyticsFilterError);
+    });
+
+    it('rejects an unknown logisticsScope value', async () => {
+      await expect(
+        analyticsService.getAggregate(
+          { logisticsScope: 'FLEX' },
+          REFERENCE_NOW,
+        ),
+      ).rejects.toMatchObject({ code: 'INVALID_LOGISTICS_SCOPE' });
+    });
+
+    it('the Full comparison section (full.*) is unaffected by logisticsScope — always shows all three groups', async () => {
+      const accountId = await seedAccount();
+      await seedThreeGroupOrders(accountId);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId, marketplace: 'MERCADO_LIVRE', logisticsScope: 'FULL' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      // O root já está restrito a Full (100.00) — mas o comparativo continua
+      // mostrando os três grupos por completo.
+      expect(dto.full?.summary?.paidRevenue).toBe('100.00');
+      expect(dto.full?.nonFullSummary?.paidRevenue).toBe('50.00');
+      expect(dto.full?.unknownSummary?.paidRevenue).toBe('20.00');
+      expect(dto.full?.totalSummary?.paidRevenue).toBe('170.00');
+    });
+
+    it('invariant: total = full + nonFull + unknown for revenue, orders and units', async () => {
+      const accountId = await seedAccount();
+      await seedThreeGroupOrders(accountId);
+      // Um cancelado com valor válido em cada grupo, para exercitar
+      // vendas brutas/cancelamentos também.
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-cancelled',
+        status: 'cancelled',
+        totalAmount: '30.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+      const full = dto.full!;
+
+      const sum = (
+        field: 'paidRevenue' | 'grossSalesRevenue' | 'cancelledRevenue',
+      ) =>
+        Number(full.summary![field]) +
+        Number(full.nonFullSummary![field]) +
+        Number(full.unknownSummary![field]);
+
+      expect(sum('paidRevenue').toFixed(2)).toBe(
+        full.totalSummary!.paidRevenue,
+      );
+      expect(sum('grossSalesRevenue').toFixed(2)).toBe(
+        full.totalSummary!.grossSalesRevenue,
+      );
+      expect(sum('cancelledRevenue').toFixed(2)).toBe(
+        full.totalSummary!.cancelledRevenue,
+      );
+      expect(
+        full.summary!.paidOrders +
+          full.nonFullSummary!.paidOrders +
+          full.unknownSummary!.paidOrders,
+      ).toBe(full.totalSummary!.paidOrders);
+      expect(
+        full.summary!.paidUnits +
+          full.nonFullSummary!.paidUnits +
+          full.unknownSummary!.paidUnits,
+      ).toBe(full.totalSummary!.paidUnits);
+    });
+
+    it('coverage is never "complete" while there is any UNKNOWN order in the period', async () => {
+      const accountId = await seedAccount();
+      await seedThreeGroupOrders(accountId);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.full?.unclassifiedOrders).toBeGreaterThan(0);
+      expect(dto.full?.coverage).not.toBe('complete');
+    });
+
+    it('persists across two Mercado Livre accounts (Meli 1, Meli 2) independently and consolidated', async () => {
+      const accountA = await seedAccount({ externalSellerId: '111' });
+      const accountB = await seedAccount({ externalSellerId: '222' });
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: 'a-full',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: accountB,
+        externalOrderId: 'b-full',
+        status: 'paid',
+        totalAmount: '40.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const dtoA = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          {
+            accountId: accountA,
+            marketplace: 'MERCADO_LIVRE',
+            logisticsScope: 'FULL',
+          },
+          REFERENCE_NOW,
+        ),
+      );
+      const dtoB = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          {
+            accountId: accountB,
+            marketplace: 'MERCADO_LIVRE',
+            logisticsScope: 'FULL',
+          },
+          REFERENCE_NOW,
+        ),
+      );
+      const dtoBoth = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { marketplace: 'MERCADO_LIVRE', logisticsScope: 'FULL' },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(dtoA.summary?.grossRevenue).toBe('100.00');
+      expect(dtoB.summary?.grossRevenue).toBe('40.00');
+      expect(dtoBoth.summary?.grossRevenue).toBe('140.00');
+    });
+  });
+
+  describe('período efetivamente consultado (Fase 4, "Todo o período" — item 1)', () => {
+    it('allTime returns the real first/last order dates as period.from/to — never the request date', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'oldest',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: new Date('2026-07-04T12:00:00.000Z'),
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'newest',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: new Date('2026-09-04T09:00:00.000Z'),
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId, allTime: true },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.period.from).toBe('2026-07-04');
+      expect(dto.period.to).toBe('2026-09-04');
+    });
+
+    it('the allTime window is resolved from marketplace/account scope BEFORE the logistics filter is applied — Full-only orders still see the true first/last date', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'seller-oldest',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: new Date('2026-01-01T12:00:00.000Z'),
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-newest',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: new Date('2026-08-01T12:00:00.000Z'),
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        {
+          accountId,
+          marketplace: 'MERCADO_LIVRE',
+          allTime: true,
+          logisticsScope: 'FULL',
+        },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      // A janela cobre da MENOR à MAIOR data do escopo conta/marketplace —
+      // não recalculada só a partir dos pedidos Full.
+      expect(dto.period.from).toBe('2026-01-01');
+      expect(dto.period.to).toBe('2026-08-01');
+      // Mas o resumo em si já reflete só o Full, dentro dessa mesma janela.
+      expect(dto.summary?.orders).toBe(1);
     });
   });
 });

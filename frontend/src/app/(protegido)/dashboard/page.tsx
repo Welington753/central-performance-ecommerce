@@ -11,6 +11,7 @@ import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
 import { FullPerformanceSection } from "@/components/FullPerformanceSection";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
+import { LogisticsScopeFilter } from "@/components/LogisticsScopeFilter";
 import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { OperationalKpiCards } from "@/components/OperationalKpiCards";
 import { ProductRankingTabs } from "@/components/ProductRankingTabs";
@@ -30,6 +31,7 @@ import { formatDateTimeSaoPaulo } from "@/lib/kpi-format";
 import type {
   AccountBreakdownEntry,
   AnalyticsComparison,
+  LogisticsScopeFilter as LogisticsScopeValue,
   MarketplaceAnalyticsKpisDto,
   MarketplaceFilter,
 } from "@/types/marketplace-analytics";
@@ -189,6 +191,25 @@ function readAllTimeFromParams(searchParams: URLSearchParams): boolean {
   return searchParams.get("period") === "all";
 }
 
+const LOGISTICS_SCOPE_VALUES: LogisticsScopeValue[] = ["ALL", "FULL", "NON_FULL"];
+
+/**
+ * `FULL`/`NON_FULL` só existem dentro do escopo Mercado Livre (Fase 4, item
+ * 2) — qualquer outro marketplace (ou "Todos os marketplaces") sempre
+ * restaura `ALL`, mesmo que a URL traga um valor diferente.
+ */
+function readLogisticsScopeFromParams(
+  searchParams: URLSearchParams,
+  marketplace: MarketplaceFilter,
+): LogisticsScopeValue {
+  if (marketplace !== "MERCADO_LIVRE") return "ALL";
+  const raw = searchParams.get("logistics");
+  if (raw && (LOGISTICS_SCOPE_VALUES as string[]).includes(raw)) {
+    return raw as LogisticsScopeValue;
+  }
+  return "ALL";
+}
+
 function scopeTitle(marketplace: MarketplaceFilter): string {
   switch (marketplace) {
     case "ALL":
@@ -246,6 +267,7 @@ function DashboardContent() {
   const marketplace = readMarketplaceFromParams(searchParams);
   const accountId = readAccountIdFromParams(searchParams);
   const allTime = readAllTimeFromParams(searchParams);
+  const logisticsScope = readLogisticsScopeFromParams(searchParams, marketplace);
 
   const loadScope = useCallback(
     async (
@@ -253,14 +275,22 @@ function DashboardContent() {
       to: string | null,
       mkt: MarketplaceFilter,
       allTimeFlag: boolean,
+      logistics: LogisticsScopeValue,
     ) => {
       const seq = ++scopeRequestSeqRef.current;
-      const key = allTimeFlag ? `ALLTIME|${mkt}` : `${mkt}|${from}|${to}`;
+      const key = allTimeFlag
+        ? `ALLTIME|${mkt}|${logistics}`
+        : `${mkt}|${logistics}|${from}|${to}`;
       try {
         const data = await fetchMarketplaceAnalyticsKpis(
           allTimeFlag
-            ? { marketplace: mkt, allTime: true }
-            : { from: from as string, to: to as string, marketplace: mkt },
+            ? { marketplace: mkt, allTime: true, logisticsScope: logistics }
+            : {
+                from: from as string,
+                to: to as string,
+                marketplace: mkt,
+                logisticsScope: logistics,
+              },
         );
         // Uma requisição mais nova já começou enquanto esta estava em voo —
         // esta resposta chegou tarde demais e nunca pode substituir o
@@ -290,9 +320,9 @@ function DashboardContent() {
     // `setState` roda de forma síncrona no corpo deste efeito.
     if (!allTime && (!effectiveFrom || !effectiveTo)) return;
     void (async () => {
-      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime);
+      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope);
     })();
-  }, [effectiveFrom, effectiveTo, marketplace, allTime, loadScope]);
+  }, [effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope, loadScope]);
 
   const loadAccountScoped = useCallback(
     async (
@@ -301,20 +331,27 @@ function DashboardContent() {
       mkt: MarketplaceFilter,
       account: string,
       allTimeFlag: boolean,
+      logistics: LogisticsScopeValue,
     ) => {
       const seq = ++accountScopedRequestSeqRef.current;
       const key = allTimeFlag
-        ? `ALLTIME|${mkt}|${account}`
-        : `${mkt}|${account}|${from}|${to}`;
+        ? `ALLTIME|${mkt}|${account}|${logistics}`
+        : `${mkt}|${account}|${logistics}|${from}|${to}`;
       try {
         const data = await fetchMarketplaceAnalyticsKpis(
           allTimeFlag
-            ? { marketplace: mkt, accountId: account, allTime: true }
+            ? {
+                marketplace: mkt,
+                accountId: account,
+                allTime: true,
+                logisticsScope: logistics,
+              }
             : {
                 from: from as string,
                 to: to as string,
                 marketplace: mkt,
                 accountId: account,
+                logisticsScope: logistics,
               },
         );
         if (accountScopedRequestSeqRef.current !== seq) return;
@@ -343,14 +380,23 @@ function DashboardContent() {
         marketplace,
         accountId,
         allTime,
+        logisticsScope,
       );
     })();
-  }, [effectiveFrom, effectiveTo, marketplace, accountId, allTime, loadAccountScoped]);
+  }, [
+    effectiveFrom,
+    effectiveTo,
+    marketplace,
+    accountId,
+    allTime,
+    logisticsScope,
+    loadAccountScoped,
+  ]);
 
   const scopeRequestExpectedKey = allTime
-    ? `ALLTIME|${marketplace}`
+    ? `ALLTIME|${marketplace}|${logisticsScope}`
     : effectiveFrom && effectiveTo
-      ? `${marketplace}|${effectiveFrom}|${effectiveTo}`
+      ? `${marketplace}|${logisticsScope}|${effectiveFrom}|${effectiveTo}`
       : null;
   const scopeLoading =
     scopeRequestExpectedKey !== null && scopeRequestKey !== scopeRequestExpectedKey;
@@ -358,9 +404,9 @@ function DashboardContent() {
   const accountRequestExpectedKey = !accountId
     ? null
     : allTime
-      ? `ALLTIME|${marketplace}|${accountId}`
+      ? `ALLTIME|${marketplace}|${accountId}|${logisticsScope}`
       : effectiveFrom && effectiveTo
-        ? `${marketplace}|${accountId}|${effectiveFrom}|${effectiveTo}`
+        ? `${marketplace}|${accountId}|${logisticsScope}|${effectiveFrom}|${effectiveTo}`
         : null;
   const accountScopedLoading =
     accountRequestExpectedKey !== null &&
@@ -399,6 +445,23 @@ function DashboardContent() {
     } else {
       params.delete("accountId");
     }
+    // Trocar para qualquer marketplace/escopo que não seja Mercado Livre
+    // restaura o filtro "Tipo de venda" para "Todas as vendas" (Fase 4,
+    // item 2) — nunca deixa `logistics=FULL`/`NON_FULL` pendurado na URL
+    // fora do escopo em que faz sentido.
+    if (next.marketplace !== "MERCADO_LIVRE") {
+      params.delete("logistics");
+    }
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
+  }
+
+  function handleLogisticsScopeChange(next: LogisticsScopeValue) {
+    const params = new URLSearchParams(searchParams.toString());
+    if (next === "ALL") {
+      params.delete("logistics");
+    } else {
+      params.set("logistics", next);
+    }
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }
 
@@ -411,9 +474,10 @@ function DashboardContent() {
         marketplace,
         accountId,
         allTime,
+        logisticsScope,
       );
     } else {
-      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime);
+      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope);
     }
   }
 
@@ -469,7 +533,7 @@ function DashboardContent() {
           message="Não foi possível carregar os dados de marketplaces. Tente novamente mais tarde."
           onRetry={() =>
             (allTime || (effectiveFrom && effectiveTo)) &&
-            void loadScope(effectiveFrom, effectiveTo, marketplace, allTime)
+            void loadScope(effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope)
           }
         />
       </div>
@@ -552,11 +616,23 @@ function DashboardContent() {
         onChange={handleScopeChange}
       />
 
+      {marketplace === "MERCADO_LIVRE" ? (
+        <LogisticsScopeFilter
+          value={logisticsScope}
+          onChange={handleLogisticsScopeChange}
+        />
+      ) : null}
+
       {effectivePeriod ? (
         <DateRangeFilter
           from={effectivePeriod.from}
           to={effectivePeriod.to}
           allTime={allTime}
+          resolvedAllTimePeriod={
+            allTime && displayData
+              ? { from: displayData.period.from, to: displayData.period.to }
+              : undefined
+          }
           onChange={handlePeriodChange}
           onAllTimeChange={handleAllTimeChange}
         />

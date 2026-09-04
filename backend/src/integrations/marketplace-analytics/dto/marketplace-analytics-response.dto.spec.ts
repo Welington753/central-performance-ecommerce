@@ -26,7 +26,12 @@ function aggregate(
   overrides: Partial<MarketplaceAnalyticsAggregate> = {},
 ): MarketplaceAnalyticsAggregate {
   return {
-    scope: { marketplace: 'ALL', accountId: null, allTime: false },
+    scope: {
+      marketplace: 'ALL',
+      accountId: null,
+      allTime: false,
+      logisticsScope: 'ALL',
+    },
     availability: 'AVAILABLE',
     currentWindow: {
       from: new Date('2026-08-02T03:00:00.000Z'),
@@ -328,6 +333,7 @@ describe('toMarketplaceAnalyticsResponse', () => {
       marketplace: 'ALL',
       accountId: null,
       allTime: false,
+      logisticsScope: 'ALL',
     });
     expect(dto.period).toEqual({
       days: 30,

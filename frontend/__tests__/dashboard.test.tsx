@@ -78,7 +78,7 @@ function analyticsDto(
   overrides: Partial<MarketplaceAnalyticsKpisDto> = {},
 ): MarketplaceAnalyticsKpisDto {
   return {
-    scope: { marketplace: "ALL", accountId: null, allTime: false },
+    scope: { marketplace: "ALL", accountId: null, allTime: false , logisticsScope: "ALL" },
     availability: "AVAILABLE",
     period: { days: 30, timeZone: "America/Sao_Paulo", from: "2026-08-03", to: "2026-09-01" },
     comparisonPeriod: { days: 30, from: "2026-07-04", to: "2026-08-02" },
@@ -341,7 +341,7 @@ describe("DashboardPage", () => {
   it("persists marketplace and accountId already present in the URL, and forwards them to the fetch", async () => {
     mockSearchParams({ marketplace: "MERCADO_LIVRE", accountId: "acc-1", from: "2026-08-01", to: "2026-08-31" });
     (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
-      analyticsDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: "acc-1", allTime: false } }),
+      analyticsDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: "acc-1", allTime: false , logisticsScope: "ALL" } }),
     );
     render(<DashboardPage />);
     await waitFor(() =>
@@ -350,6 +350,7 @@ describe("DashboardPage", () => {
         to: "2026-08-31",
         marketplace: "MERCADO_LIVRE",
         accountId: "acc-1",
+        logisticsScope: "ALL",
       }),
     );
     expect(screen.getByText(/desempenho do mercado livre/i)).toBeInTheDocument();
@@ -500,7 +501,7 @@ describe("DashboardPage", () => {
       // B termina primeiro.
       resolveB(
         analyticsDto({
-          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false },
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false , logisticsScope: "ALL" },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "222.00",
@@ -515,7 +516,7 @@ describe("DashboardPage", () => {
       // A termina depois (mais devagar) — nunca pode substituir B.
       resolveA(
         analyticsDto({
-          scope: { marketplace: "ALL", accountId: null, allTime: false },
+          scope: { marketplace: "ALL", accountId: null, allTime: false , logisticsScope: "ALL" },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "111.00",
@@ -575,7 +576,7 @@ describe("DashboardPage", () => {
       // B (acc-2) termina primeiro.
       resolveAcc2(
         analyticsDto({
-          scope: { marketplace: "ALL", accountId: "acc-2", allTime: false },
+          scope: { marketplace: "ALL", accountId: "acc-2", allTime: false , logisticsScope: "ALL" },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "222.00",
@@ -590,7 +591,7 @@ describe("DashboardPage", () => {
       // A (acc-1) termina depois — nunca pode substituir B.
       resolveAcc1(
         analyticsDto({
-          scope: { marketplace: "ALL", accountId: "acc-1", allTime: false },
+          scope: { marketplace: "ALL", accountId: "acc-1", allTime: false , logisticsScope: "ALL" },
           summary: {
             ...analyticsDto().summary!,
             grossRevenue: "111.00",
@@ -642,6 +643,31 @@ describe("DashboardPage", () => {
             unitsSharePct: 87.5,
           },
         ],
+        nonFullSummary: {
+          grossSalesRevenue: "300.00",
+          grossSalesOrders: 3,
+          grossSalesUnits: 5,
+          paidRevenue: "300.00",
+          paidOrders: 3,
+          paidUnits: 5,
+          averageTicket: "100.00",
+          cancelledOrders: 0,
+          cancelledUnits: 0,
+          cancelledRevenue: "0.00",
+        },
+        unknownSummary: null,
+        totalSummary: {
+          grossSalesRevenue: "800.00",
+          grossSalesOrders: 8,
+          grossSalesUnits: 13,
+          paidRevenue: "780.00",
+          paidOrders: 7,
+          paidUnits: 12,
+          averageTicket: "111.43",
+          cancelledOrders: 1,
+          cancelledUnits: 1,
+          cancelledRevenue: "20.00",
+        },
         ...overrides,
       };
     }
@@ -694,6 +720,135 @@ describe("DashboardPage", () => {
         screen.getByText(/Nenhum pedido Full comprovado neste período ainda/),
       ).toBeInTheDocument();
       expect(screen.queryByTestId("full-kpi-card-paid-revenue")).not.toBeInTheDocument();
+    });
+
+    it("renders the Full x sem Full x total comparison table with all three columns", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({ full: fullDto() }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Full x vendas sem Full x total geral");
+      expect(screen.getByText("Vendas brutas (R$)")).toBeInTheDocument();
+      const table = screen.getByText("Vendas brutas (R$)").closest("table")!;
+      expect(within(table).getByText("Full")).toBeInTheDocument();
+      expect(within(table).getByText("Vendas sem Full")).toBeInTheDocument();
+      expect(within(table).getByText("Total geral")).toBeInTheDocument();
+    });
+
+    it("shows the amber unknown indicator with value/orders/units when there is any unclassified order", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({
+          full: fullDto({
+            classifiedOrders: 3,
+            unclassifiedOrders: 2,
+            unknownSummary: {
+              grossSalesRevenue: "40.00",
+              grossSalesOrders: 2,
+              grossSalesUnits: 2,
+              paidRevenue: "40.00",
+              paidOrders: 2,
+              paidUnits: 2,
+              averageTicket: "20.00",
+              cancelledOrders: 0,
+              cancelledUnits: 0,
+              cancelledRevenue: "0.00",
+            },
+          }),
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+      expect(screen.getByText(/2 pedido\(s\) ainda não classificado/)).toBeInTheDocument();
+      expect(
+        screen.getByText(/R\$\s?40,00 em vendas brutas, 2 pedido\(s\), 2 unidade\(s\)/),
+      ).toBeInTheDocument();
+    });
+
+    it("confirms Full + sem Full = total when there is no unclassified order", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({ full: fullDto({ classifiedOrders: 10, unclassifiedOrders: 0 }) }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+      expect(
+        screen.getByText(/Full \+ vendas sem Full = total das vendas/),
+      ).toBeInTheDocument();
+    });
+  });
+
+  describe("filtro Tipo de venda / logisticsScope (Fase 4)", () => {
+    it("only shows the logistics filter when marketplace is MERCADO_LIVRE", async () => {
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" },
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+      expect(screen.getByRole("group", { name: "Tipo de venda" })).toBeInTheDocument();
+    });
+
+    it("hides the logistics filter for ALL/Amazon/Shopee", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+      expect(screen.queryByRole("group", { name: "Tipo de venda" })).not.toBeInTheDocument();
+    });
+
+    it("clicking 'Somente Full' updates the URL and forwards logisticsScope=FULL to the fetch", async () => {
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" },
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+
+      const user = userEvent.setup();
+      await user.click(screen.getByRole("button", { name: "Somente Full" }));
+
+      expect(replaceMock).toHaveBeenLastCalledWith(
+        expect.stringContaining("logistics=FULL"),
+        expect.anything(),
+      );
+    });
+
+    it("switching marketplace away from MERCADO_LIVRE drops logistics from the URL (reset to ALL)", async () => {
+      mockSearchParams({ marketplace: "MERCADO_LIVRE", logistics: "FULL" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "FULL" },
+        }),
+      );
+      const user = userEvent.setup();
+      render(<DashboardPage />);
+      const select = await screen.findByLabelText("Marketplace");
+      await user.selectOptions(select, "AMAZON");
+
+      const [calledUrl] = replaceMock.mock.calls[replaceMock.mock.calls.length - 1] as [
+        string,
+      ];
+      expect(calledUrl).not.toMatch(/[?&]logistics=/);
+    });
+  });
+
+  describe("período efetivamente consultado (Fase 4, item 1)", () => {
+    it("shows the real backend-resolved dates when 'Todo o período' is selected", async () => {
+      mockSearchParams({ period: "all" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
+          period: { days: 62, timeZone: "America/Sao_Paulo", from: "2026-07-04", to: "2026-09-04" },
+          comparison: null,
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+      expect(
+        screen.getByText((_, node) => node?.textContent === "Período consultado: 04/07/2026 a 04/09/2026"),
+      ).toBeInTheDocument();
     });
   });
 });

@@ -3,6 +3,7 @@ import { EmptyStateIcon } from "@/components/EmptyState";
 import type {
   AnalyticsFullComparison,
   AnalyticsFullRankingEntry,
+  LogisticsGroupSummary,
   MarketplaceAnalyticsFull,
 } from "@/types/marketplace-analytics";
 
@@ -77,6 +78,105 @@ function CoverageNotice({ full }: { full: MarketplaceAnalyticsFull }) {
       {full.classifiedOrders + full.unclassifiedOrders} pedidos do período já
       foram classificados. Os números abaixo podem crescer conforme os
       pedidos restantes forem classificados numa próxima sincronização.
+    </div>
+  );
+}
+
+interface ComparisonRow {
+  label: string;
+  pick: (group: LogisticsGroupSummary) => string;
+}
+
+const COMPARISON_ROWS: ComparisonRow[] = [
+  { label: "Vendas brutas (R$)", pick: (g) => formatBRL(g.grossSalesRevenue) },
+  { label: "Quantidade de vendas", pick: (g) => String(g.grossSalesOrders) },
+  { label: "Unidades vendidas", pick: (g) => String(g.grossSalesUnits) },
+  { label: "Faturamento pago", pick: (g) => formatBRL(g.paidRevenue) },
+  { label: "Pedidos pagos", pick: (g) => String(g.paidOrders) },
+  { label: "Unidades pagas", pick: (g) => String(g.paidUnits) },
+  { label: "Cancelamentos — pedidos", pick: (g) => String(g.cancelledOrders) },
+  { label: "Cancelamentos — unidades", pick: (g) => String(g.cancelledUnits) },
+  { label: "Cancelamentos — valor", pick: (g) => formatBRL(g.cancelledRevenue) },
+];
+
+/**
+ * Comparativo Full x sem Full x total (Fase 4, item 4) — cada coluna é
+ * independentemente `null` quando aquele grupo não tem nenhum pedido no
+ * período; mostra "—", nunca um zero fabricado.
+ */
+function GroupComparisonTable({ full }: { full: MarketplaceAnalyticsFull }) {
+  const groups: Array<{ label: string; data: LogisticsGroupSummary | null }> = [
+    { label: "Full", data: full.summary },
+    { label: "Vendas sem Full", data: full.nonFullSummary },
+    { label: "Total geral", data: full.totalSummary },
+  ];
+
+  return (
+    <div className="overflow-x-auto rounded-xl border border-border-subtle bg-surface">
+      <table className="w-full min-w-[560px] text-left text-sm">
+        <thead>
+          <tr className="border-b border-border-subtle text-xs uppercase tracking-wide text-foreground/50">
+            <th scope="col" className="px-4 py-3 font-medium">
+              Indicador
+            </th>
+            {groups.map((group) => (
+              <th key={group.label} scope="col" className="px-4 py-3 font-medium">
+                {group.label}
+              </th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {COMPARISON_ROWS.map((row) => (
+            <tr key={row.label} className="border-b border-border-subtle last:border-0">
+              <td className="px-4 py-3 text-foreground/70">{row.label}</td>
+              {groups.map((group) => (
+                <td key={group.label} className="px-4 py-3">
+                  {group.data ? row.pick(group.data) : "—"}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/**
+ * Indicador âmbar de pedidos ainda não classificados (Fase 4, item 3) — só
+ * aparece quando `unclassifiedOrders > 0`; nunca oculta a diferença entre
+ * Full+sem Full e o total. Quando não há nenhum UNKNOWN, mostra a
+ * confirmação inversa (Full + sem Full = total).
+ */
+function UnknownIndicator({ full }: { full: MarketplaceAnalyticsFull }) {
+  if (full.unclassifiedOrders === 0) {
+    return (
+      <p className="text-sm text-green-700">
+        Nenhum pedido não classificado no período — Full + vendas sem Full =
+        total das vendas.
+      </p>
+    );
+  }
+
+  const unknown = full.unknownSummary;
+  return (
+    <div
+      role="status"
+      className="flex flex-col gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
+    >
+      <p>
+        {full.unclassifiedOrders} pedido(s) ainda não classificado(s) neste
+        período — Full e &quot;vendas sem Full&quot; continuam com cobertura
+        parcial; a diferença para o total nunca é escondida.
+      </p>
+      {unknown ? (
+        <p>
+          Não classificado: {formatBRL(unknown.grossSalesRevenue)} em vendas
+          brutas, {unknown.grossSalesOrders} pedido(s), {unknown.grossSalesUnits}{" "}
+          unidade(s).
+        </p>
+      ) : null}
     </div>
   );
 }
@@ -202,6 +302,14 @@ export function FullPerformanceSection({ full }: FullPerformanceSectionProps) {
     <div className="flex flex-col gap-6">
       <h2 className="text-lg font-semibold">Mercado Livre Full</h2>
       <CoverageNotice full={full} />
+
+      <div className="flex flex-col gap-3">
+        <h3 className="text-base font-semibold">
+          Full x vendas sem Full x total geral
+        </h3>
+        <GroupComparisonTable full={full} />
+        <UnknownIndicator full={full} />
+      </div>
 
       {full.summary ? (
         <>

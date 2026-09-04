@@ -65,7 +65,7 @@ function kpisDto(
   overrides: Partial<MarketplaceAnalyticsKpisDto> = {},
 ): MarketplaceAnalyticsKpisDto {
   return {
-    scope: { marketplace: "ALL", accountId: null, allTime: false },
+    scope: { marketplace: "ALL", accountId: null, allTime: false, logisticsScope: "ALL" },
     availability: "AVAILABLE",
     period: { days: 30, timeZone: "America/Sao_Paulo", from: "2026-08-01", to: "2026-08-30" },
     comparisonPeriod: { days: 30, from: "2026-07-01", to: "2026-07-31" },
@@ -279,7 +279,7 @@ describe("DashboardPage — resultado da sincronização", () => {
   it("preserva o período/marketplace do filtro atual ao recarregar os KPIs após sincronizar", async () => {
     mockSearchParams({ from: "2026-06-01", to: "2026-06-30", marketplace: "MERCADO_LIVRE" });
     await renderDashboardWithScope(
-      kpisDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false } }),
+      kpisDto({ scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" } }),
     );
     api.syncMercadoLivreOrders.mockResolvedValueOnce({ status: "SUCCESS" });
     api.fetchMarketplaceAnalyticsKpis.mockResolvedValueOnce(kpisDto());
@@ -292,6 +292,7 @@ describe("DashboardPage — resultado da sincronização", () => {
       from: "2026-06-01",
       to: "2026-06-30",
       marketplace: "MERCADO_LIVRE",
+      logisticsScope: "ALL",
     });
   });
 });
@@ -313,10 +314,10 @@ describe("DashboardPage — troca de filtro durante uma sincronização em andam
     await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
 
     // A resposta mais antiga (escopo ALL) chega DEPOIS da mais nova — nunca pode vencer.
-    first.resolve(kpisDto({ scope: { marketplace: "ALL", accountId: null, allTime: false } }));
+    first.resolve(kpisDto({ scope: { marketplace: "ALL", accountId: null, allTime: false, logisticsScope: "ALL" } }));
     second.resolve(
       kpisDto({
-        scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false },
+        scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" },
         breakdownByAccount: [account()],
       }),
     );
@@ -356,6 +357,7 @@ describe("DashboardPage — Todo o período (Fase 4)", () => {
       expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith({
         marketplace: "ALL",
         allTime: true,
+        logisticsScope: "ALL",
       }),
     );
   });
@@ -363,7 +365,7 @@ describe("DashboardPage — Todo o período (Fase 4)", () => {
   it("shows KPIs (not the empty-sync fallback) when allTime is true and comparison is null", async () => {
     api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(
       kpisDto({
-        scope: { marketplace: "ALL", accountId: null, allTime: true },
+        scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
         summary: {
           grossRevenue: "100.00",
           orders: 1,

@@ -14,6 +14,7 @@ import type {
   MercadoLivreSyncSummary,
 } from "@/types/mercado-livre-kpis";
 import type {
+  LogisticsScopeFilter,
   MarketplaceAnalyticsKpisDto,
   MarketplaceFilter,
 } from "@/types/marketplace-analytics";
@@ -204,6 +205,8 @@ export interface MarketplaceAnalyticsQuery {
   marketplace?: MarketplaceFilter;
   accountId?: string;
   allTime?: boolean;
+  /** Ausente/`ALL` preserva compatibilidade — ver `LogisticsScopeFilter`. */
+  logisticsScope?: LogisticsScopeFilter;
 }
 
 export async function fetchMarketplaceAnalyticsKpis(
@@ -220,6 +223,9 @@ export async function fetchMarketplaceAnalyticsKpis(
     params.set("marketplace", query.marketplace);
   }
   if (query.accountId) params.set("accountId", query.accountId);
+  if (query.logisticsScope && query.logisticsScope !== "ALL") {
+    params.set("logisticsScope", query.logisticsScope);
+  }
 
   const response = await apiFetch(`/marketplace-analytics/kpis?${params.toString()}`);
   if (response.status === 400) {
