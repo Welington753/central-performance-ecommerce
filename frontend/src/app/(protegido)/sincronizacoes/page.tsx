@@ -104,9 +104,26 @@ export default function SincronizacoesPage() {
   >({});
   const [runningAccountId, setRunningAccountId] = useState<string | null>(null);
   const [runningAllBackfill, setRunningAllBackfill] = useState(false);
+  const [runningAllProgress, setRunningAllProgress] = useState<{
+    index: number;
+    total: number;
+  } | null>(null);
+
+  // Guarda de reentrância síncrona (Fase 4, correção de regressão) — estado
+  // React só atualiza no próximo render, então um clique duplo muito rápido
+  // poderia iniciar dois loops antes do botão desabilitar visualmente. Esta
+  // ref é lida/escrita de forma síncrona, sem essa janela de corrida.
+  // NUNCA usar um `useEffect` de cleanup para isto: em desenvolvimento, o
+  // StrictMode do React 18 monta/desmonta/remonta o componente uma vez ao
+  // abrir a página, e um cleanup que só marcasse "parado" sem o efeito
+  // também marcar "rodando" de volta no corpo deixaria a flag travada em
+  // "parado" para sempre — foi exatamente esse o bug que impedia o clique
+  // de disparar qualquer chamada ao backend.
+  const backfillBusyRef = useRef(false);
   const backfillStoppedRef = useRef(false);
 
   useEffect(() => {
+    backfillStoppedRef.current = false;
     return () => {
       backfillStoppedRef.current = true;
     };
@@ -130,26 +147,36 @@ export default function SincronizacoesPage() {
       } catch (error) {
         lastError = error;
         if (attempt < BACKFILL_RETRY_DELAYS_MS.length) {
-          await sleep(BACKFILL_RETRY_DELAYS_MS[attempt]);
+          // 429: respeita o Retry-After do backend em vez do backoff fixo.
+          const delayMs =
+            error instanceof ApiFetchError &&
+            error.code === "RATE_LIMITED" &&
+            error.retryAfterSeconds
+              ? error.retryAfterSeconds * 1000
+              : BACKFILL_RETRY_DELAYS_MS[attempt];
+          await sleep(delayMs);
         }
       }
     }
     throw lastError;
   }, []);
 
-  // Um chunk por vez, sequencial (nunca paginações concorrentes da mesma
-  // conta) — retoma exatamente de onde `oldestCoveredAt` parou, então
-  // fechar a aba ou reiniciar o backend no meio nunca perde progresso.
-  const runBackfillLoop = useCallback(
-    async (accountId: string) => {
+  // Corpo do loop, sem a guarda de reentrância — chamado tanto pelo início
+  // individual quanto pelo coletivo (que já segura a guarda para o lote
+  // inteiro). Um chunk por vez, sequencial (nunca paginações concorrentes
+  // da mesma conta) — retoma exatamente de onde `oldestCoveredAt` parou,
+  // então fechar a aba ou reiniciar o backend no meio nunca perde progresso.
+  const runBackfillLoopBody = useCallback(
+    async (accountId: string, initialWindowTo: string | null) => {
       setRunningAccountId(accountId);
       setBackfillErrors((prev) => ({ ...prev, [accountId]: null }));
       setBackfillProgress((prev) => ({
         ...prev,
-        [accountId]: { chunksProcessed: 0, oldestReached: null },
+        [accountId]: { chunksProcessed: 0, windowFrom: null, windowTo: null },
       }));
 
       let chunksProcessed = 0;
+      let windowTo = initialWindowTo;
       try {
         while (!backfillStoppedRef.current) {
           const result = await runBackfillChunkWithRetry(accountId);
@@ -158,16 +185,18 @@ export default function SincronizacoesPage() {
             ...prev,
             [accountId]: {
               chunksProcessed,
-              oldestReached: result.oldestCoveredAt,
+              windowFrom: result.oldestCoveredAt,
+              windowTo,
             },
           }));
+          windowTo = result.oldestCoveredAt;
           if (!result.hasMoreHistory) break;
         }
       } catch (error) {
         const message =
           error instanceof ApiFetchError
             ? error.message
-            : "Não foi possível continuar o histórico agora.";
+            : "Não foi possível iniciar o histórico.";
         setBackfillErrors((prev) => ({ ...prev, [accountId]: message }));
       } finally {
         setBackfillProgress((prev) => ({ ...prev, [accountId]: null }));
@@ -178,16 +207,38 @@ export default function SincronizacoesPage() {
     [runBackfillChunkWithRetry, loadBackfillStatus],
   );
 
+  const startBackfillForAccount = useCallback(
+    async (accountId: string, initialWindowTo: string | null) => {
+      if (backfillBusyRef.current) return;
+      backfillBusyRef.current = true;
+      try {
+        await runBackfillLoopBody(accountId, initialWindowTo);
+      } finally {
+        backfillBusyRef.current = false;
+      }
+    },
+    [runBackfillLoopBody],
+  );
+
   async function handleCompleteAllHistory() {
-    if (runningAccountId || runningAllBackfill || mlAccounts.length === 0) {
-      return;
-    }
+    if (backfillBusyRef.current || mlAccounts.length === 0) return;
+    backfillBusyRef.current = true;
     setRunningAllBackfill(true);
-    for (const mlAccount of mlAccounts) {
-      if (backfillStoppedRef.current) break;
-      await runBackfillLoop(mlAccount.accountId);
+    try {
+      for (let index = 0; index < mlAccounts.length; index += 1) {
+        if (backfillStoppedRef.current) break;
+        setRunningAllProgress({ index: index + 1, total: mlAccounts.length });
+        const mlAccount = mlAccounts[index];
+        await runBackfillLoopBody(
+          mlAccount.accountId,
+          backfillStatuses[mlAccount.accountId]?.oldestCoveredAt ?? null,
+        );
+      }
+    } finally {
+      setRunningAllProgress(null);
+      setRunningAllBackfill(false);
+      backfillBusyRef.current = false;
     }
-    setRunningAllBackfill(false);
   }
 
   const loadSyncRuns = useCallback(async () => {
@@ -412,7 +463,9 @@ export default function SincronizacoesPage() {
               className="rounded-md border border-brand bg-brand/10 px-4 py-2 text-sm font-semibold text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {runningAllBackfill
-                ? "Completando histórico de todas as lojas..."
+                ? runningAllProgress
+                  ? `Processando conta ${runningAllProgress.index} de ${runningAllProgress.total}`
+                  : "Iniciando histórico..."
                 : "Completar histórico de todas as lojas"}
             </button>
           ) : null}
@@ -438,7 +491,13 @@ export default function SincronizacoesPage() {
                     runningAccountId !== mlAccount.accountId)
                 }
                 errorMessage={backfillErrors[mlAccount.accountId] ?? null}
-                onStart={() => void runBackfillLoop(mlAccount.accountId)}
+                onStart={() =>
+                  void startBackfillForAccount(
+                    mlAccount.accountId,
+                    backfillStatuses[mlAccount.accountId]?.oldestCoveredAt ??
+                      null,
+                  )
+                }
               />
             ))}
           </div>

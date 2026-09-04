@@ -33,6 +33,8 @@ export class ApiFetchError extends Error {
   constructor(
     message: string,
     public readonly code?: string,
+    /** Presente apenas em 429 — segundos a aguardar antes de tentar de novo. */
+    public readonly retryAfterSeconds?: number,
   ) {
     super(message);
     this.name = "ApiFetchError";
@@ -337,8 +339,7 @@ const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
     "Este marketplace ainda não tem histórico completo disponível.",
   NO_INITIAL_SYNC_YET:
     "Sincronize esta conta pelo menos uma vez antes de completar o histórico.",
-  BACKFILL_ALREADY_RUNNING:
-    "Já existe uma sincronização em andamento para esta conta.",
+  BACKFILL_ALREADY_RUNNING: "Conta temporariamente ocupada.",
   AMAZON_NOT_CONFIGURED: "Integração Amazon não configurada no servidor.",
   SYNC_FAILED: "Falha ao consultar o marketplace. Tente novamente.",
 };
@@ -408,15 +409,37 @@ export async function fetchBackfillStatus(
 export async function runBackfillNextChunk(
   accountId: string,
 ): Promise<BackfillChunkResultDto> {
-  const response = await apiFetch(
-    `/marketplace-accounts/${accountId}/backfill/next-chunk`,
-    { method: "POST" },
-  );
+  let response: Response;
+  try {
+    response = await apiFetch(
+      `/marketplace-accounts/${accountId}/backfill/next-chunk`,
+      { method: "POST" },
+    );
+  } catch {
+    throw new ApiFetchError(
+      "Falha de conexão. O histórico poderá ser retomado.",
+    );
+  }
+
+  if (response.status === 401) {
+    throw new ApiFetchError("Sessão expirada. Entre novamente.", "UNAUTHENTICATED");
+  }
+  if (response.status === 429) {
+    const retryAfterHeader = response.headers.get("Retry-After");
+    const retryAfterSeconds = retryAfterHeader
+      ? Number(retryAfterHeader)
+      : undefined;
+    throw new ApiFetchError(
+      "Limite de chamadas atingido. Nova tentativa em breve.",
+      "RATE_LIMITED",
+      Number.isFinite(retryAfterSeconds) ? retryAfterSeconds : 60,
+    );
+  }
   if (!response.ok) {
     const code = await parseSanitizedErrorCode(response);
     throw new ApiFetchError(
       (code && BACKFILL_ERROR_MESSAGES[code]) ||
-        "Não foi possível continuar o histórico agora. Tente novamente.",
+        "Não foi possível iniciar o histórico.",
       code,
     );
   }

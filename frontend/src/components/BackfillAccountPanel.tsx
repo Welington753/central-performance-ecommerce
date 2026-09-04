@@ -4,7 +4,10 @@ import type { BackfillStatusDto } from "@/types/marketplace-backfill";
 
 export interface BackfillProgress {
   chunksProcessed: number;
-  oldestReached: string | null;
+  /** Limite mais antigo alcançado pelo último chunk concluído. */
+  windowFrom: string | null;
+  /** Limite mais recente do chunk que acabou de ser processado. */
+  windowTo: string | null;
 }
 
 interface BackfillAccountPanelProps {
@@ -132,14 +135,19 @@ export function BackfillAccountPanel({
             </p>
           ) : null}
 
-          {isRunning && progress ? (
+          {isRunning ? (
             <p className="text-xs text-foreground/60" role="status">
-              Buscando histórico — {progress.chunksProcessed} bloco(s)
-              processado(s)
-              {progress.oldestReached
-                ? `, período mais antigo alcançado: ${formatCalendarDate(progress.oldestReached)}`
-                : ""}
-              .
+              {!progress || progress.chunksProcessed === 0
+                ? "Iniciando histórico..."
+                : `Processando ${label} — período ${
+                    progress.windowFrom
+                      ? formatCalendarDate(progress.windowFrom)
+                      : "?"
+                  } a ${
+                    progress.windowTo
+                      ? formatCalendarDate(progress.windowTo)
+                      : "?"
+                  } (${progress.chunksProcessed} bloco(s) processado(s))`}
             </p>
           ) : null}
 
@@ -157,7 +165,11 @@ export function BackfillAccountPanel({
               disabled={disabled || isRunning}
               className="mt-1 self-start rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
             >
-              {isRunning ? "Buscando histórico..." : actionLabel(status)}
+              {isRunning
+                ? !progress || progress.chunksProcessed === 0
+                  ? "Iniciando histórico..."
+                  : "Buscando histórico..."
+                : actionLabel(status)}
             </button>
           ) : null}
         </>
