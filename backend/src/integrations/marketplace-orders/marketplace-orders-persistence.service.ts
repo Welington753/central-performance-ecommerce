@@ -256,6 +256,15 @@ export class MarketplaceOrdersPersistenceService {
    * retornada por este INSERT — o pedido é pulado inteiramente (itens
    * também não são tocados) e não conta nem como criado nem como
    * atualizado.
+   *
+   * Proteção adicional para `logistics_classification` (Fase 4, "Full"): uma
+   * atualização aceita pela regra acima nunca pode REGREDIR uma
+   * classificação já resolvida de volta para `UNKNOWN` — isso aconteceria,
+   * por exemplo, se o limite defensivo de consultas ao envio for atingido
+   * numa sincronização repetida do mesmo pedido. Quando o valor recebido é
+   * `UNKNOWN` e o já armazenado não é, o valor armazenado (classificação e
+   * tipo bruto) é preservado; em qualquer outro caso, o valor recebido
+   * prevalece normalmente.
    */
   async persistOrders(
     orders: MappedOrderRecord[],
@@ -285,8 +294,9 @@ export class MarketplaceOrdersPersistenceService {
               (marketplace_account_id, external_order_id, status, currency_id,
                total_amount, pack_id, date_created, date_closed,
                marketplace_last_updated, source_status, fulfillment_channel,
-               external_marketplace_id, updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, now())
+               external_marketplace_id, logistics_classification, logistics_type,
+               updated_at)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
             ON CONFLICT (marketplace_account_id, external_order_id) DO UPDATE
               SET status = EXCLUDED.status,
                   currency_id = EXCLUDED.currency_id,
@@ -298,6 +308,18 @@ export class MarketplaceOrdersPersistenceService {
                   source_status = EXCLUDED.source_status,
                   fulfillment_channel = EXCLUDED.fulfillment_channel,
                   external_marketplace_id = EXCLUDED.external_marketplace_id,
+                  logistics_classification = CASE
+                    WHEN EXCLUDED.logistics_classification = 'UNKNOWN'
+                     AND marketplace_orders.logistics_classification <> 'UNKNOWN'
+                    THEN marketplace_orders.logistics_classification
+                    ELSE EXCLUDED.logistics_classification
+                  END,
+                  logistics_type = CASE
+                    WHEN EXCLUDED.logistics_classification = 'UNKNOWN'
+                     AND marketplace_orders.logistics_classification <> 'UNKNOWN'
+                    THEN marketplace_orders.logistics_type
+                    ELSE EXCLUDED.logistics_type
+                  END,
                   updated_at = now()
               WHERE marketplace_orders.marketplace_last_updated IS NULL
                  OR EXCLUDED.marketplace_last_updated IS NULL
@@ -316,6 +338,8 @@ export class MarketplaceOrdersPersistenceService {
             order.sourceStatus ?? null,
             order.fulfillmentChannel ?? null,
             order.externalMarketplaceId ?? null,
+            order.logisticsClassification ?? 'UNKNOWN',
+            order.logisticsType ?? null,
           ],
         )) as Array<{ id: string; inserted: boolean }>;
 

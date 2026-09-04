@@ -29,6 +29,8 @@ interface MarketplaceOrderRow {
   source_status: string | null;
   fulfillment_channel: string | null;
   external_marketplace_id: string | null;
+  logistics_classification: string;
+  logistics_type: string | null;
   marketplace_last_updated: Date | null;
   updated_at: Date;
 }
@@ -672,6 +674,93 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
         ordersUpdated: 0,
         itemsPersisted: 1,
       });
+    });
+  });
+
+  describe('logistics_classification (Fase 4, "Full")', () => {
+    it('defaults to UNKNOWN when the mapped record omits it', async () => {
+      await service.persistOrders([
+        orderRecord({ marketplaceAccountId: accountId }),
+      ]);
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.logistics_classification).toBe('UNKNOWN');
+      expect(order.logistics_type).toBeNull();
+    });
+
+    it('persists MARKETPLACE_FULFILLED with the raw logistics_type for audit', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          logisticsClassification: 'MARKETPLACE_FULFILLED',
+          logisticsType: 'fulfillment',
+        }),
+      ]);
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.logistics_classification).toBe('MARKETPLACE_FULFILLED');
+      expect(order.logistics_type).toBe('fulfillment');
+    });
+
+    it('never regresses an already-resolved classification back to UNKNOWN on a later UPSERT (e.g. defensive cap hit on a re-sync)', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+          logisticsClassification: 'MARKETPLACE_FULFILLED',
+          logisticsType: 'fulfillment',
+        }),
+      ]);
+
+      const result = await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          status: 'cancelled',
+          marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+          logisticsClassification: 'UNKNOWN',
+          logisticsType: null,
+        }),
+      ]);
+      expect(result.ordersUpdated).toBe(1);
+
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.status).toBe('cancelled');
+      expect(order.logistics_classification).toBe('MARKETPLACE_FULFILLED');
+      expect(order.logistics_type).toBe('fulfillment');
+    });
+
+    it('allows a resolved classification to replace another resolved one (e.g. corrected on re-sync)', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+          logisticsClassification: 'SELLER_FULFILLED',
+          logisticsType: 'self_service',
+        }),
+      ]);
+
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+          logisticsClassification: 'MARKETPLACE_FULFILLED',
+          logisticsType: 'fulfillment',
+        }),
+      ]);
+
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.logistics_classification).toBe('MARKETPLACE_FULFILLED');
+      expect(order.logistics_type).toBe('fulfillment');
     });
   });
 

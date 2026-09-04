@@ -103,6 +103,27 @@ export class MarketplaceOrder {
   @Column({ type: 'varchar', nullable: true })
   externalMarketplaceId!: string | null;
 
+  /**
+   * Classificação logística CANÔNICA (Fase 4, "Mercado Livre Full"):
+   * `MARKETPLACE_FULFILLED` (Full — o próprio Mercado Livre despacha),
+   * `SELLER_FULFILLED` (inclui Flex/`self_service` — nunca tratado como
+   * Full) ou `UNKNOWN` (nunca resolvido, ou pedido anterior a este recurso —
+   * nunca inferido como `SELLER_FULFILLED`). Distinta de
+   * `fulfillmentChannel` acima, que é semântica exclusiva da Amazon
+   * (`AMAZON`/`MERCHANT`) — reaproveitá-la quebraria esse contrato.
+   */
+  @Column({ type: 'varchar', default: 'UNKNOWN' })
+  logisticsClassification!: string;
+
+  /**
+   * Valor bruto original do provedor (`logistic_type` do Mercado Livre —
+   * ex.: `fulfillment`, `drop_off`, `self_service`) preservado só para
+   * auditoria. `null` quando `logisticsClassification` é `UNKNOWN` por falta
+   * de consulta (nunca usado em nenhum filtro/agregação).
+   */
+  @Column({ type: 'varchar', nullable: true })
+  logisticsType!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 
