@@ -18,6 +18,9 @@ import {
   ORDERS_PAGE_LIMIT,
   MercadoLivreOrdersHttpClient,
 } from './mercado-livre-orders-http.client';
+import { MercadoLivreShipmentClient } from './mercado-livre-shipment.client';
+import { classifyLogisticType } from './mercado-livre-logistics.util';
+import { LOGISTICS_UNKNOWN } from '../marketplace-orders/logistics-classification';
 import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
@@ -110,12 +113,20 @@ export interface SyncOrdersSummary {
 // provedor — nunca um loop infinito de paginação.
 const HARD_SAFETY_OFFSET_CAP = 20000;
 
+// Limite defensivo (Fase 4, "Full") de consultas a `GET /shipments/{id}` por
+// chamada de sincronização — nunca uma chamada HTTP extra por pedido sem
+// limite. Acima do teto, os pedidos restantes ficam `UNKNOWN` (nunca perdem
+// o pedido) e o contador sanitizado (`shipmentLookupsSkipped`) registra
+// quantos foram pulados, sem nenhum identificador de envio/pedido.
+const MAX_SHIPMENT_LOOKUPS_PER_SYNC = 200;
+
 @Injectable()
 export class MercadoLivreOrdersSyncService {
   constructor(
     private readonly marketplaceAccountsService: MarketplaceAccountsService,
     private readonly oauthService: MercadoLivreOAuthService,
     private readonly httpClient: MercadoLivreOrdersHttpClient,
+    private readonly shipmentClient: MercadoLivreShipmentClient,
     private readonly persistence: MarketplaceOrdersPersistenceService,
   ) {}
 
@@ -197,6 +208,8 @@ export class MercadoLivreOrdersSyncService {
         throw error;
       }
 
+      await this.classifyLogistics(accessToken, rawOrders, mappedOrders);
+
       const persistResult = await this.persistence.persistOrders(mappedOrders);
       const finishedAt = new Date();
 
@@ -236,6 +249,59 @@ export class MercadoLivreOrdersSyncService {
       throw error instanceof SyncOrdersError
         ? error
         : new SyncOrdersError(code);
+    }
+  }
+
+  /**
+   * Resolve `logisticsClassification`/`logisticsType` (Fase 4, "Full") em
+   * `mappedOrders`, na MESMA ordem/índice de `rawOrders` (garantido por
+   * `Array.prototype.map` em `mapMercadoLivreOrder`, chamado logo acima).
+   * Deduplica por `shippingId` — pedidos do mesmo envio (ex.: mesmo `packId`)
+   * fazem UMA única consulta a `GET /shipments/{id}`. Respeita
+   * `MAX_SHIPMENT_LOOKUPS_PER_SYNC`: além do teto, a classificação
+   * permanece `UNKNOWN` sem nenhuma chamada adicional — o pedido continua
+   * sendo persistido normalmente. Qualquer falha de rede/resposta também
+   * vira `UNKNOWN` para aquele envio, nunca lança (nunca perde o pedido).
+   */
+  private async classifyLogistics(
+    accessToken: string,
+    rawOrders: RawMercadoLivreOrder[],
+    mappedOrders: MappedOrderRecord[],
+  ): Promise<void> {
+    const classificationByShipmentId = new Map<
+      string,
+      { classification: string; logisticType: string | null }
+    >();
+    let lookupsUsed = 0;
+
+    for (let i = 0; i < rawOrders.length; i += 1) {
+      const shippingId = rawOrders[i].shippingId;
+      if (!shippingId) continue;
+
+      let resolved = classificationByShipmentId.get(shippingId);
+      if (!resolved) {
+        if (lookupsUsed >= MAX_SHIPMENT_LOOKUPS_PER_SYNC) continue;
+        lookupsUsed += 1;
+        const outcome = await this.shipmentClient.fetchShipment(
+          accessToken,
+          shippingId,
+        );
+        const logisticType =
+          outcome.kind === 'success' ? outcome.logisticType : null;
+        resolved = {
+          classification: classifyLogisticType(logisticType),
+          logisticType,
+        };
+        classificationByShipmentId.set(shippingId, resolved);
+      }
+
+      mappedOrders[i].logisticsClassification =
+        resolved.classification as MappedOrderRecord['logisticsClassification'];
+      mappedOrders[i].logisticsType = resolved.logisticType;
+    }
+
+    for (const order of mappedOrders) {
+      order.logisticsClassification ??= LOGISTICS_UNKNOWN;
     }
   }
 

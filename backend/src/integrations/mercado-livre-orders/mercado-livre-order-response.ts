@@ -19,6 +19,15 @@ export interface RawMercadoLivreOrder {
   dateCreated: string;
   dateClosed: string | null;
   lastUpdated: string | null;
+  /**
+   * `shipping.id` (Fase 4, "Full") — o pedido em si nunca traz o modo
+   * logístico; só o identificador do envio, usado pelo serviço de
+   * sincronização para consultar `GET /shipments/{id}` (campo
+   * `logistic_type`, único jeito oficial de distinguir Full). `null` quando
+   * o pedido não tem envio associado (ex.: retirada em loja/pagamento
+   * combinado) — nunca inventado.
+   */
+  shippingId: string | null;
   items: RawMercadoLivreOrderItem[];
 }
 
@@ -138,6 +147,11 @@ function validateOrderEntry(value: unknown): RawMercadoLivreOrder | null {
   const dateClosed = raw.date_closed;
   const lastUpdated = raw.last_updated;
   const packId = raw.pack_id;
+  const shipping = raw.shipping;
+  const shippingId =
+    typeof shipping === 'object' && shipping !== null
+      ? (shipping as Record<string, unknown>).id
+      : undefined;
 
   return {
     externalOrderId: String(externalOrderId),
@@ -148,6 +162,10 @@ function validateOrderEntry(value: unknown): RawMercadoLivreOrder | null {
     dateCreated,
     dateClosed: isNonEmptyString(dateClosed) ? dateClosed : null,
     lastUpdated: isNonEmptyString(lastUpdated) ? lastUpdated : null,
+    shippingId:
+      typeof shippingId === 'string' || typeof shippingId === 'number'
+        ? String(shippingId)
+        : null,
     items,
   };
 }

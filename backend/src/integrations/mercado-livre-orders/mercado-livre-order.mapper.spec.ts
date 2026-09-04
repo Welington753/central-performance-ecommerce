@@ -16,6 +16,7 @@ function rawOrder(
     dateCreated: '2026-08-15T10:00:00.000-04:00',
     dateClosed: '2026-08-15T10:05:00.000-04:00',
     lastUpdated: '2026-08-15T10:05:00.000-04:00',
+    shippingId: null,
     items: [
       {
         itemId: 'MLB111',

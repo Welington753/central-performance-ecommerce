@@ -55,6 +55,7 @@ describe('validateOrdersSearchResponseBody', () => {
       dateCreated: '2026-08-15T10:00:00.000-04:00',
       dateClosed: '2026-08-15T10:05:00.000-04:00',
       lastUpdated: '2026-08-15T10:05:00.000-04:00',
+      shippingId: null,
       items: [
         {
           itemId: 'MLB111',
@@ -119,5 +120,31 @@ describe('validateOrdersSearchResponseBody', () => {
     );
     expect(result.valid).toBe(true);
     if (result.valid) expect(result.orders[0].externalOrderId).toBe('42');
+  });
+
+  describe('shipping.id (Fase 4, "Full")', () => {
+    it('extracts shipping.id as shippingId, stringified', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder({ shipping: { id: 555 } })]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].shippingId).toBe('555');
+    });
+
+    it('defaults shippingId to null when shipping is absent', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder()]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].shippingId).toBeNull();
+    });
+
+    it('defaults shippingId to null when shipping is malformed, without rejecting the order', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder({ shipping: 'not-an-object' })]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].shippingId).toBeNull();
+    });
   });
 });

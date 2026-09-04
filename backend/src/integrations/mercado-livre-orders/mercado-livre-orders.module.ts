@@ -7,6 +7,7 @@ import { MercadoLivreOAuthModule } from '../mercado-livre-oauth/mercado-livre-oa
 import { MercadoLivreOrdersSyncController } from './mercado-livre-orders-sync.controller';
 import { MercadoLivreOrdersKpisController } from './mercado-livre-orders-kpis.controller';
 import { MercadoLivreOrdersHttpClient } from './mercado-livre-orders-http.client';
+import { MercadoLivreShipmentClient } from './mercado-livre-shipment.client';
 import { MercadoLivreOrdersKpiService } from './mercado-livre-orders-kpi.service';
 import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.service';
 
@@ -37,6 +38,7 @@ import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.servi
   providers: [
     { provide: ML_FETCH, useValue: fetch },
     MercadoLivreOrdersHttpClient,
+    MercadoLivreShipmentClient,
     MercadoLivreOrdersSyncService,
     MercadoLivreOrdersKpiService,
   ],

@@ -34,7 +34,7 @@ function account(
   };
 }
 
-function rawOrder(id: string) {
+function rawOrder(id: string, shippingId: string | null = null) {
   return {
     id,
     status: 'paid',
@@ -44,6 +44,7 @@ function rawOrder(id: string) {
     date_created: '2026-08-15T10:00:00.000-04:00',
     date_closed: '2026-08-15T10:05:00.000-04:00',
     last_updated: '2026-08-15T10:05:00.000-04:00',
+    shipping: shippingId ? { id: shippingId } : undefined,
     order_items: [
       {
         item: {
@@ -69,6 +70,7 @@ function buildService(
     marketplaceAccountsService?: Record<string, jest.Mock>;
     oauthService?: Record<string, jest.Mock>;
     httpClient?: Record<string, jest.Mock>;
+    shipmentClient?: Record<string, jest.Mock>;
     persistence?: Record<string, jest.Mock>;
   } = {},
 ) {
@@ -85,6 +87,12 @@ function buildService(
       .fn()
       .mockResolvedValue({ kind: 'success', body: pageBody([], 0, 0) }),
     ...overrides.httpClient,
+  };
+  const shipmentClient = {
+    fetchShipment: jest
+      .fn()
+      .mockResolvedValue({ kind: 'success', logisticType: null }),
+    ...overrides.shipmentClient,
   };
   const persistence = {
     beginSyncRun: jest.fn().mockResolvedValue('run-1'),
@@ -112,6 +120,7 @@ function buildService(
     marketplaceAccountsService as never,
     oauthService as never,
     httpClient as never,
+    shipmentClient as never,
     persistence as never,
   );
 
@@ -120,6 +129,7 @@ function buildService(
     marketplaceAccountsService,
     oauthService,
     httpClient,
+    shipmentClient,
     persistence,
   };
 }
@@ -438,7 +448,207 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
         '2026-08-29T00:00:00.000Z',
       );
     });
+  });
 
+  describe('classificação logística Full (Fase 4)', () => {
+    it('classifies a "fulfillment" shipment as MARKETPLACE_FULFILLED and persists it on the mapped order', async () => {
+      const fetchShipment = jest
+        .fn()
+        .mockResolvedValue({ kind: 'success', logisticType: 'fulfillment' });
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 1,
+        ordersUpdated: 0,
+        itemsPersisted: 1,
+      });
+      const { service } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody([rawOrder('1', 'ship-1')], 1, 0),
+          }),
+        },
+        shipmentClient: { fetchShipment },
+        persistence: { persistOrders },
+      });
+
+      await service.syncOrders('acc-1');
+
+      expect(fetchShipment).toHaveBeenCalledWith('access-token', 'ship-1');
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{
+          logisticsClassification: string;
+          logisticsType: string | null;
+        }>,
+      ];
+      expect(persistedOrders[0].logisticsClassification).toBe(
+        'MARKETPLACE_FULFILLED',
+      );
+      expect(persistedOrders[0].logisticsType).toBe('fulfillment');
+    });
+
+    it('never treats Flex (self_service) as Full', async () => {
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 1,
+        ordersUpdated: 0,
+        itemsPersisted: 1,
+      });
+      const { service } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody([rawOrder('1', 'ship-1')], 1, 0),
+          }),
+        },
+        shipmentClient: {
+          fetchShipment: jest.fn().mockResolvedValue({
+            kind: 'success',
+            logisticType: 'self_service',
+          }),
+        },
+        persistence: { persistOrders },
+      });
+
+      await service.syncOrders('acc-1');
+
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{ logisticsClassification: string }>,
+      ];
+      expect(persistedOrders[0].logisticsClassification).toBe(
+        'SELLER_FULFILLED',
+      );
+    });
+
+    it('leaves the order UNKNOWN (never loses the order) when the shipment lookup fails', async () => {
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 1,
+        ordersUpdated: 0,
+        itemsPersisted: 1,
+      });
+      const { service } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody([rawOrder('1', 'ship-1')], 1, 0),
+          }),
+        },
+        shipmentClient: {
+          fetchShipment: jest
+            .fn()
+            .mockResolvedValue({ kind: 'provider_unavailable' }),
+        },
+        persistence: { persistOrders },
+      });
+
+      const summary = await service.syncOrders('acc-1');
+
+      expect(summary.ordersFetched).toBe(1);
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{
+          logisticsClassification: string;
+          logisticsType: string | null;
+        }>,
+      ];
+      expect(persistedOrders[0].logisticsClassification).toBe('UNKNOWN');
+      expect(persistedOrders[0].logisticsType).toBeNull();
+    });
+
+    it('defaults to UNKNOWN for orders with no shipment id', async () => {
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 1,
+        ordersUpdated: 0,
+        itemsPersisted: 1,
+      });
+      const { service, shipmentClient } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody([rawOrder('1', null)], 1, 0),
+          }),
+        },
+        persistence: { persistOrders },
+      });
+
+      await service.syncOrders('acc-1');
+
+      expect(shipmentClient.fetchShipment).not.toHaveBeenCalled();
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{ logisticsClassification: string }>,
+      ];
+      expect(persistedOrders[0].logisticsClassification).toBe('UNKNOWN');
+    });
+
+    it('deduplicates shipment lookups by shipmentId — two orders sharing a shipment trigger one HTTP call', async () => {
+      const fetchShipment = jest
+        .fn()
+        .mockResolvedValue({ kind: 'success', logisticType: 'fulfillment' });
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 2,
+        ordersUpdated: 0,
+        itemsPersisted: 2,
+      });
+      const { service } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody(
+              [rawOrder('1', 'ship-shared'), rawOrder('2', 'ship-shared')],
+              2,
+              0,
+            ),
+          }),
+        },
+        shipmentClient: { fetchShipment },
+        persistence: { persistOrders },
+      });
+
+      await service.syncOrders('acc-1');
+
+      expect(fetchShipment).toHaveBeenCalledTimes(1);
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{ logisticsClassification: string }>,
+      ];
+      expect(persistedOrders[0].logisticsClassification).toBe(
+        'MARKETPLACE_FULFILLED',
+      );
+      expect(persistedOrders[1].logisticsClassification).toBe(
+        'MARKETPLACE_FULFILLED',
+      );
+    });
+
+    it('respects the defensive shipment lookup cap — orders beyond it stay UNKNOWN with no extra HTTP call', async () => {
+      const fetchShipment = jest
+        .fn()
+        .mockResolvedValue({ kind: 'success', logisticType: 'fulfillment' });
+      const orders = Array.from({ length: 201 }, (_, i) =>
+        rawOrder(String(i), `ship-${i}`),
+      );
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 201,
+        ordersUpdated: 0,
+        itemsPersisted: 201,
+      });
+      const { service } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody(orders, 201, 0),
+          }),
+        },
+        shipmentClient: { fetchShipment },
+        persistence: { persistOrders },
+      });
+
+      await service.syncOrders('acc-1');
+
+      expect(fetchShipment).toHaveBeenCalledTimes(200);
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{ logisticsClassification: string }>,
+      ];
+      expect(persistedOrders[200].logisticsClassification).toBe('UNKNOWN');
+    });
+  });
+
+  describe('incremental window (Fase 4, "Histórico completo") — janela explícita', () => {
     it('accepts an explicit windowOverride and type — reused by the historical backfill', async () => {
       const { service, persistence } = buildService();
       const windowOverride = {
