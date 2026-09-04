@@ -9,6 +9,7 @@ import { DailyRevenueChart } from "@/components/DailyRevenueChart";
 import { DataCoverageBanner } from "@/components/DataCoverageBanner";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
+import { FullPerformanceSection } from "@/components/FullPerformanceSection";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
 import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { OperationalKpiCards } from "@/components/OperationalKpiCards";
@@ -678,6 +679,10 @@ function DashboardContent() {
                   byListing={displayData.topListings}
                 />
               </div>
+
+              {displayData.full ? (
+                <FullPerformanceSection full={displayData.full} />
+              ) : null}
             </div>
           ) : displayData ? (
             <div className="flex flex-col gap-4">

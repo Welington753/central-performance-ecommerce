@@ -85,6 +85,7 @@ function kpisDto(
       comparisonPeriodComplete: true,
     },
     lastSync: null,
+    full: null,
     ...overrides,
   };
 }

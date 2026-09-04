@@ -138,6 +138,7 @@ function analyticsDto(
       comparisonPeriodComplete: true,
     },
     lastSync: "2026-09-01T15:00:00.000Z",
+    full: null,
     ...overrides,
   } as MarketplaceAnalyticsKpisDto;
 }
@@ -602,6 +603,97 @@ describe("DashboardPage", () => {
 
       expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00");
       expect(screen.queryByText(/carregando kpis/i)).not.toBeInTheDocument();
+    });
+  });
+
+  describe("Mercado Livre Full (Fase 4)", () => {
+    function fullDto(overrides: Partial<NonNullable<MarketplaceAnalyticsKpisDto["full"]>> = {}) {
+      return {
+        coverage: "complete" as const,
+        classifiedOrders: 10,
+        unclassifiedOrders: 0,
+        summary: {
+          grossSalesRevenue: "500.00",
+          grossSalesOrders: 5,
+          grossSalesUnits: 8,
+          paidRevenue: "480.00",
+          paidOrders: 4,
+          paidUnits: 7,
+          averageTicket: "120.00",
+          shareOfPaidRevenuePct: 40,
+          shareOfPaidUnitsPct: 30,
+          cancelledOrders: 1,
+          cancelledUnits: 1,
+          cancelledRevenue: "20.00",
+        },
+        comparison: null,
+        dailySeries: [
+          { date: "2026-08-03", paidRevenue: "480.00", paidOrders: 4, units: 7, cancelledOrders: 1 },
+        ],
+        ranking: [
+          {
+            sku: "SKU-FULL",
+            title: "Produto Full",
+            distinctListings: 1,
+            orders: 4,
+            units: 7,
+            paidRevenue: "480.00",
+            grossSalesRevenue: "500.00",
+            unitsSharePct: 87.5,
+          },
+        ],
+        ...overrides,
+      };
+    }
+
+    it("does not render the Full section when full is null", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({ full: null }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+      expect(screen.queryByText("Mercado Livre Full")).not.toBeInTheDocument();
+    });
+
+    it("renders the Full section with its cards when full.summary is populated", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({ full: fullDto() }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+      expect(screen.getByTestId("full-kpi-card-paid-revenue")).toHaveTextContent(
+        "480,00",
+      );
+      expect(screen.getByTestId("full-kpi-card-share-revenue")).toHaveTextContent(
+        "40,0%",
+      );
+      expect(screen.getByText("Produto Full")).toBeInTheDocument();
+    });
+
+    it("shows the coverage notice (never a fake-complete display) when coverage is partial", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({
+          full: fullDto({ coverage: "partial", classifiedOrders: 3, unclassifiedOrders: 2 }),
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+      expect(screen.getByText(/Cobertura parcial da classificação Full/)).toBeInTheDocument();
+      expect(screen.getByText(/3 de 5 pedidos/)).toBeInTheDocument();
+    });
+
+    it("shows a period-appropriate message instead of a fake zero when there is no proven Full order", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({
+          full: fullDto({ coverage: "unknown", classifiedOrders: 0, unclassifiedOrders: 0, summary: null }),
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+      expect(
+        screen.getByText(/Nenhum pedido Full comprovado neste período ainda/),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("full-kpi-card-paid-revenue")).not.toBeInTheDocument();
     });
   });
 });

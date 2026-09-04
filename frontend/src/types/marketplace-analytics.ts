@@ -141,6 +141,68 @@ export interface AnalyticsDataCoverage {
   comparisonPeriodComplete: boolean;
 }
 
+// "Mercado Livre Full" (Fase 4) — restrito a pedidos com classificação
+// logística MARKETPLACE_FULFILLED. Nunca inclui Flex nem pedidos ainda não
+// classificados (ver `FullClassificationCoverage` no backend).
+export type FullClassificationCoverage = "complete" | "partial" | "unknown";
+
+export interface AnalyticsFullSummary {
+  grossSalesRevenue: string;
+  grossSalesOrders: number;
+  grossSalesUnits: number;
+  paidRevenue: string;
+  paidOrders: number;
+  paidUnits: number;
+  averageTicket: string;
+  shareOfPaidRevenuePct: number;
+  shareOfPaidUnitsPct: number;
+  cancelledOrders: number;
+  cancelledUnits: number;
+  cancelledRevenue: string;
+}
+
+export interface AnalyticsFullComparison {
+  grossSalesRevenuePct: number | null;
+  grossSalesOrdersPct: number | null;
+  grossSalesUnitsPct: number | null;
+  paidRevenuePct: number | null;
+  paidOrdersPct: number | null;
+  paidUnitsPct: number | null;
+  averageTicketPct: number | null;
+  cancelledOrdersPct: number | null;
+  cancelledUnitsPct: number | null;
+  cancelledRevenuePct: number | null;
+}
+
+export interface AnalyticsFullDailyPoint {
+  date: string;
+  paidRevenue: string;
+  paidOrders: number;
+  units: number;
+  cancelledOrders: number;
+}
+
+export interface AnalyticsFullRankingEntry {
+  sku: string | null;
+  title: string;
+  distinctListings: number;
+  orders: number;
+  units: number;
+  paidRevenue: string;
+  grossSalesRevenue: string;
+  unitsSharePct: number;
+}
+
+export interface MarketplaceAnalyticsFull {
+  coverage: FullClassificationCoverage;
+  classifiedOrders: number;
+  unclassifiedOrders: number;
+  summary: AnalyticsFullSummary | null;
+  comparison: AnalyticsFullComparison | null;
+  dailySeries: AnalyticsFullDailyPoint[];
+  ranking: AnalyticsFullRankingEntry[];
+}
+
 export interface MarketplaceAnalyticsKpisDto {
   scope: {
     marketplace: MarketplaceFilter;
@@ -161,4 +223,5 @@ export interface MarketplaceAnalyticsKpisDto {
   sources: AnalyticsSourceCoverage[];
   dataCoverage: AnalyticsDataCoverage;
   lastSync: string | null;
+  full: MarketplaceAnalyticsFull | null;
 }
