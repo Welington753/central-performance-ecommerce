@@ -10,6 +10,7 @@ import cookieParser from 'cookie-parser';
 import helmet from 'helmet';
 import { AppModule } from './app.module';
 import { LoggingInterceptor } from './common/logging/logging.interceptor';
+import { VersionService } from './health/version.service';
 
 async function bootstrap(): Promise<void> {
   const app = await NestFactory.create(AppModule, { bufferLogs: true });
@@ -59,6 +60,15 @@ async function bootstrap(): Promise<void> {
   await app.listen(port);
   Logger.log(
     `Aplicação rodando na porta ${port} (NODE_ENV=${nodeEnv})`,
+    'Bootstrap',
+  );
+
+  // Uma única linha sanitizada com o artefato REALMENTE em execução (design
+  // "/version") — nunca segredo/caminho/hostname/PID, só o que já é público
+  // em GET /version.
+  const { commit, builtAt, startedAt } = app.get(VersionService).getInfo();
+  Logger.log(
+    `Versão em execução: commit=${commit} builtAt=${builtAt ?? 'null'} startedAt=${startedAt}`,
     'Bootstrap',
   );
 }
