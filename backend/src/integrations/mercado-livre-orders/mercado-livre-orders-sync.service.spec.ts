@@ -298,6 +298,9 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
   it.each([
     ['REFRESH_TOKEN_REJECTED', 'TOKEN_EXPIRED'],
     ['ACCOUNT_BUSY', 'ACCOUNT_BUSY'],
+    ['REFRESH_TEMPORARY_FAILURE', 'TOKEN_REFRESH_PENDING'],
+    ['REFRESH_OUTCOME_UNKNOWN', 'TOKEN_REFRESH_PENDING'],
+    ['ML_APP_CONFIGURATION_ERROR', 'ML_APP_CONFIGURATION_ERROR'],
   ])(
     'maps ConflictException("%s") from ensureValidAccessToken to SyncOrdersError "%s" instead of masking it as SYNC_FAILED',
     async (conflictMessage, expectedCode) => {

@@ -43,3 +43,42 @@ describe('MercadoLivreOAuthController.connect', () => {
     );
   });
 });
+
+describe('MercadoLivreOAuthController.recover', () => {
+  it('delegates to the service and returns the outcome as a 200 JSON body — never an exception for a normal recoverable outcome', async () => {
+    const service = {
+      recoverConnection: jest.fn().mockResolvedValue('RECOVERED'),
+    };
+    const controller = new MercadoLivreOAuthController(service as never);
+
+    const result = await controller.recover('acc-1');
+
+    expect(service.recoverConnection).toHaveBeenCalledWith('acc-1');
+    expect(result).toEqual({ outcome: 'RECOVERED' });
+  });
+
+  it.each(['PENDING_RETRY', 'RECONNECT_REQUIRED', 'CONFIGURATION_ERROR'])(
+    'passes through the %s outcome unchanged',
+    async (outcome) => {
+      const service = {
+        recoverConnection: jest.fn().mockResolvedValue(outcome),
+      };
+      const controller = new MercadoLivreOAuthController(service as never);
+
+      expect(await controller.recover('acc-1')).toEqual({ outcome });
+    },
+  );
+
+  it('propagates a service exception (e.g. ACCOUNT_NOT_RECOVERABLE) instead of swallowing it', async () => {
+    const service = {
+      recoverConnection: jest
+        .fn()
+        .mockRejectedValue(new Error('ACCOUNT_NOT_RECOVERABLE')),
+    };
+    const controller = new MercadoLivreOAuthController(service as never);
+
+    await expect(controller.recover('acc-1')).rejects.toThrow(
+      /ACCOUNT_NOT_RECOVERABLE/,
+    );
+  });
+});

@@ -33,6 +33,8 @@ export type SyncOrdersErrorCode =
   | 'SYNC_ALREADY_RUNNING'
   | 'TOKEN_EXPIRED'
   | 'ACCOUNT_BUSY'
+  | 'TOKEN_REFRESH_PENDING'
+  | 'ML_APP_CONFIGURATION_ERROR'
   | 'PROVIDER_UNAVAILABLE'
   | 'PROVIDER_RATE_LIMITED'
   | 'INVALID_PROVIDER_RESPONSE'
@@ -44,6 +46,13 @@ const FAILURE_SUMMARIES: Record<SyncOrdersErrorCode, string> = {
   TOKEN_EXPIRED:
     'O Mercado Livre rejeitou o token da conta. Reconexão necessária.',
   ACCOUNT_BUSY: 'Já existe uma operação de token em andamento para esta conta.',
+  // Correção de resiliência OAuth: falha RECUPERÁVEL (temporária ou
+  // ambígua) de renovação — a conta continua CONNECTED, esta sincronização
+  // só foi adiada, uma nova tentativa automática já está agendada.
+  TOKEN_REFRESH_PENDING:
+    'Renovação de token temporariamente indisponível. Nova tentativa automática agendada.',
+  ML_APP_CONFIGURATION_ERROR:
+    'Credenciais da aplicação Mercado Livre inválidas. Reconectar esta conta não resolve.',
   PROVIDER_UNAVAILABLE: 'Provedor indisponível ao consultar pedidos.',
   PROVIDER_RATE_LIMITED: 'Provedor limitou a taxa de requisições.',
   INVALID_PROVIDER_RESPONSE: 'Resposta do provedor em formato inesperado.',
@@ -51,17 +60,18 @@ const FAILURE_SUMMARIES: Record<SyncOrdersErrorCode, string> = {
 };
 
 // Vocabulário fechado de `ConflictException` lançado por
-// `MercadoLivreOAuthService.ensureValidAccessToken` (ver esse arquivo) — só
-// os dois casos abaixo têm um código de sincronização mais específico que
-// `SYNC_FAILED`; os demais (`ACCOUNT_NOT_ELIGIBLE_FOR_TOKEN`,
-// `REFRESH_RESULT_UNKNOWN`, `REFRESH_RESULT_NOT_COMMITTED`,
-// `CREDENTIAL_DECRYPTION_FAILED`) são condições de borda/corrida internas
+// `MercadoLivreOAuthService.ensureValidAccessToken` (ver esse arquivo).
+// `ACCOUNT_NOT_ELIGIBLE_FOR_TOKEN`/`REFRESH_RESULT_NOT_COMMITTED`/
+// `CREDENTIAL_DECRYPTION_FAILED` são condições de borda/corrida internas
 // sem ação distinta possível pelo usuário, então caem no fallback genérico.
 const OAUTH_CONFLICT_TO_SYNC_ERROR_CODE: Partial<
   Record<string, SyncOrdersErrorCode>
 > = {
   REFRESH_TOKEN_REJECTED: 'TOKEN_EXPIRED',
   ACCOUNT_BUSY: 'ACCOUNT_BUSY',
+  REFRESH_TEMPORARY_FAILURE: 'TOKEN_REFRESH_PENDING',
+  REFRESH_OUTCOME_UNKNOWN: 'TOKEN_REFRESH_PENDING',
+  ML_APP_CONFIGURATION_ERROR: 'ML_APP_CONFIGURATION_ERROR',
 };
 
 function resolveSyncErrorCode(error: unknown): SyncOrdersErrorCode {

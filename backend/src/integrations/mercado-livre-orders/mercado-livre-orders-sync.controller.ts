@@ -56,8 +56,15 @@ export class MercadoLivreOrdersSyncController {
         return new HttpException(error.code, HttpStatus.TOO_MANY_REQUESTS);
       case 'INVALID_PROVIDER_RESPONSE':
         return new BadGatewayException(error.code);
+      // TOKEN_REFRESH_PENDING/ML_APP_CONFIGURATION_ERROR (correção de
+      // resiliência OAuth): falha RECUPERÁVEL de renovação — nunca a mesma
+      // severidade de TOKEN_EXPIRED/ACCOUNT_BUSY, sempre um 503 "tente de
+      // novo mais tarde" (a próxima tentativa automática já está agendada,
+      // nenhuma ação do usuário é necessária agora).
       case 'PROVIDER_UNAVAILABLE':
       case 'SYNC_FAILED':
+      case 'TOKEN_REFRESH_PENDING':
+      case 'ML_APP_CONFIGURATION_ERROR':
       default:
         return new ServiceUnavailableException(error.code);
     }

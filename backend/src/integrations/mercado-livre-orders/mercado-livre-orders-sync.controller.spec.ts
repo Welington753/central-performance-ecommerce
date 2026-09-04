@@ -58,6 +58,8 @@ describe('MercadoLivreOrdersSyncController', () => {
       ['PROVIDER_UNAVAILABLE', ServiceUnavailableException],
       ['INVALID_PROVIDER_RESPONSE', BadGatewayException],
       ['SYNC_FAILED', ServiceUnavailableException],
+      ['TOKEN_REFRESH_PENDING', ServiceUnavailableException],
+      ['ML_APP_CONFIGURATION_ERROR', ServiceUnavailableException],
     ] as const)(
       'maps SyncOrdersError "%s" to %s',
       async (code, expectedExceptionClass) => {
