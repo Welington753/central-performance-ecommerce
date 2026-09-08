@@ -28,6 +28,30 @@ function mockSearchParams(params: Record<string, string> = {}) {
   useSearchParams.mockReturnValue(new URLSearchParams(params));
 }
 
+/**
+ * Mesmo raciocínio de `fakeApiFetchError` em sincronizacoes-backfill.test.tsx:
+ * o automock de `../src/lib/api` não roda o construtor real de
+ * `UnauthorizedAnalyticsApiError`, então troca o protótipo de um `Error` de
+ * verdade pelo do automock — `instanceof UnauthorizedAnalyticsApiError`
+ * continua válido em `page.tsx` (mesma referência de classe).
+ */
+function fakeUnauthorizedAnalyticsApiError(message: string): Error {
+  const error = new Error(message);
+  Object.setPrototypeOf(error, api.UnauthorizedAnalyticsApiError.prototype);
+  Object.assign(error, { name: "UnauthorizedAnalyticsApiError" });
+  return error;
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res;
+    reject = rej;
+  });
+  return { promise, resolve, reject };
+}
+
 function fullBreakdown(
   overrides: Partial<MarketplaceBreakdownEntry>[] = [],
 ): MarketplaceBreakdownEntry[] {
@@ -849,6 +873,280 @@ describe("DashboardPage", () => {
       expect(
         screen.getByText((_, node) => node?.textContent === "Período consultado: 04/07/2026 a 04/09/2026"),
       ).toBeInTheDocument();
+    });
+  });
+
+  describe("resultado válido preservado durante atualização (chave canônica de escopo)", () => {
+    it("1. falha inicial sem nenhum dado carregado ainda mostra o ErrorBlock", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockRejectedValue(
+        new Error("network down"),
+      );
+      render(<DashboardPage />);
+      expect(
+        await screen.findByText(/não foi possível carregar/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("kpi-card-gross-revenue")).not.toBeInTheDocument();
+    });
+
+    it("2. atualização do mesmo escopo que falha mantém os dados visíveis e mostra o aviso", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock)
+        .mockResolvedValueOnce(analyticsDto())
+        .mockRejectedValueOnce(new Error("network down"));
+      (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({ status: "SUCCESS" });
+      const user = userEvent.setup();
+      render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      await user.click(screen.getByRole("button", { name: /sincronizar agora/i }));
+
+      expect(
+        await screen.findByText(/não foi possível atualizar agora/i),
+      ).toBeInTheDocument();
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toBeInTheDocument();
+      // Rótulo correto do horário — nunca chamado de "última sincronização".
+      expect(
+        screen.getByText(/dados carregados em \d{2}\/\d{2}\/\d{4} às \d{2}:\d{2}/i),
+      ).toBeInTheDocument();
+    });
+
+    it("3. uma nova tentativa bem-sucedida remove o aviso e atualiza os números", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock)
+        .mockResolvedValueOnce(analyticsDto())
+        .mockRejectedValueOnce(new Error("network down"))
+        .mockResolvedValueOnce(
+          analyticsDto({
+            summary: {
+              ...analyticsDto().summary!,
+              grossRevenue: "999.00",
+              grossSalesRevenue: "999.00",
+            },
+          }),
+        );
+      (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({ status: "SUCCESS" });
+      const user = userEvent.setup();
+      render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+      await user.click(screen.getByRole("button", { name: /sincronizar agora/i }));
+      await screen.findByText(/não foi possível atualizar agora/i);
+
+      await user.click(screen.getByRole("button", { name: /tentar novamente/i }));
+
+      await waitFor(() =>
+        expect(screen.queryByText(/não foi possível atualizar agora/i)).not.toBeInTheDocument(),
+      );
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("999,00");
+    });
+
+    it("4. trocar de conta e falhar nunca mostra os dados da conta anterior", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { accountId?: string }) => {
+          if (query.accountId === "acc-1") {
+            return Promise.resolve(
+              analyticsDto({
+                scope: { marketplace: "ALL", accountId: "acc-1", allTime: false, logisticsScope: "ALL" },
+              }),
+            );
+          }
+          if (query.accountId === "acc-2") {
+            return Promise.reject(new Error("network down"));
+          }
+          return Promise.resolve(analyticsDto());
+        },
+      );
+      mockSearchParams({ accountId: "acc-1" });
+      const { rerender } = render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      mockSearchParams({ accountId: "acc-2" });
+      rerender(<DashboardPage />);
+
+      expect(
+        await screen.findByText(/não foi possível carregar os kpis agora/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("kpi-card-gross-revenue")).not.toBeInTheDocument();
+    });
+
+    it("5. trocar de período e falhar nunca mostra os dados do período anterior", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { from?: string; to?: string }) => {
+          if (query.from === "2026-08-01") return Promise.resolve(analyticsDto());
+          return Promise.reject(new Error("network down"));
+        },
+      );
+      mockSearchParams({ from: "2026-08-01", to: "2026-08-31" });
+      const { rerender } = render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      mockSearchParams({ from: "2026-07-01", to: "2026-07-31" });
+      rerender(<DashboardPage />);
+
+      expect(
+        await screen.findByText(/não foi possível carregar os kpis agora/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("kpi-card-gross-revenue")).not.toBeInTheDocument();
+    });
+
+    it("6. trocar o filtro logístico e falhar nunca mostra o grupo logístico anterior", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { logisticsScope?: string }) => {
+          if (!query.logisticsScope || query.logisticsScope === "ALL") {
+            return Promise.resolve(
+              analyticsDto({
+                scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" },
+              }),
+            );
+          }
+          return Promise.reject(new Error("network down"));
+        },
+      );
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      const { rerender } = render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      // `router.replace` é mockado e não atualiza `useSearchParams()` de
+      // verdade (mesmo padrão dos testes de corrida acima) — simula a troca
+      // de URL diretamente e re-renderiza.
+      mockSearchParams({ marketplace: "MERCADO_LIVRE", logistics: "FULL" });
+      rerender(<DashboardPage />);
+
+      expect(
+        await screen.findByText(/não foi possível carregar os kpis agora/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("kpi-card-gross-revenue")).not.toBeInTheDocument();
+    });
+
+    it("7. uma resposta atrasada de um escopo antigo nunca sobrescreve o escopo atual", async () => {
+      const first = deferred<MarketplaceAnalyticsKpisDto>();
+      const second = deferred<MarketplaceAnalyticsKpisDto>();
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { marketplace?: string }) =>
+          !query.marketplace || query.marketplace === "ALL" ? first.promise : second.promise,
+      );
+
+      mockSearchParams({});
+      const { rerender } = render(<DashboardPage />);
+      await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(1));
+
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      rerender(<DashboardPage />);
+      await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
+
+      second.resolve(
+        analyticsDto({
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" },
+          summary: { ...analyticsDto().summary!, grossRevenue: "222.00", grossSalesRevenue: "222.00" },
+        }),
+      );
+      await waitFor(() =>
+        expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00"),
+      );
+
+      first.resolve(
+        analyticsDto({
+          summary: { ...analyticsDto().summary!, grossRevenue: "111.00", grossSalesRevenue: "111.00" },
+        }),
+      );
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toHaveTextContent("222,00");
+    });
+
+    it("8. um erro atrasado de um escopo antigo nunca aparece no escopo atual", async () => {
+      const first = deferred<MarketplaceAnalyticsKpisDto>();
+      const second = deferred<MarketplaceAnalyticsKpisDto>();
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockImplementation(
+        (query: { marketplace?: string }) =>
+          !query.marketplace || query.marketplace === "ALL" ? first.promise : second.promise,
+      );
+
+      mockSearchParams({});
+      const { rerender } = render(<DashboardPage />);
+      await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(1));
+
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      rerender(<DashboardPage />);
+      await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
+
+      second.resolve(
+        analyticsDto({
+          scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: false, logisticsScope: "ALL" },
+        }),
+      );
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      first.reject(new Error("network down"));
+      await new Promise((resolve) => setTimeout(resolve, 0));
+
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toBeInTheDocument();
+      expect(screen.queryByText(/não foi possível/i)).not.toBeInTheDocument();
+    });
+
+    it("9. carregamento do mesmo escopo (atualização em andamento) mantém os cards visíveis", async () => {
+      const second = deferred<MarketplaceAnalyticsKpisDto>();
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock)
+        .mockResolvedValueOnce(analyticsDto())
+        .mockReturnValueOnce(second.promise);
+      (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({ status: "SUCCESS" });
+      const user = userEvent.setup();
+      render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      await user.click(screen.getByRole("button", { name: /sincronizar agora/i }));
+
+      expect(await screen.findByText(/atualizando dados/i)).toBeInTheDocument();
+      expect(screen.getByTestId("kpi-card-gross-revenue")).toBeInTheDocument();
+      expect(screen.queryByText(/carregando kpis/i)).not.toBeInTheDocument();
+
+      second.resolve(analyticsDto());
+      await waitFor(() =>
+        expect(screen.queryByText(/atualizando dados/i)).not.toBeInTheDocument(),
+      );
+    });
+
+    it("10. 401/403 na atualização segue o comportamento seguro: nunca preserva dados como se a sessão fosse válida", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock)
+        .mockResolvedValueOnce(analyticsDto())
+        .mockRejectedValueOnce(
+          fakeUnauthorizedAnalyticsApiError("Sessão expirada ou sem permissão para este escopo."),
+        );
+      (api.syncMercadoLivreOrders as jest.Mock).mockResolvedValue({ status: "SUCCESS" });
+      const user = userEvent.setup();
+      render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+
+      await user.click(screen.getByRole("button", { name: /sincronizar agora/i }));
+
+      expect(
+        await screen.findByText(/sessão expirada ou sem permissão/i),
+      ).toBeInTheDocument();
+      expect(screen.queryByTestId("kpi-card-gross-revenue")).not.toBeInTheDocument();
+      expect(screen.queryByText(/não foi possível atualizar agora/i)).not.toBeInTheDocument();
+    });
+
+    it("11. cobertura parcial continua mostrando o aviso de cobertura mesmo no fluxo de resultado válido", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          dataCoverage: {
+            status: "partial",
+            synchronizedIntervals: [{ from: "2026-08-15", to: "2026-09-01" }],
+            selectedPeriodComplete: false,
+            comparisonPeriodComplete: true,
+          },
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByTestId("kpi-card-gross-revenue");
+      expect(screen.getByText(/cobertura parcial/i)).toBeInTheDocument();
+    });
+
+    it("12. o ErrorBlock fatal nunca exibe nenhum KPI fictício", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockRejectedValue(
+        new Error("network down"),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/não foi possível carregar/i);
+      expect(screen.queryByText(/R\$\s?\d/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/\d+([.,]\d+)?\s?%/)).not.toBeInTheDocument();
     });
   });
 });

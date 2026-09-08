@@ -185,7 +185,7 @@ describe("DashboardPage — resultado da sincronização", () => {
     expect(screen.getByRole("button", { name: "Sincronizar agora" })).not.toBeDisabled();
   });
 
-  it("sucesso parcial: sincronização é concluída mas a recarga de KPIs falha — mostra erro de KPI, não erro de sincronização", async () => {
+  it("sucesso parcial: sincronização é concluída mas a recarga de KPIs falha — mantém o resultado anterior com aviso, não erro de sincronização nem ErrorBlock", async () => {
     await renderDashboardWithScope(kpisDto());
     api.syncMercadoLivreOrders.mockResolvedValueOnce({ status: "SUCCESS" });
     api.fetchMarketplaceAnalyticsKpis.mockRejectedValueOnce(new Error("boom"));
@@ -193,7 +193,13 @@ describe("DashboardPage — resultado da sincronização", () => {
     const user = userEvent.setup();
     await user.click(screen.getByRole("button", { name: "Sincronizar agora" }));
 
-    await screen.findByText("Não foi possível carregar os KPIs agora.");
+    // Já existe um resultado válido para este escopo (a chamada inicial) —
+    // uma recarga que falha nunca deve zerar a tela num ErrorBlock; mantém
+    // o retrato anterior e mostra só o aviso de atualização.
+    await screen.findByText(/não foi possível atualizar agora/i);
+    expect(
+      screen.queryByText("Não foi possível carregar os KPIs agora."),
+    ).not.toBeInTheDocument();
     expect(
       screen.queryByText("Não foi possível sincronizar agora. Tente novamente."),
     ).not.toBeInTheDocument();

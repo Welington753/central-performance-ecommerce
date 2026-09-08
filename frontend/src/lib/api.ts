@@ -203,6 +203,9 @@ export async function fetchMercadoLivreKpis(
 
 export class InvalidAnalyticsFilterApiError extends ApiFetchError {}
 
+/** 401/403 no endpoint de KPIs — sessão expirada ou sem permissão para o escopo pedido. */
+export class UnauthorizedAnalyticsApiError extends ApiFetchError {}
+
 export interface MarketplaceAnalyticsQuery {
   // Ausentes quando `allTime` é true — o backend ignora `from`/`to` nesse
   // modo (Fase 4, "Todo o período").
@@ -234,6 +237,11 @@ export async function fetchMarketplaceAnalyticsKpis(
   }
 
   const response = await apiFetch(`/marketplace-analytics/kpis?${params.toString()}`);
+  if (response.status === 401 || response.status === 403) {
+    throw new UnauthorizedAnalyticsApiError(
+      "Sessão expirada ou sem permissão para este escopo. Entre novamente.",
+    );
+  }
   if (response.status === 400) {
     throw new InvalidAnalyticsFilterApiError("Filtro inválido.");
   }

@@ -18,6 +18,7 @@ import { ProductRankingTabs } from "@/components/ProductRankingTabs";
 import { ScopeFilters } from "@/components/ScopeFilters";
 import {
   ApiFetchError,
+  UnauthorizedAnalyticsApiError,
   fetchMarketplaceAnalyticsKpis,
   syncMercadoLivreOrders,
 } from "@/lib/api";
@@ -229,21 +230,100 @@ function accountDisplayLabel(account: AccountBreakdownEntry): string {
   return `Conta ${account.accountId.slice(0, 8)}`;
 }
 
+/**
+ * Chave canônica do escopo de uma consulta de KPIs (marketplace, conta,
+ * tipo de período, `from`/`to`, `allTime` e filtro logístico) — usada para
+ * nunca reaproveitar (nem exibir como se fosse atual) um resultado obtido
+ * para um escopo diferente. `accountId: null` identifica o slot "sem conta"
+ * (visão agregada usada para o painel/dropdown), distinto do slot da conta
+ * selecionada.
+ */
+function buildScopeKey(input: {
+  marketplace: MarketplaceFilter;
+  accountId: string | null;
+  allTime: boolean;
+  from: string | null;
+  to: string | null;
+  logisticsScope: LogisticsScopeValue;
+}): string {
+  const periodPart = input.allTime
+    ? "ALLTIME"
+    : `RANGE|${input.from ?? ""}|${input.to ?? ""}`;
+  return [
+    input.marketplace,
+    input.accountId ?? "",
+    periodPart,
+    input.logisticsScope,
+  ].join("|");
+}
+
+interface ScopeSlotState {
+  data: MarketplaceAnalyticsKpisDto | null;
+  /** Chave do escopo ao qual `data` pertence (null enquanto nada foi carregado). */
+  dataKey: string | null;
+  /** ISO 8601 de quando `data` foi carregado com sucesso — rótulo "Dados carregados em". */
+  dataLoadedAt: string | null;
+  /** Chave da última requisição concluída (sucesso ou falha), para saber se já há uma resposta assentada para o escopo atual. */
+  lastRequestKey: string | null;
+  lastRequestFailed: boolean;
+  /** 401/403: nunca deve ser tratado como "atualização que falhou, mantém dado antigo". */
+  lastRequestAuthError: boolean;
+  /** Chave da requisição em voo agora, ou null se nenhuma está pendente. */
+  pendingKey: string | null;
+}
+
+const INITIAL_SCOPE_SLOT: ScopeSlotState = {
+  data: null,
+  dataKey: null,
+  dataLoadedAt: null,
+  lastRequestKey: null,
+  lastRequestFailed: false,
+  lastRequestAuthError: false,
+  pendingKey: null,
+};
+
+/** "DD/MM/AAAA às HH:mm" — nunca "DD/MM/AAAA, HH:mm" (formato padrão do Intl pt-BR). */
+function formatLoadedAtLabel(iso: string | null): string | null {
+  const formatted = formatDateTimeSaoPaulo(iso);
+  if (!formatted) return null;
+  return formatted.replace(", ", " às ");
+}
+
+function StaleDataBanner({
+  loadedAtLabel,
+  onRetry,
+}: {
+  loadedAtLabel: string | null;
+  onRetry: () => void;
+}) {
+  return (
+    <div
+      role="alert"
+      className="flex flex-wrap items-center justify-between gap-3 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
+    >
+      <p>
+        Não foi possível atualizar agora. Exibindo os últimos dados carregados
+        {loadedAtLabel ? ` em ${loadedAtLabel}` : ""}.
+      </p>
+      <button
+        type="button"
+        onClick={onRetry}
+        className="rounded-md border border-amber-500/40 px-3 py-1.5 text-sm font-medium hover:bg-amber-500/10"
+      >
+        Tentar novamente
+      </button>
+    </div>
+  );
+}
+
 function DashboardContent() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const [scopeData, setScopeData] = useState<MarketplaceAnalyticsKpisDto | null>(null);
-  const [scopeError, setScopeError] = useState(false);
-  const [scopeRequestKey, setScopeRequestKey] = useState<string | null>(null);
-
-  const [accountScopedData, setAccountScopedData] =
-    useState<MarketplaceAnalyticsKpisDto | null>(null);
-  const [accountScopedError, setAccountScopedError] = useState(false);
-  const [accountScopedRequestKey, setAccountScopedRequestKey] = useState<
-    string | null
-  >(null);
+  const [scopeSlot, setScopeSlot] = useState<ScopeSlotState>(INITIAL_SCOPE_SLOT);
+  const [accountScopedSlot, setAccountScopedSlot] =
+    useState<ScopeSlotState>(INITIAL_SCOPE_SLOT);
 
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
@@ -278,9 +358,18 @@ function DashboardContent() {
       logistics: LogisticsScopeValue,
     ) => {
       const seq = ++scopeRequestSeqRef.current;
-      const key = allTimeFlag
-        ? `ALLTIME|${mkt}|${logistics}`
-        : `${mkt}|${logistics}|${from}|${to}`;
+      const key = buildScopeKey({
+        marketplace: mkt,
+        accountId: null,
+        allTime: allTimeFlag,
+        from,
+        to,
+        logisticsScope: logistics,
+      });
+      setScopeSlot((prev) => ({ ...prev, pendingKey: key }));
+      let outcome:
+        | { data: MarketplaceAnalyticsKpisDto }
+        | { authError: boolean };
       try {
         const data = await fetchMarketplaceAnalyticsKpis(
           allTimeFlag
@@ -292,24 +381,39 @@ function DashboardContent() {
                 logisticsScope: logistics,
               },
         );
-        // Uma requisição mais nova já começou enquanto esta estava em voo —
-        // esta resposta chegou tarde demais e nunca pode substituir o
-        // escopo atual (nem sucesso, nem erro, nem a chave de carregamento).
-        if (scopeRequestSeqRef.current !== seq) return;
-        setScopeData(data);
-        setScopeError(false);
-      } catch {
-        if (scopeRequestSeqRef.current !== seq) return;
-        // Nunca zera um `scopeData` já carregado com sucesso — uma recarga
-        // que falha (ex.: após "Sincronizar agora") deve manter o último
-        // retrato bom na tela com um aviso pontual, nunca apagar painéis,
-        // filtros e o próprio botão de sincronizar por trás de uma tela de
-        // erro em branco.
-        setScopeError(true);
-      } finally {
-        if (scopeRequestSeqRef.current === seq) {
-          setScopeRequestKey(key);
-        }
+        outcome = { data };
+      } catch (error) {
+        outcome = { authError: error instanceof UnauthorizedAnalyticsApiError };
+      }
+      // Uma requisição mais nova já começou enquanto esta estava em voo —
+      // esta resposta chegou tarde demais e nunca pode substituir o
+      // escopo atual (nem sucesso, nem erro, nem a chave de carregamento).
+      if (scopeRequestSeqRef.current !== seq) return;
+      if ("data" in outcome) {
+        setScopeSlot((prev) => ({
+          ...prev,
+          data: outcome.data,
+          dataKey: key,
+          dataLoadedAt: new Date().toISOString(),
+          lastRequestKey: key,
+          lastRequestFailed: false,
+          lastRequestAuthError: false,
+          pendingKey: null,
+        }));
+      } else {
+        // Nunca zera `data`/`dataKey` já carregados com sucesso — uma
+        // recarga que falha (ex.: após "Sincronizar agora") deve manter o
+        // último retrato bom na tela com um aviso pontual, nunca apagar
+        // painéis, filtros e o próprio botão de sincronizar por trás de uma
+        // tela de erro em branco. 401/403 é a exceção: nunca deve parecer
+        // que a sessão continua válida.
+        setScopeSlot((prev) => ({
+          ...prev,
+          lastRequestKey: key,
+          lastRequestFailed: true,
+          lastRequestAuthError: outcome.authError,
+          pendingKey: null,
+        }));
       }
     },
     [],
@@ -334,9 +438,18 @@ function DashboardContent() {
       logistics: LogisticsScopeValue,
     ) => {
       const seq = ++accountScopedRequestSeqRef.current;
-      const key = allTimeFlag
-        ? `ALLTIME|${mkt}|${account}|${logistics}`
-        : `${mkt}|${account}|${logistics}|${from}|${to}`;
+      const key = buildScopeKey({
+        marketplace: mkt,
+        accountId: account,
+        allTime: allTimeFlag,
+        from,
+        to,
+        logisticsScope: logistics,
+      });
+      setAccountScopedSlot((prev) => ({ ...prev, pendingKey: key }));
+      let outcome:
+        | { data: MarketplaceAnalyticsKpisDto }
+        | { authError: boolean };
       try {
         const data = await fetchMarketplaceAnalyticsKpis(
           allTimeFlag
@@ -354,17 +467,32 @@ function DashboardContent() {
                 logisticsScope: logistics,
               },
         );
-        if (accountScopedRequestSeqRef.current !== seq) return;
-        setAccountScopedData(data);
-        setAccountScopedError(false);
-      } catch {
-        if (accountScopedRequestSeqRef.current !== seq) return;
-        // Mesmo raciocínio de `loadScope` acima: preserva o último dado bom.
-        setAccountScopedError(true);
-      } finally {
-        if (accountScopedRequestSeqRef.current === seq) {
-          setAccountScopedRequestKey(key);
-        }
+        outcome = { data };
+      } catch (error) {
+        outcome = { authError: error instanceof UnauthorizedAnalyticsApiError };
+      }
+      if (accountScopedRequestSeqRef.current !== seq) return;
+      if ("data" in outcome) {
+        setAccountScopedSlot((prev) => ({
+          ...prev,
+          data: outcome.data,
+          dataKey: key,
+          dataLoadedAt: new Date().toISOString(),
+          lastRequestKey: key,
+          lastRequestFailed: false,
+          lastRequestAuthError: false,
+          pendingKey: null,
+        }));
+      } else {
+        // Mesmo raciocínio de `loadScope` acima: preserva o último dado bom,
+        // exceto em 401/403.
+        setAccountScopedSlot((prev) => ({
+          ...prev,
+          lastRequestKey: key,
+          lastRequestFailed: true,
+          lastRequestAuthError: outcome.authError,
+          pendingKey: null,
+        }));
       }
     },
     [],
@@ -393,28 +521,80 @@ function DashboardContent() {
     loadAccountScoped,
   ]);
 
-  const scopeRequestExpectedKey = allTime
-    ? `ALLTIME|${marketplace}|${logisticsScope}`
-    : effectiveFrom && effectiveTo
-      ? `${marketplace}|${logisticsScope}|${effectiveFrom}|${effectiveTo}`
+  const periodReady = allTime || (effectiveFrom !== null && effectiveTo !== null);
+  const scopeKey = periodReady
+    ? buildScopeKey({
+        marketplace,
+        accountId: null,
+        allTime,
+        from: effectiveFrom,
+        to: effectiveTo,
+        logisticsScope,
+      })
+    : null;
+  const accountScopeKey =
+    accountId && periodReady
+      ? buildScopeKey({
+          marketplace,
+          accountId,
+          allTime,
+          from: effectiveFrom,
+          to: effectiveTo,
+          logisticsScope,
+        })
       : null;
-  const scopeLoading =
-    scopeRequestExpectedKey !== null && scopeRequestKey !== scopeRequestExpectedKey;
 
-  const accountRequestExpectedKey = !accountId
-    ? null
-    : allTime
-      ? `ALLTIME|${marketplace}|${accountId}|${logisticsScope}`
-      : effectiveFrom && effectiveTo
-        ? `${marketplace}|${accountId}|${logisticsScope}|${effectiveFrom}|${effectiveTo}`
-        : null;
-  const accountScopedLoading =
-    accountRequestExpectedKey !== null &&
-    accountScopedRequestKey !== accountRequestExpectedKey;
+  // Cada slot (`scopeSlot`/`accountScopedSlot`) só é considerado "dado
+  // válido" quando `dataKey` bate exatamente com a chave canônica do escopo
+  // atual — nunca reaproveita (nem exibe como se fosse atual) um resultado
+  // obtido para outro marketplace, conta, período ou filtro logístico.
+  const scopeHasValidData = scopeKey !== null && scopeSlot.dataKey === scopeKey;
+  const scopeFetching = scopeKey !== null && scopeSlot.pendingKey === scopeKey;
+  const scopeFailedForKey =
+    scopeKey !== null &&
+    scopeSlot.lastRequestFailed &&
+    scopeSlot.lastRequestKey === scopeKey;
+  const scopeAuthFatal = scopeFailedForKey && scopeSlot.lastRequestAuthError;
 
-  const displayData = accountId ? accountScopedData : scopeData;
-  const displayLoading = accountId ? accountScopedLoading : scopeLoading;
-  const displayError = accountId ? accountScopedError : scopeError;
+  const accountHasValidData =
+    accountScopeKey !== null && accountScopedSlot.dataKey === accountScopeKey;
+  const accountFetching =
+    accountScopeKey !== null && accountScopedSlot.pendingKey === accountScopeKey;
+  const accountFailedForKey =
+    accountScopeKey !== null &&
+    accountScopedSlot.lastRequestFailed &&
+    accountScopedSlot.lastRequestKey === accountScopeKey;
+  const accountAuthFatal = accountFailedForKey && accountScopedSlot.lastRequestAuthError;
+
+  const displaySlot = accountId ? accountScopedSlot : scopeSlot;
+  const displayHasValidData = accountId ? accountHasValidData : scopeHasValidData;
+  const displayFetching = accountId ? accountFetching : scopeFetching;
+  const displayFailedForKey = accountId ? accountFailedForKey : scopeFailedForKey;
+  const displayAuthFatal = accountId ? accountAuthFatal : scopeAuthFatal;
+
+  // Nunca exibe `data` de um `dataKey` que não bate com o escopo atual —
+  // mesmo durante um `pendingKey` de uma nova requisição para outro escopo.
+  const displayData = displayHasValidData ? displaySlot.data : null;
+  const displayLoadedAtLabel = displayHasValidData
+    ? formatLoadedAtLabel(displaySlot.dataLoadedAt)
+    : null;
+  // "Atualização em andamento" (dado válido + nova busca em voo) não deve
+  // reduzir a tela a um spinner — mantém cards/gráficos/rankings visíveis.
+  const displayLoading = displayFetching && !displayHasValidData;
+  const displayUpdating = displayFetching && displayHasValidData;
+  // Aviso de atualização: já existe um resultado válido para este escopo
+  // exato, e a última requisição para essa MESMA chave falhou — nunca por
+  // 401/403 (aí é erro fatal, nunca finge que a sessão continua válida).
+  const displayStaleWarning =
+    !displayFetching && displayHasValidData && displayFailedForKey && !displayAuthFatal;
+  // Erro fatal: a última requisição para esta chave falhou e (a) não há
+  // nenhum resultado válido para o escopo atual, OU (b) foi 401/403 — nesse
+  // caso é sempre fatal, mesmo que `data` ainda bata com a chave atual
+  // (nunca finge que a sessão continua válida por já ter dado em tela).
+  const displayFatalError =
+    !displayFetching &&
+    displayFailedForKey &&
+    (displayAuthFatal || !displayHasValidData);
 
   function handlePeriodChange(range: { from: string; to: string }) {
     const params = new URLSearchParams(searchParams.toString());
@@ -514,7 +694,12 @@ function DashboardContent() {
     </div>
   );
 
-  const scopeInitialLoading = scopeData === null && !scopeError && scopeLoading;
+  // Este gate cobre só o carregamento "sem conta" que alimenta o painel de
+  // marketplaces/dropdown de contas — nunca aconteceu nenhum sucesso ainda
+  // (`scopeSlot.data === null`) para NENHUM escopo, nem só o atual.
+  const scopeNeverLoaded = scopeSlot.data === null;
+  const scopeInitialLoading =
+    scopeNeverLoaded && scopeKey !== null && !scopeFailedForKey;
 
   if (scopeInitialLoading) {
     return (
@@ -525,7 +710,7 @@ function DashboardContent() {
     );
   }
 
-  if (scopeError && scopeData === null) {
+  if (scopeNeverLoaded && scopeFailedForKey) {
     return (
       <div className="flex flex-col gap-8">
         {header}
@@ -544,9 +729,9 @@ function DashboardContent() {
   // com histórico, para nenhum marketplace) — mesmo estado vazio de antes,
   // agora derivado da disponibilidade do escopo ALL.
   if (
-    scopeData &&
-    scopeData.scope.marketplace === "ALL" &&
-    scopeData.availability === "NOT_CONNECTED"
+    scopeSlot.data &&
+    scopeSlot.data.scope.marketplace === "ALL" &&
+    scopeSlot.data.availability === "NOT_CONNECTED"
   ) {
     return (
       <div className="flex flex-col gap-8">
@@ -570,7 +755,7 @@ function DashboardContent() {
     );
   }
 
-  const dropdownAccounts = scopeData?.breakdownByAccount ?? [];
+  const dropdownAccounts = scopeSlot.data?.breakdownByAccount ?? [];
   const breakdownByMarketplace = displayData?.breakdownByMarketplace ?? [];
   // "Integração ativa": a conexão em si está boa (com ou sem dado ainda) —
   // HISTORICAL_ONLY fica de fora porque representa justamente uma conexão
@@ -708,78 +893,108 @@ function DashboardContent() {
 
           {displayLoading ? (
             <LoadingBlock label="Carregando KPIs..." />
-          ) : displayError ? (
+          ) : displayFatalError ? (
             <ErrorBlock
-              message="Não foi possível carregar os KPIs agora."
+              message={
+                displayAuthFatal
+                  ? "Sessão expirada ou sem permissão para este escopo. Entre novamente."
+                  : "Não foi possível carregar os KPIs agora."
+              }
               onRetry={() => void reloadCurrentScope()}
             />
-          ) : displayData?.summary &&
-            (displayData.comparison || displayData.scope.allTime) ? (
-            <div className="flex flex-col gap-6">
-              <DataCoverageBanner
-                coverage={displayData.dataCoverage}
-                requestedPeriod={
-                  !allTime && effectivePeriod ? effectivePeriod : undefined
-                }
-              />
-
-              <KpiSummaryCards
-                summary={displayData.summary}
-                comparison={displayData.comparison ?? EMPTY_COMPARISON}
-              />
-              <p className="text-xs text-foreground/50">
-                Vendas brutas: pedidos pagos + pedidos cancelados com valor
-                válido, equivalente ao indicador do marketplace.
-              </p>
-
-              <OperationalKpiCards
-                summary={displayData.summary}
-                comparison={displayData.comparison ?? EMPTY_COMPARISON}
-              />
-
-              <AdditionalKpiCards
-                summary={displayData.summary}
-                comparison={displayData.comparison ?? EMPTY_COMPARISON}
-                bestDay={displayData.bestDay}
-              />
-
-              <CancellationsPanel
-                summary={displayData.summary}
-                comparison={displayData.comparison ?? EMPTY_COMPARISON}
-              />
-
-              <div className="flex flex-col gap-3">
-                <h2 className="text-lg font-semibold">Faturamento diário</h2>
-                <DailyRevenueChart dailySeries={displayData.dailySeries} />
-              </div>
-
-              <div className="flex flex-col gap-3">
-                <h2 className="text-lg font-semibold">Ranking de produtos</h2>
-                <ProductRankingTabs
-                  bySku={displayData.topProductsBySku}
-                  byListing={displayData.topListings}
-                />
-              </div>
-
-              {displayData.full ? (
-                <FullPerformanceSection full={displayData.full} />
+          ) : (
+            <>
+              {displayUpdating ? (
+                <div
+                  role="status"
+                  className="flex items-center gap-2 rounded-md border border-border-subtle bg-surface px-4 py-3 text-sm text-foreground/60"
+                >
+                  <span
+                    className="h-4 w-4 animate-spin rounded-full border-2 border-border-subtle border-t-brand"
+                    aria-hidden="true"
+                  />
+                  Atualizando dados...
+                </div>
               ) : null}
-            </div>
-          ) : displayData ? (
-            <div className="flex flex-col gap-4">
-              <DataCoverageBanner
-                coverage={displayData.dataCoverage}
-                requestedPeriod={
-                  !allTime && effectivePeriod ? effectivePeriod : undefined
-                }
-              />
-              <p className="text-sm text-foreground/60">
-                {displayData.availability === "NOT_CONNECTED"
-                  ? "Nenhuma conta elegível para este filtro."
-                  : "Esta conta ainda não tem nenhuma sincronização concluída — nenhum KPI para exibir ainda."}
-              </p>
-            </div>
-          ) : null}
+              {displayStaleWarning ? (
+                <StaleDataBanner
+                  loadedAtLabel={displayLoadedAtLabel}
+                  onRetry={() => void reloadCurrentScope()}
+                />
+              ) : null}
+              {displayData?.summary &&
+              (displayData.comparison || displayData.scope.allTime) ? (
+                <div className="flex flex-col gap-6">
+                  <DataCoverageBanner
+                    coverage={displayData.dataCoverage}
+                    requestedPeriod={
+                      !allTime && effectivePeriod ? effectivePeriod : undefined
+                    }
+                  />
+
+                  <KpiSummaryCards
+                    summary={displayData.summary}
+                    comparison={displayData.comparison ?? EMPTY_COMPARISON}
+                  />
+                  <p className="text-xs text-foreground/50">
+                    Vendas brutas: pedidos pagos + pedidos cancelados com
+                    valor válido, equivalente ao indicador do marketplace.
+                  </p>
+
+                  <OperationalKpiCards
+                    summary={displayData.summary}
+                    comparison={displayData.comparison ?? EMPTY_COMPARISON}
+                  />
+
+                  <AdditionalKpiCards
+                    summary={displayData.summary}
+                    comparison={displayData.comparison ?? EMPTY_COMPARISON}
+                    bestDay={displayData.bestDay}
+                  />
+
+                  <CancellationsPanel
+                    summary={displayData.summary}
+                    comparison={displayData.comparison ?? EMPTY_COMPARISON}
+                  />
+
+                  <div className="flex flex-col gap-3">
+                    <h2 className="text-lg font-semibold">
+                      Faturamento diário
+                    </h2>
+                    <DailyRevenueChart dailySeries={displayData.dailySeries} />
+                  </div>
+
+                  <div className="flex flex-col gap-3">
+                    <h2 className="text-lg font-semibold">
+                      Ranking de produtos
+                    </h2>
+                    <ProductRankingTabs
+                      bySku={displayData.topProductsBySku}
+                      byListing={displayData.topListings}
+                    />
+                  </div>
+
+                  {displayData.full ? (
+                    <FullPerformanceSection full={displayData.full} />
+                  ) : null}
+                </div>
+              ) : displayData ? (
+                <div className="flex flex-col gap-4">
+                  <DataCoverageBanner
+                    coverage={displayData.dataCoverage}
+                    requestedPeriod={
+                      !allTime && effectivePeriod ? effectivePeriod : undefined
+                    }
+                  />
+                  <p className="text-sm text-foreground/60">
+                    {displayData.availability === "NOT_CONNECTED"
+                      ? "Nenhuma conta elegível para este filtro."
+                      : "Esta conta ainda não tem nenhuma sincronização concluída — nenhum KPI para exibir ainda."}
+                  </p>
+                </div>
+              ) : null}
+            </>
+          )}
         </>
       )}
     </div>
