@@ -7,8 +7,10 @@ import { MercadoLivreOrdersModule } from '../mercado-livre-orders/mercado-livre-
 import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { SyncModule } from '../../sync/sync.module';
 import { MarketplaceAutoSyncService } from './marketplace-auto-sync.service';
+import { BackfillJobsPersistenceService } from './backfill-jobs-persistence.service';
 import { MarketplaceBackfillController } from './marketplace-backfill.controller';
 import { MarketplaceBackfillService } from './marketplace-backfill.service';
+import { MarketplaceBackfillWorkerService } from './marketplace-backfill-worker.service';
 
 /**
  * Módulo genérico de orquestração de sincronização multi-marketplace (Fase
@@ -29,6 +31,8 @@ import { MarketplaceBackfillService } from './marketplace-backfill.service';
   controllers: [MarketplaceBackfillController],
   providers: [
     MarketplaceBackfillService,
+    BackfillJobsPersistenceService,
+    MarketplaceBackfillWorkerService,
     AdvisoryLockService,
     MarketplaceAutoSyncService,
   ],

@@ -7,10 +7,35 @@ import {
 import { SyncAlreadyRunningError } from '../marketplace-orders/marketplace-orders-persistence.service';
 import { SyncOrdersError } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
 import { AmazonOrdersSyncError } from '../amazon-orders/amazon-orders-sync.service';
+import { BackfillJobActiveConflictError } from './backfill-jobs-persistence.service';
 import {
   BackfillError,
   MarketplaceBackfillService,
 } from './marketplace-backfill.service';
+
+function backfillJobRow(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'job-1',
+    marketplaceAccountId: 'acc-1',
+    marketplace: Marketplace.MERCADO_LIVRE,
+    status: 'QUEUED',
+    chunksProcessed: 0,
+    attemptCount: 0,
+    requestedAt: new Date('2026-09-01T00:00:00.000Z'),
+    startedAt: null,
+    lastActivityAt: null,
+    nextAttemptAt: new Date('2026-09-01T00:00:00.000Z'),
+    completedAt: null,
+    lastErrorCode: null,
+    pauseRequested: false,
+    leaseOwner: null,
+    leaseExpiresAt: null,
+    version: 0,
+    createdAt: new Date('2026-09-01T00:00:00.000Z'),
+    updatedAt: new Date('2026-09-01T00:00:00.000Z'),
+    ...overrides,
+  };
+}
 
 function account(
   overrides: Partial<MarketplaceAccount> = {},
@@ -70,6 +95,7 @@ function buildService(
     mlSyncService?: Record<string, jest.Mock>;
     amazonSyncService?: Record<string, jest.Mock>;
     syncRunsService?: Record<string, jest.Mock>;
+    jobsPersistence?: Record<string, jest.Mock>;
   } = {},
 ) {
   const marketplaceAccountsService = {
@@ -106,6 +132,13 @@ function buildService(
     findAll: jest.fn().mockResolvedValue([syncRun()]),
     ...overrides.syncRunsService,
   };
+  const jobsPersistence = {
+    findLatestJob: jest.fn().mockResolvedValue(null),
+    createJob: jest.fn(),
+    requestPause: jest.fn().mockResolvedValue(null),
+    resumeJob: jest.fn().mockResolvedValue(null),
+    ...overrides.jobsPersistence,
+  };
 
   const service = new MarketplaceBackfillService(
     marketplaceAccountsService as never,
@@ -113,6 +146,7 @@ function buildService(
     mlSyncService as never,
     amazonSyncService as never,
     syncRunsService as never,
+    jobsPersistence as never,
   );
 
   return {
@@ -122,6 +156,7 @@ function buildService(
     mlSyncService,
     amazonSyncService,
     syncRunsService,
+    jobsPersistence,
   };
 }
 
@@ -146,6 +181,7 @@ describe('MarketplaceBackfillService', () => {
         synchronizedIntervals: [],
         lastProcessedChunk: null,
         lastRunErrorCode: null,
+        job: null,
       });
     });
 
@@ -445,6 +481,129 @@ describe('MarketplaceBackfillService', () => {
       await expect(service.runNextChunk('acc-1')).rejects.toMatchObject({
         code: 'SYNC_FAILED',
       });
+    });
+  });
+
+  describe('startBackfill', () => {
+    it('creates a job when the account is connected and has an initial sync', async () => {
+      const { service, jobsPersistence } = buildService();
+      jobsPersistence.findLatestJob.mockResolvedValue(backfillJobRow());
+
+      const status = await service.startBackfill('acc-1');
+
+      expect(jobsPersistence.createJob).toHaveBeenCalledWith(
+        'acc-1',
+        Marketplace.MERCADO_LIVRE,
+      );
+      expect(status.job).toMatchObject({ id: 'job-1', status: 'QUEUED' });
+    });
+
+    it('is idempotent: an active-job conflict never throws — returns the existing job status', async () => {
+      const { service, jobsPersistence } = buildService({
+        jobsPersistence: {
+          createJob: jest
+            .fn()
+            .mockRejectedValue(new BackfillJobActiveConflictError()),
+        },
+      });
+      jobsPersistence.findLatestJob.mockResolvedValue(
+        backfillJobRow({ status: 'RUNNING' }),
+      );
+
+      const status = await service.startBackfill('acc-1');
+      expect(status.job).toMatchObject({ status: 'RUNNING' });
+    });
+
+    it('rejects a disconnected account with ACCOUNT_NOT_CONNECTED, never creating a job', async () => {
+      const { service, jobsPersistence } = buildService({
+        marketplaceAccountsService: {
+          findByIdOrFail: jest
+            .fn()
+            .mockResolvedValue(
+              account({ status: MarketplaceAccountStatus.DISCONNECTED }),
+            ),
+        },
+      });
+      await expect(service.startBackfill('acc-1')).rejects.toMatchObject({
+        code: 'ACCOUNT_NOT_CONNECTED',
+      });
+      expect(jobsPersistence.createJob).not.toHaveBeenCalled();
+    });
+
+    it('rejects an account with no initial sync yet, never creating a job', async () => {
+      const { service, jobsPersistence } = buildService({
+        persistence: {
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [],
+            oldestFrom: null,
+            oldestRunRecordsRead: null,
+          }),
+        },
+      });
+      await expect(service.startBackfill('acc-1')).rejects.toMatchObject({
+        code: 'NO_INITIAL_SYNC_YET',
+      });
+      expect(jobsPersistence.createJob).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pauseBackfill / resumeBackfill', () => {
+    it('pauseBackfill delegates to jobsPersistence.requestPause and returns the fresh status', async () => {
+      const { service, jobsPersistence } = buildService();
+      jobsPersistence.requestPause.mockResolvedValue(
+        backfillJobRow({ status: 'PAUSED' }),
+      );
+      jobsPersistence.findLatestJob.mockResolvedValue(
+        backfillJobRow({ status: 'PAUSED' }),
+      );
+
+      const status = await service.pauseBackfill('acc-1');
+      expect(jobsPersistence.requestPause).toHaveBeenCalledWith('acc-1');
+      expect(status.job).toMatchObject({ status: 'PAUSED' });
+    });
+
+    it('resumeBackfill delegates to jobsPersistence.resumeJob and returns the fresh status', async () => {
+      const { service, jobsPersistence } = buildService();
+      jobsPersistence.resumeJob.mockResolvedValue(
+        backfillJobRow({ status: 'QUEUED' }),
+      );
+      jobsPersistence.findLatestJob.mockResolvedValue(
+        backfillJobRow({ status: 'QUEUED' }),
+      );
+
+      const status = await service.resumeBackfill('acc-1');
+      expect(jobsPersistence.resumeJob).toHaveBeenCalledWith('acc-1');
+      expect(status.job).toMatchObject({ status: 'QUEUED' });
+    });
+  });
+
+  describe('getStatus — job', () => {
+    it('exposes job: null when no backfill job was ever created for the account', async () => {
+      const { service, jobsPersistence } = buildService();
+      jobsPersistence.findLatestJob.mockResolvedValue(null);
+      const status = await service.getStatus('acc-1');
+      expect(status.job).toBeNull();
+    });
+
+    it('exposes the job summary alongside the existing coverage-derived fields', async () => {
+      const { service, jobsPersistence } = buildService();
+      jobsPersistence.findLatestJob.mockResolvedValue(
+        backfillJobRow({
+          status: 'RETRY_WAIT',
+          chunksProcessed: 4,
+          attemptCount: 2,
+          lastErrorCode: 'PROVIDER_RATE_LIMITED',
+        }),
+      );
+      const status = await service.getStatus('acc-1');
+      expect(status.job).toMatchObject({
+        status: 'RETRY_WAIT',
+        chunksProcessed: 4,
+        attemptCount: 2,
+        lastErrorCode: 'PROVIDER_RATE_LIMITED',
+      });
+      // Campos antigos continuam intactos.
+      expect(status.oldestCoveredAt).toBe('2026-05-31');
     });
   });
 });

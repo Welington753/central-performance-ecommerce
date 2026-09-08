@@ -1,0 +1,175 @@
+import { DataSource } from 'typeorm';
+import { randomUUID } from 'crypto';
+import { ConfigService } from '@nestjs/config';
+import { createTestDataSource } from '../../test-utils/create-test-data-source';
+import { Marketplace } from '../contracts/marketplace.enum';
+import {
+  MarketplaceAccount,
+  MarketplaceAccountStatus,
+} from '../marketplace-accounts/marketplace-account.entity';
+import { BackfillJobsPersistenceService } from './backfill-jobs-persistence.service';
+import { MarketplaceBackfillWorkerService } from './marketplace-backfill-worker.service';
+
+function fakeConfigService(): ConfigService {
+  const values: Record<string, string | number> = {
+    NODE_ENV: 'production',
+    BACKFILL_WORKER_ENABLED: 'true',
+    BACKFILL_WORKER_TICK_MS: 5000,
+    BACKFILL_WORKER_MAX_CONCURRENT_JOBS: 5,
+    BACKFILL_WORKER_LEASE_MS: 60000,
+    BACKFILL_WORKER_MAX_ATTEMPTS: 5,
+    BACKFILL_WORKER_RETRY_BASE_MS: 1000,
+    BACKFILL_WORKER_RETRY_MAX_MS: 60000,
+    BACKFILL_WORKER_REQUEUE_MS: 2000,
+    BACKFILL_WORKER_RATE_LIMIT_BACKOFF_MS: 30000,
+  };
+  return {
+    get: (key: string, fallback?: unknown) =>
+      key in values ? values[key] : fallback,
+  } as unknown as ConfigService;
+}
+
+/**
+ * Prova de concorrência REAL entre PROCESSOS (Fase 4, "Backfill durável"):
+ * duas instâncias INDEPENDENTES de `MarketplaceBackfillWorkerService`,
+ * cada uma com sua própria `BackfillJobsPersistenceService`, competindo pelo
+ * MESMO job contra um PostgreSQL 16 real — só o lock do Postgres (`FOR
+ * UPDATE SKIP LOCKED`) pode garantir isto, nunca um mock. `runNextChunk` é
+ * mockado (nenhuma chamada real a marketplace) só para contar quantas vezes
+ * foi de fato invocado.
+ */
+describe('MarketplaceBackfillWorkerService — concorrência entre processos (Postgres real)', () => {
+  let dataSource: DataSource;
+  let accountId: string;
+
+  beforeAll(async () => {
+    dataSource = await createTestDataSource([MarketplaceAccount]);
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await dataSource.query('TRUNCATE TABLE marketplace_backfill_jobs CASCADE');
+    await dataSource.query('TRUNCATE TABLE marketplace_accounts CASCADE');
+
+    const account = await dataSource.getRepository(MarketplaceAccount).save({
+      id: randomUUID(),
+      marketplace: Marketplace.MERCADO_LIVRE,
+      externalSellerId: '1548451374',
+      nickname: 'EZIEHOME',
+      status: MarketplaceAccountStatus.CONNECTED,
+      tokenVersion: 1,
+    });
+    accountId = account.id;
+  });
+
+  it('two independent worker instances ticking at the same time make only ONE runNextChunk call for the same job', async () => {
+    const persistenceA = new BackfillJobsPersistenceService(dataSource);
+    const persistenceB = new BackfillJobsPersistenceService(dataSource);
+    await persistenceA.createJob(accountId, Marketplace.MERCADO_LIVRE);
+
+    // `runNextChunk` só resolve quando o teste manda (`resolveChunk`) — força
+    // as duas janelas de claim a se sobreporem DE VERDADE. Sem isto, a
+    // primeira tentativa poderia terminar (processar + devolver o job a
+    // QUEUED, de propósito, para a PRÓXIMA chunk) antes da segunda sequer
+    // tentar reivindicar — aí duas chamadas seriam dois chunks legítimos e
+    // sequenciais do mesmo job, não uma violação de exclusividade.
+    let resolveChunk!: (value: {
+      hasMoreHistory: boolean;
+      oldestCoveredAt: string;
+      ordersFetched: number;
+    }) => void;
+    const pendingChunk = new Promise((resolve) => {
+      resolveChunk = resolve;
+    });
+    const runNextChunk = jest.fn().mockReturnValue(pendingChunk);
+    const backfillServiceStub = { runNextChunk } as never;
+
+    const workerA = new MarketplaceBackfillWorkerService(
+      fakeConfigService(),
+      backfillServiceStub,
+      persistenceA,
+    );
+    const workerB = new MarketplaceBackfillWorkerService(
+      fakeConfigService(),
+      backfillServiceStub,
+      persistenceB,
+    );
+
+    const tickA = workerA.runTickOnce();
+    const tickB = workerB.runTickOnce();
+    // Dá tempo das duas transações de claim rodarem antes de liberar o chunk.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(runNextChunk).toHaveBeenCalledTimes(1);
+
+    resolveChunk({
+      hasMoreHistory: true,
+      oldestCoveredAt: '2026-01-01',
+      ordersFetched: 1,
+    });
+    await Promise.all([tickA, tickB]);
+
+    expect(runNextChunk).toHaveBeenCalledTimes(1);
+    expect(runNextChunk).toHaveBeenCalledWith(accountId);
+  });
+
+  it('the job survives a full recreation of the persistence/data-source instance (durable, not in-memory)', async () => {
+    const persistenceA = new BackfillJobsPersistenceService(dataSource);
+    const created = await persistenceA.createJob(
+      accountId,
+      Marketplace.MERCADO_LIVRE,
+    );
+
+    // Simula um reinício do backend: uma NOVA conexão/instância, nenhum
+    // estado em memória compartilhado com `persistenceA`.
+    const freshDataSource = await createTestDataSource([MarketplaceAccount]);
+    try {
+      const persistenceAfterRestart = new BackfillJobsPersistenceService(
+        freshDataSource,
+      );
+      const found = await persistenceAfterRestart.findLatestJob(accountId);
+      expect(found).not.toBeNull();
+      expect(found!.id).toBe(created.id);
+      expect(found!.status).toBe('QUEUED');
+    } finally {
+      await freshDataSource.destroy();
+    }
+  });
+
+  it('a job abandoned by a worker that never restarts is picked up and completed by a second worker instance', async () => {
+    const persistenceA = new BackfillJobsPersistenceService(dataSource);
+    const job = await persistenceA.createJob(
+      accountId,
+      Marketplace.MERCADO_LIVRE,
+    );
+    // Simula um worker que reivindicou e travou/caiu para sempre.
+    await dataSource.query(
+      `UPDATE marketplace_backfill_jobs
+          SET status = 'RUNNING', lease_owner = 'dead-worker',
+              lease_expires_at = now() - interval '1 hour'
+        WHERE id = $1`,
+      [job.id],
+    );
+
+    const persistenceB = new BackfillJobsPersistenceService(dataSource);
+    const runNextChunk = jest.fn().mockResolvedValue({
+      hasMoreHistory: true,
+      oldestCoveredAt: '2026-01-01',
+      ordersFetched: 2,
+    });
+    const workerB = new MarketplaceBackfillWorkerService(
+      fakeConfigService(),
+      { runNextChunk } as never,
+      persistenceB,
+    );
+
+    await workerB.runTickOnce();
+
+    expect(runNextChunk).toHaveBeenCalledWith(accountId);
+    const after = await persistenceB.findLatestJob(accountId);
+    expect(after!.chunksProcessed).toBe(1);
+    expect(after!.leaseOwner).toBeNull();
+  });
+});

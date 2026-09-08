@@ -17,13 +17,37 @@ import {
   hasReachedBackfillSafetyFloor,
   utcInstantToSaoPauloDateString,
 } from '../marketplace-orders/period.util';
+import {
+  BackfillJobActiveConflictError,
+  BackfillJobsPersistenceService,
+  type BackfillJobRow,
+  type BackfillJobStatus,
+} from './backfill-jobs-persistence.service';
 
+/**
+ * Além dos códigos originais (Fase 4, "Histórico completo"), o worker
+ * durável (Fase 4, "Backfill durável") precisa distinguir com mais
+ * fidelidade os erros retryable/transitórios dos terminais — daí os cinco
+ * códigos novos abaixo, todos apenas REPASSADOS de `SyncOrdersErrorCode`/
+ * `AmazonOrdersSyncErrorCode` já existentes (nunca uma classificação nova
+ * de erro, só menos perda de informação em `mapChunkError`):
+ * `TOKEN_EXPIRED`/`ML_APP_CONFIGURATION_ERROR` são terminais (reconectar ou
+ * reconfigurar a aplicação, nunca resolvidos por retry); `ACCOUNT_BUSY`/
+ * `TOKEN_REFRESH_PENDING` são sempre transitórios (requeue rápido, nunca
+ * contam para o limite de tentativas); `PROVIDER_RATE_LIMITED` é
+ * transitório mas usa um backoff mais longo (ver `BackfillWorkerService`).
+ */
 export type BackfillErrorCode =
   | 'ACCOUNT_NOT_CONNECTED'
   | 'MARKETPLACE_NOT_SUPPORTED'
   | 'NO_INITIAL_SYNC_YET'
   | 'BACKFILL_ALREADY_RUNNING'
   | 'AMAZON_NOT_CONFIGURED'
+  | 'TOKEN_EXPIRED'
+  | 'ACCOUNT_BUSY'
+  | 'TOKEN_REFRESH_PENDING'
+  | 'ML_APP_CONFIGURATION_ERROR'
+  | 'PROVIDER_RATE_LIMITED'
   | 'SYNC_FAILED';
 
 export class BackfillError extends Error {
@@ -55,6 +79,26 @@ export interface BackfillProcessedChunk {
   ordersFetched: number;
 }
 
+/**
+ * Estado de orquestração do job durável (Fase 4, "Backfill durável") — `null`
+ * enquanto nenhum "Completar histórico" jamais foi clicado para esta conta.
+ * Nunca inclui token, payload ou mensagem bruta — `lastErrorCode` é sempre
+ * um `BackfillErrorCode` já sanitizado.
+ */
+export interface BackfillJobSummary {
+  id: string;
+  status: BackfillJobStatus;
+  chunksProcessed: number;
+  attemptCount: number;
+  requestedAt: string;
+  startedAt: string | null;
+  lastActivityAt: string | null;
+  nextAttemptAt: string | null;
+  completedAt: string | null;
+  lastErrorCode: string | null;
+  pauseRequested: boolean;
+}
+
 export interface BackfillStatus {
   status: BackfillStatusValue;
   oldestCoveredAt: string | null;
@@ -63,6 +107,8 @@ export interface BackfillStatus {
   synchronizedIntervals: Array<{ from: string; to: string }>;
   lastProcessedChunk: BackfillProcessedChunk | null;
   lastRunErrorCode: string | null;
+  /** Aditivo (Fase 4, "Backfill durável") — campos antigos acima nunca mudam de sentido. */
+  job: BackfillJobSummary | null;
 }
 
 // Bem maior que a duração plausível de qualquer chunk real (Amazon/ML) —
@@ -88,11 +134,14 @@ export class MarketplaceBackfillService {
     private readonly mlSyncService: MercadoLivreOrdersSyncService,
     private readonly amazonSyncService: AmazonOrdersSyncService,
     private readonly syncRunsService: SyncRunsService,
+    private readonly jobsPersistence: BackfillJobsPersistenceService,
   ) {}
 
   async getStatus(accountId: string): Promise<BackfillStatus> {
     await this.marketplaceAccountsService.findByIdOrFail(accountId);
     const coverage = await this.persistence.getAccountSyncCoverage(accountId);
+    const jobRow = await this.jobsPersistence.findLatestJob(accountId);
+    const job = jobRow ? this.toJobSummary(jobRow) : null;
 
     if (coverage.oldestFrom === null) {
       return {
@@ -103,6 +152,7 @@ export class MarketplaceBackfillService {
         synchronizedIntervals: [],
         lastProcessedChunk: null,
         lastRunErrorCode: null,
+        job,
       };
     }
 
@@ -152,6 +202,73 @@ export class MarketplaceBackfillService {
             }
           : null,
       lastRunErrorCode,
+      job,
+    };
+  }
+
+  /**
+   * Cria (ou, idempotentemente, devolve) o job durável de backfill desta
+   * conta — chamado pelo endpoint `POST .../backfill/start`. Validado ANTES
+   * de criar o job (mesmas checagens de `runNextChunk`) para dar erro
+   * imediato ao usuário em vez de um job fadado a falhar já no primeiro
+   * tick do worker. `BackfillJobActiveConflictError` (índice único parcial)
+   * significa que já existe um job ativo para esta conta — nunca um erro
+   * para o chamador, só devolve o status desse job já existente (dois
+   * cliques nunca criam dois jobs).
+   */
+  async startBackfill(accountId: string): Promise<BackfillStatus> {
+    const account =
+      await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    if (account.status !== MarketplaceAccountStatus.CONNECTED) {
+      throw new BackfillError('ACCOUNT_NOT_CONNECTED');
+    }
+    if (
+      account.marketplace !== Marketplace.MERCADO_LIVRE &&
+      account.marketplace !== Marketplace.AMAZON
+    ) {
+      throw new BackfillError('MARKETPLACE_NOT_SUPPORTED');
+    }
+    const coverage = await this.persistence.getAccountSyncCoverage(accountId);
+    if (coverage.oldestFrom === null) {
+      throw new BackfillError('NO_INITIAL_SYNC_YET');
+    }
+
+    try {
+      await this.jobsPersistence.createJob(accountId, account.marketplace);
+    } catch (error) {
+      if (!(error instanceof BackfillJobActiveConflictError)) throw error;
+      // Idempotência do `start`: já existe job ativo, devolve o existente.
+    }
+    return this.getStatus(accountId);
+  }
+
+  async pauseBackfill(accountId: string): Promise<BackfillStatus> {
+    await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    await this.jobsPersistence.requestPause(accountId);
+    return this.getStatus(accountId);
+  }
+
+  async resumeBackfill(accountId: string): Promise<BackfillStatus> {
+    await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    await this.jobsPersistence.resumeJob(accountId);
+    return this.getStatus(accountId);
+  }
+
+  private toJobSummary(job: BackfillJobRow): BackfillJobSummary {
+    return {
+      id: job.id,
+      status: job.status,
+      chunksProcessed: job.chunksProcessed,
+      attemptCount: job.attemptCount,
+      requestedAt: job.requestedAt.toISOString(),
+      startedAt: job.startedAt ? job.startedAt.toISOString() : null,
+      lastActivityAt: job.lastActivityAt
+        ? job.lastActivityAt.toISOString()
+        : null,
+      nextAttemptAt: job.nextAttemptAt ? job.nextAttemptAt.toISOString() : null,
+      completedAt: job.completedAt ? job.completedAt.toISOString() : null,
+      lastErrorCode: job.lastErrorCode,
+      pauseRequested: job.pauseRequested,
     };
   }
 
@@ -234,18 +351,38 @@ export class MarketplaceBackfillService {
       return new BackfillError('BACKFILL_ALREADY_RUNNING');
     }
     if (error instanceof SyncOrdersError) {
-      return error.code === 'SYNC_ALREADY_RUNNING'
-        ? new BackfillError('BACKFILL_ALREADY_RUNNING')
-        : new BackfillError('SYNC_FAILED');
+      switch (error.code) {
+        case 'SYNC_ALREADY_RUNNING':
+          return new BackfillError('BACKFILL_ALREADY_RUNNING');
+        case 'ACCOUNT_NOT_CONNECTED':
+          return new BackfillError('ACCOUNT_NOT_CONNECTED');
+        case 'TOKEN_EXPIRED':
+          return new BackfillError('TOKEN_EXPIRED');
+        case 'ACCOUNT_BUSY':
+          return new BackfillError('ACCOUNT_BUSY');
+        case 'TOKEN_REFRESH_PENDING':
+          return new BackfillError('TOKEN_REFRESH_PENDING');
+        case 'ML_APP_CONFIGURATION_ERROR':
+          return new BackfillError('ML_APP_CONFIGURATION_ERROR');
+        case 'PROVIDER_RATE_LIMITED':
+          return new BackfillError('PROVIDER_RATE_LIMITED');
+        default:
+          return new BackfillError('SYNC_FAILED');
+      }
     }
     if (error instanceof AmazonOrdersSyncError) {
-      if (error.code === 'SYNC_ALREADY_RUNNING') {
-        return new BackfillError('BACKFILL_ALREADY_RUNNING');
+      switch (error.code) {
+        case 'SYNC_ALREADY_RUNNING':
+          return new BackfillError('BACKFILL_ALREADY_RUNNING');
+        case 'AMAZON_NOT_CONFIGURED':
+          return new BackfillError('AMAZON_NOT_CONFIGURED');
+        case 'ACCOUNT_NOT_CONNECTED':
+          return new BackfillError('ACCOUNT_NOT_CONNECTED');
+        case 'PROVIDER_RATE_LIMITED':
+          return new BackfillError('PROVIDER_RATE_LIMITED');
+        default:
+          return new BackfillError('SYNC_FAILED');
       }
-      if (error.code === 'AMAZON_NOT_CONFIGURED') {
-        return new BackfillError('AMAZON_NOT_CONFIGURED');
-      }
-      return new BackfillError('SYNC_FAILED');
     }
     return new BackfillError('SYNC_FAILED');
   }

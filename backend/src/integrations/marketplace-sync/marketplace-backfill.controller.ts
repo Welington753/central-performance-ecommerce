@@ -35,8 +35,47 @@ export class MarketplaceBackfillController {
     return this.backfillService.getStatus(id);
   }
 
-  // Sem `@Body()`: um chunk por chamada — o chamador decide quando parar de
-  // repetir com base em `hasMoreHistory` (design "Histórico completo").
+  /**
+   * Cria (ou, idempotentemente, devolve) o job durável de backfill desta
+   * conta (Fase 4, "Backfill durável") — o worker do BACKEND processa dali
+   * em diante, mesmo com a aba fechada. Rate-limited (não `next-chunk`, mas
+   * ainda um endpoint que muda estado) para nunca virar um vetor de clique
+   * duplo em rajada.
+   */
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('start')
+  @HttpCode(HttpStatus.OK)
+  async start(@Param('id', ParseUUIDPipe) id: string): Promise<BackfillStatus> {
+    try {
+      return await this.backfillService.startBackfill(id);
+    } catch (error) {
+      if (error instanceof BackfillError) {
+        throw this.mapErrorToHttpException(error);
+      }
+      throw error;
+    }
+  }
+
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('pause')
+  @HttpCode(HttpStatus.OK)
+  async pause(@Param('id', ParseUUIDPipe) id: string): Promise<BackfillStatus> {
+    return this.backfillService.pauseBackfill(id);
+  }
+
+  @Throttle({ default: { limit: 10, ttl: 60000 } })
+  @Post('resume')
+  @HttpCode(HttpStatus.OK)
+  async resume(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<BackfillStatus> {
+    return this.backfillService.resumeBackfill(id);
+  }
+
+  // Preservado por compatibilidade (Fase 4, "Backfill durável") — o
+  // frontend não chama mais isto em loop; só o worker do backend usa
+  // `MarketplaceBackfillService.runNextChunk` diretamente (em processo, sem
+  // HTTP). Sem `@Body()`: um chunk por chamada.
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('next-chunk')
   @HttpCode(HttpStatus.OK)
