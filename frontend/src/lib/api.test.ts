@@ -68,6 +68,7 @@ describe("fetchBackfillStatus (normalização — correção de regressão)", ()
       synchronizedIntervals: [{ from: "2026-07-04", to: "2026-09-04" }],
       lastProcessedChunk: null,
       lastRunErrorCode: null,
+      job: null,
     };
     global.fetch = jest.fn().mockResolvedValue(jsonResponse(200, full));
 
@@ -98,6 +99,7 @@ describe("fetchBackfillStatus (normalização — correção de regressão)", ()
       synchronizedIntervals: [],
       lastProcessedChunk: null,
       lastRunErrorCode: null,
+      job: null,
     });
   });
 

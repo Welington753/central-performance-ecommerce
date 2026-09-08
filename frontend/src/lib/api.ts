@@ -340,7 +340,7 @@ export async function syncMercadoLivreOrders(
   return (await response.json()) as MercadoLivreSyncSummary;
 }
 
-const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
+export const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
   ACCOUNT_NOT_CONNECTED:
     "Esta conta não está mais conectada. Reconecte-a em Integrações.",
   MARKETPLACE_NOT_SUPPORTED:
@@ -350,6 +350,16 @@ const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
   BACKFILL_ALREADY_RUNNING: "Conta temporariamente ocupada.",
   AMAZON_NOT_CONFIGURED: "Integração Amazon não configurada no servidor.",
   SYNC_FAILED: "Falha ao consultar o marketplace. Tente novamente.",
+  TOKEN_EXPIRED:
+    "O marketplace encerrou o acesso desta conta. Reconecte-a em Integrações.",
+  ACCOUNT_BUSY:
+    "Esta conta está processando outra operação agora. Tente novamente em instantes.",
+  TOKEN_REFRESH_PENDING:
+    "Renovação de acesso temporariamente indisponível. Nova tentativa automática agendada.",
+  ML_APP_CONFIGURATION_ERROR:
+    "Credenciais da aplicação estão inválidas. Contate o suporte.",
+  PROVIDER_RATE_LIMITED:
+    "O marketplace limitou as requisições no momento. Tente novamente em alguns minutos.",
 };
 
 /**
@@ -392,6 +402,10 @@ function normalizeBackfillStatus(raw: unknown): BackfillStatusDto {
       typeof value.lastRunErrorCode === "string"
         ? value.lastRunErrorCode
         : null,
+    job:
+      value.job && typeof value.job === "object"
+        ? (value.job as BackfillStatusDto["job"])
+        : null,
   };
 }
 
@@ -407,6 +421,49 @@ export async function fetchBackfillStatus(
     );
   }
   return normalizeBackfillStatus(await response.json());
+}
+
+async function postBackfillJobAction(
+  accountId: string,
+  action: "start" | "pause" | "resume",
+): Promise<BackfillStatusDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/backfill/${action}`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      (code && BACKFILL_ERROR_MESSAGES[code]) ||
+        "Não foi possível iniciar o histórico.",
+      code,
+    );
+  }
+  return normalizeBackfillStatus(await response.json());
+}
+
+/**
+ * Cria (ou, idempotentemente, devolve) o job durável de backfill desta
+ * conta (Fase 4, "Backfill durável") — o worker do BACKEND processa dali em
+ * diante, mesmo com a aba fechada. Chamar de novo com um job já ativo NUNCA
+ * cria um segundo job — o backend garante isso via índice único.
+ */
+export async function startBackfill(
+  accountId: string,
+): Promise<BackfillStatusDto> {
+  return postBackfillJobAction(accountId, "start");
+}
+
+export async function pauseBackfill(
+  accountId: string,
+): Promise<BackfillStatusDto> {
+  return postBackfillJobAction(accountId, "pause");
+}
+
+export async function resumeBackfill(
+  accountId: string,
+): Promise<BackfillStatusDto> {
+  return postBackfillJobAction(accountId, "resume");
 }
 
 /**

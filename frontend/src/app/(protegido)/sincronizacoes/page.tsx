@@ -7,27 +7,26 @@ import {
   fetchAmazonSetupStatus,
   fetchBackfillStatus,
   fetchMarketplaceAccounts,
-  runBackfillNextChunk,
+  pauseBackfill,
+  resumeBackfill,
+  startBackfill,
   syncAmazonOrders,
   syncMercadoLivreOrders,
 } from "@/lib/api";
 import { SyncTable } from "@/components/SyncTable";
-import {
-  BackfillAccountPanel,
-  type BackfillProgress,
-} from "@/components/BackfillAccountPanel";
+import { BackfillAccountPanel } from "@/components/BackfillAccountPanel";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 import type { BackfillStatusDto } from "@/types/marketplace-backfill";
 import type { SyncRun } from "@/types/sync-run";
 
-// Backoff defensivo (Fase 4, "falha transitória → retry") — cada chunk é
-// idempotente (recalcula a janela a partir do estado atual do banco), então
-// tentar de novo o mesmo chunk após uma falha nunca duplica nem perde nada.
-const BACKFILL_RETRY_DELAYS_MS = [2000, 5000, 15000];
+/** Estados do job em que ele ainda está "andando" (worker do backend). */
+const ACTIVE_JOB_STATUSES = ["QUEUED", "RUNNING", "RETRY_WAIT"];
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
+// Acompanhamento leve (Fase 4, "Backfill durável") — o worker do BACKEND
+// processa o job; esta página só faz polling do status para refletir o
+// progresso na tela, nunca dirige o processamento (nenhum loop client-side
+// chamando next-chunk). Fechar a aba nunca pausa o job.
+const BACKFILL_POLL_INTERVAL_MS = 4000;
 
 function isSyncRunArray(value: unknown): value is SyncRun[] {
   return Array.isArray(value);
@@ -96,102 +95,56 @@ export default function SincronizacoesPage() {
   const [backfillLoadErrors, setBackfillLoadErrors] = useState<
     Record<string, boolean>
   >({});
-  const [backfillProgress, setBackfillProgress] = useState<
-    Record<string, BackfillProgress | null>
-  >({});
   const [backfillErrors, setBackfillErrors] = useState<
     Record<string, string | null>
   >({});
-  const [runningAccountId, setRunningAccountId] = useState<string | null>(null);
+  // Ação (start/pause/resume) em voo por conta — só bloqueia clique duplo NA
+  // MESMA conta; o worker do backend processa cada job de forma
+  // independente, então nunca precisa de uma guarda "uma ação por vez"
+  // global como o loop antigo tinha.
+  const [backfillActionPending, setBackfillActionPending] = useState<
+    Record<string, boolean>
+  >({});
   const [runningAllBackfill, setRunningAllBackfill] = useState(false);
-  const [runningAllProgress, setRunningAllProgress] = useState<{
-    index: number;
-    total: number;
-  } | null>(null);
-
-  // Guarda de reentrância síncrona (Fase 4, correção de regressão) — estado
-  // React só atualiza no próximo render, então um clique duplo muito rápido
-  // poderia iniciar dois loops antes do botão desabilitar visualmente. Esta
-  // ref é lida/escrita de forma síncrona, sem essa janela de corrida.
-  // NUNCA usar um `useEffect` de cleanup para isto: em desenvolvimento, o
-  // StrictMode do React 18 monta/desmonta/remonta o componente uma vez ao
-  // abrir a página, e um cleanup que só marcasse "parado" sem o efeito
-  // também marcar "rodando" de volta no corpo deixaria a flag travada em
-  // "parado" para sempre — foi exatamente esse o bug que impedia o clique
-  // de disparar qualquer chamada ao backend.
-  const backfillBusyRef = useRef(false);
-  const backfillStoppedRef = useRef(false);
-
-  useEffect(() => {
-    backfillStoppedRef.current = false;
-    return () => {
-      backfillStoppedRef.current = true;
-    };
-  }, []);
+  const backfillActionPendingRef = useRef<Record<string, boolean>>({});
 
   const loadBackfillStatus = useCallback(async (accountId: string) => {
     try {
       const status = await fetchBackfillStatus(accountId);
       setBackfillStatuses((prev) => ({ ...prev, [accountId]: status }));
       setBackfillLoadErrors((prev) => ({ ...prev, [accountId]: false }));
+      return status;
     } catch {
       setBackfillLoadErrors((prev) => ({ ...prev, [accountId]: true }));
+      return null;
     }
   }, []);
 
-  const runBackfillChunkWithRetry = useCallback(async (accountId: string) => {
-    let lastError: unknown;
-    for (let attempt = 0; attempt <= BACKFILL_RETRY_DELAYS_MS.length; attempt += 1) {
-      try {
-        return await runBackfillNextChunk(accountId);
-      } catch (error) {
-        lastError = error;
-        if (attempt < BACKFILL_RETRY_DELAYS_MS.length) {
-          // 429: respeita o Retry-After do backend em vez do backoff fixo.
-          const delayMs =
-            error instanceof ApiFetchError &&
-            error.code === "RATE_LIMITED" &&
-            error.retryAfterSeconds
-              ? error.retryAfterSeconds * 1000
-              : BACKFILL_RETRY_DELAYS_MS[attempt];
-          await sleep(delayMs);
-        }
-      }
-    }
-    throw lastError;
+  const setActionPending = useCallback((accountId: string, pending: boolean) => {
+    backfillActionPendingRef.current = {
+      ...backfillActionPendingRef.current,
+      [accountId]: pending,
+    };
+    setBackfillActionPending(backfillActionPendingRef.current);
   }, []);
 
-  // Corpo do loop, sem a guarda de reentrância — chamado tanto pelo início
-  // individual quanto pelo coletivo (que já segura a guarda para o lote
-  // inteiro). Um chunk por vez, sequencial (nunca paginações concorrentes
-  // da mesma conta) — retoma exatamente de onde `oldestCoveredAt` parou,
-  // então fechar a aba ou reiniciar o backend no meio nunca perde progresso.
-  const runBackfillLoopBody = useCallback(
-    async (accountId: string, initialWindowTo: string | null) => {
-      setRunningAccountId(accountId);
+  // Corpo comum de start/pause/resume: aplica a ação, guarda de reentrância
+  // síncrona (lida/escrita na ref, nunca no estado — clique duplo muito
+  // rápido não abre uma segunda janela antes do botão desabilitar
+  // visualmente), erro isolado por conta (nunca derruba outra conta nem a
+  // página).
+  const runBackfillAction = useCallback(
+    async (
+      accountId: string,
+      action: (id: string) => Promise<BackfillStatusDto>,
+    ) => {
+      if (backfillActionPendingRef.current[accountId]) return;
+      setActionPending(accountId, true);
       setBackfillErrors((prev) => ({ ...prev, [accountId]: null }));
-      setBackfillProgress((prev) => ({
-        ...prev,
-        [accountId]: { chunksProcessed: 0, windowFrom: null, windowTo: null },
-      }));
-
-      let chunksProcessed = 0;
-      let windowTo = initialWindowTo;
       try {
-        while (!backfillStoppedRef.current) {
-          const result = await runBackfillChunkWithRetry(accountId);
-          chunksProcessed += 1;
-          setBackfillProgress((prev) => ({
-            ...prev,
-            [accountId]: {
-              chunksProcessed,
-              windowFrom: result.oldestCoveredAt,
-              windowTo,
-            },
-          }));
-          windowTo = result.oldestCoveredAt;
-          if (!result.hasMoreHistory) break;
-        }
+        const status = await action(accountId);
+        setBackfillStatuses((prev) => ({ ...prev, [accountId]: status }));
+        setBackfillLoadErrors((prev) => ({ ...prev, [accountId]: false }));
       } catch (error) {
         const message =
           error instanceof ApiFetchError
@@ -199,47 +152,59 @@ export default function SincronizacoesPage() {
             : "Não foi possível iniciar o histórico.";
         setBackfillErrors((prev) => ({ ...prev, [accountId]: message }));
       } finally {
-        setBackfillProgress((prev) => ({ ...prev, [accountId]: null }));
-        setRunningAccountId(null);
-        await loadBackfillStatus(accountId);
+        setActionPending(accountId, false);
       }
     },
-    [runBackfillChunkWithRetry, loadBackfillStatus],
+    [setActionPending],
   );
 
-  const startBackfillForAccount = useCallback(
-    async (accountId: string, initialWindowTo: string | null) => {
-      if (backfillBusyRef.current) return;
-      backfillBusyRef.current = true;
-      try {
-        await runBackfillLoopBody(accountId, initialWindowTo);
-      } finally {
-        backfillBusyRef.current = false;
-      }
-    },
-    [runBackfillLoopBody],
+  const handleStartBackfill = useCallback(
+    (accountId: string) => runBackfillAction(accountId, startBackfill),
+    [runBackfillAction],
+  );
+  const handlePauseBackfill = useCallback(
+    (accountId: string) => runBackfillAction(accountId, pauseBackfill),
+    [runBackfillAction],
+  );
+  const handleResumeBackfill = useCallback(
+    (accountId: string) => runBackfillAction(accountId, resumeBackfill),
+    [runBackfillAction],
   );
 
+  // "Completar histórico de todas as lojas": só ENFILEIRA (chama `start`)
+  // para as duas contas — o worker do backend decide como processar cada
+  // job de forma controlada. Nunca executa chunks aqui; nunca deixa uma
+  // conta com erro bloquear a outra (`Promise.allSettled`).
   async function handleCompleteAllHistory() {
-    if (backfillBusyRef.current || mlAccounts.length === 0) return;
-    backfillBusyRef.current = true;
+    if (mlAccounts.length === 0) return;
     setRunningAllBackfill(true);
     try {
-      for (let index = 0; index < mlAccounts.length; index += 1) {
-        if (backfillStoppedRef.current) break;
-        setRunningAllProgress({ index: index + 1, total: mlAccounts.length });
-        const mlAccount = mlAccounts[index];
-        await runBackfillLoopBody(
-          mlAccount.accountId,
-          backfillStatuses[mlAccount.accountId]?.oldestCoveredAt ?? null,
-        );
-      }
+      await Promise.allSettled(
+        mlAccounts.map((account) => handleStartBackfill(account.accountId)),
+      );
     } finally {
-      setRunningAllProgress(null);
       setRunningAllBackfill(false);
-      backfillBusyRef.current = false;
     }
   }
+
+  // Polling leve só para acompanhamento (Fase 4, "Backfill durável") —
+  // nunca dirige o processamento. Continua enquanto QUALQUER conta ML tiver
+  // um job em andamento; desmontar o componente só limpa o timer, nunca
+  // pausa o job (ele roda no backend, independente da aba).
+  const anyJobActive = mlAccounts.some((account) => {
+    const job = backfillStatuses[account.accountId]?.job;
+    return job !== null && job !== undefined && ACTIVE_JOB_STATUSES.includes(job.status);
+  });
+
+  useEffect(() => {
+    if (!anyJobActive || mlAccounts.length === 0) return;
+    const intervalId = setInterval(() => {
+      mlAccounts.forEach((account) => {
+        void loadBackfillStatus(account.accountId);
+      });
+    }, BACKFILL_POLL_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [anyJobActive, mlAccounts, loadBackfillStatus]);
 
   const loadSyncRuns = useCallback(async () => {
     try {
@@ -459,13 +424,11 @@ export default function SincronizacoesPage() {
             <button
               type="button"
               onClick={() => void handleCompleteAllHistory()}
-              disabled={runningAccountId !== null || runningAllBackfill}
+              disabled={runningAllBackfill}
               className="rounded-md border border-brand bg-brand/10 px-4 py-2 text-sm font-semibold text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
             >
               {runningAllBackfill
-                ? runningAllProgress
-                  ? `Processando conta ${runningAllProgress.index} de ${runningAllProgress.total}`
-                  : "Iniciando histórico..."
+                ? "Enfileirando..."
                 : "Completar histórico de todas as lojas"}
             </button>
           ) : null}
@@ -483,21 +446,14 @@ export default function SincronizacoesPage() {
                 label={mlAccount.label}
                 status={backfillStatuses[mlAccount.accountId] ?? null}
                 loadError={backfillLoadErrors[mlAccount.accountId] ?? false}
-                progress={backfillProgress[mlAccount.accountId] ?? null}
-                isRunning={runningAccountId === mlAccount.accountId}
-                disabled={
-                  runningAllBackfill ||
-                  (runningAccountId !== null &&
-                    runningAccountId !== mlAccount.accountId)
+                actionPending={
+                  backfillActionPending[mlAccount.accountId] ?? false
                 }
+                disabled={runningAllBackfill}
                 errorMessage={backfillErrors[mlAccount.accountId] ?? null}
-                onStart={() =>
-                  void startBackfillForAccount(
-                    mlAccount.accountId,
-                    backfillStatuses[mlAccount.accountId]?.oldestCoveredAt ??
-                      null,
-                  )
-                }
+                onStart={() => void handleStartBackfill(mlAccount.accountId)}
+                onPause={() => void handlePauseBackfill(mlAccount.accountId)}
+                onResume={() => void handleResumeBackfill(mlAccount.accountId)}
               />
             ))}
           </div>

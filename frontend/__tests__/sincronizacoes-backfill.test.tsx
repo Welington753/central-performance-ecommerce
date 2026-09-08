@@ -1,13 +1,16 @@
 // Mesmo padrão de automock documentado em sincronizacoes-sync-all.test.tsx.
 jest.mock("../src/lib/api");
 
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SincronizacoesPage from "@/app/(protegido)/sincronizacoes/page";
 import * as api from "@/lib/api";
 import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
-import type { BackfillStatusDto } from "@/types/marketplace-backfill";
+import type {
+  BackfillJobSummaryDto,
+  BackfillStatusDto,
+} from "@/types/marketplace-backfill";
 
 function mlAccount(
   overrides: Partial<MarketplaceAccountDto> = {},
@@ -40,6 +43,23 @@ function amazonSetupStatus(): AmazonSetupStatusDto {
   };
 }
 
+function job(overrides: Partial<BackfillJobSummaryDto> = {}): BackfillJobSummaryDto {
+  return {
+    id: "job-1",
+    status: "RUNNING",
+    chunksProcessed: 2,
+    attemptCount: 0,
+    requestedAt: "2026-09-01T00:00:00.000Z",
+    startedAt: "2026-09-01T00:00:00.000Z",
+    lastActivityAt: "2026-09-01T00:05:00.000Z",
+    nextAttemptAt: null,
+    completedAt: null,
+    lastErrorCode: null,
+    pauseRequested: false,
+    ...overrides,
+  };
+}
+
 function backfillStatus(
   overrides: Partial<BackfillStatusDto> = {},
 ): BackfillStatusDto {
@@ -51,6 +71,7 @@ function backfillStatus(
     synchronizedIntervals: [{ from: "2026-06-01", to: "2026-08-30" }],
     lastProcessedChunk: { from: "2026-05-02", to: "2026-06-01", ordersFetched: 3 },
     lastRunErrorCode: null,
+    job: job(),
     ...overrides,
   };
 }
@@ -59,19 +80,15 @@ function backfillStatus(
  * `jest.mock("../src/lib/api")` automocka a classe `ApiFetchError` —
  * `new api.ApiFetchError(...)` no automock NÃO roda o construtor real
  * (`message`/`code`/`retryAfterSeconds` saem vazios). Para simular um erro
- * real com esses campos preenchidos (necessário para os testes de 429 e de
- * mensagem sanitizada), troca o protótipo de um `Error` de verdade para o
- * do automock — `instanceof ApiFetchError` continua válido em `page.tsx`
- * (mesma referência de classe), mas os campos vêm do `Error` real.
+ * real com esses campos preenchidos, troca o protótipo de um `Error` de
+ * verdade para o do automock — `instanceof ApiFetchError` continua válido
+ * em `page.tsx` (mesma referência de classe), mas os campos vêm do `Error`
+ * real.
  */
-function fakeApiFetchError(
-  message: string,
-  code?: string,
-  retryAfterSeconds?: number,
-): Error {
+function fakeApiFetchError(message: string, code?: string): Error {
   const error = new Error(message);
   Object.setPrototypeOf(error, api.ApiFetchError.prototype);
-  Object.assign(error, { code, retryAfterSeconds, name: "ApiFetchError" });
+  Object.assign(error, { code, name: "ApiFetchError" });
   return error;
 }
 
@@ -87,8 +104,12 @@ beforeEach(() => {
   );
 });
 
-describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
-  it("shows first/last sale, synchronized intervals and status for a connected Mercado Livre account", async () => {
+afterEach(() => {
+  jest.useRealTimers();
+});
+
+describe("SincronizacoesPage — Completar histórico (job durável, Fase 4)", () => {
+  it("shows first/last sale, synchronized intervals and the job status returned by the backend", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "ml-1" }),
     ]);
@@ -99,62 +120,45 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
     const panel = await screen.findByTestId("backfill-panel-Meli 1");
     expect(within(panel).getByText("01/06/2026")).toBeInTheDocument();
     expect(within(panel).getByText("30/08/2026")).toBeInTheDocument();
-    expect(within(panel).getByText("Parcial")).toBeInTheDocument();
+    expect(within(panel).getByText(/buscando histórico/i)).toBeInTheDocument();
   });
 
-  it('clicking "Continuar histórico" calls next-chunk repeatedly until hasMoreHistory=false, never stopping on an empty chunk in between', async () => {
+  it('clicking "Completar histórico" calls start exactly once — never a next-chunk loop', async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "ml-1" }),
     ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-    (api.runBackfillNextChunk as jest.Mock)
-      .mockResolvedValueOnce({
-        hasMoreHistory: true,
-        oldestCoveredAt: "2026-05-01",
-        ordersFetched: 0, // bloco vazio — NUNCA encerra sozinho
-      })
-      .mockResolvedValueOnce({
-        hasMoreHistory: true,
-        oldestCoveredAt: "2026-04-01",
-        ordersFetched: 4,
-      })
-      .mockResolvedValueOnce({
-        hasMoreHistory: false,
-        oldestCoveredAt: "2026-03-01",
-        ordersFetched: 0,
-      });
+    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+      backfillStatus({ job: null }),
+    );
+    (api.startBackfill as jest.Mock).mockResolvedValue(backfillStatus());
 
     const user = userEvent.setup();
     render(<SincronizacoesPage />);
 
     const panel = await screen.findByTestId("backfill-panel-Meli 1");
     await user.click(
-      within(panel).getByRole("button", { name: /continuar histórico/i }),
+      within(panel).getByRole("button", { name: /completar histórico/i }),
     );
 
     await waitFor(() =>
-      expect(api.runBackfillNextChunk).toHaveBeenCalledTimes(3),
+      expect(api.startBackfill).toHaveBeenCalledWith("ml-1"),
     );
-    expect(api.fetchBackfillStatus).toHaveBeenCalledTimes(2); // carga inicial + após o loop
+    expect(api.startBackfill).toHaveBeenCalledTimes(1);
+    expect(api.runBackfillNextChunk).not.toHaveBeenCalled();
   });
 
-  it("processes multiple Mercado Livre accounts sequentially via 'Completar histórico de todas as lojas', never concurrently", async () => {
+  it('"Completar histórico de todas as lojas" only enqueues both accounts (calls start for each), never executes chunks itself', async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "ml-1", nickname: "Meli 1" }),
       mlAccount({ id: "ml-2", nickname: "Meli 2" }),
     ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-
-    const callOrder: string[] = [];
-    (api.runBackfillNextChunk as jest.Mock).mockImplementation(
-      async (accountId: string) => {
-        callOrder.push(accountId);
-        return {
-          hasMoreHistory: false,
-          oldestCoveredAt: "2026-01-01",
-          ordersFetched: 0,
-        };
-      },
+    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+      backfillStatus({ job: null }),
+    );
+    (api.startBackfill as jest.Mock).mockImplementation((accountId: string) =>
+      Promise.resolve(
+        backfillStatus({ job: job({ id: `job-${accountId}` }) }),
+      ),
     );
 
     const user = userEvent.setup();
@@ -169,10 +173,11 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
       }),
     );
 
-    await waitFor(() =>
-      expect(api.runBackfillNextChunk).toHaveBeenCalledTimes(2),
-    );
-    expect(callOrder).toEqual(["ml-1", "ml-2"]);
+    await waitFor(() => {
+      expect(api.startBackfill).toHaveBeenCalledWith("ml-1");
+      expect(api.startBackfill).toHaveBeenCalledWith("ml-2");
+    });
+    expect(api.runBackfillNextChunk).not.toHaveBeenCalled();
   });
 
   it("never claims the true history start was reached when the defensive safety limit is hit", async () => {
@@ -180,7 +185,10 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
       mlAccount({ id: "ml-1" }),
     ]);
     (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
-      backfillStatus({ status: "SAFETY_LIMIT_REACHED" }),
+      backfillStatus({
+        status: "SAFETY_LIMIT_REACHED",
+        job: job({ status: "SAFETY_LIMIT_REACHED" }),
+      }),
     );
 
     render(<SincronizacoesPage />);
@@ -193,14 +201,17 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
     expect(
       within(panel).queryByRole("button", { name: /histórico/i }),
     ).not.toBeInTheDocument();
+    expect(within(panel).queryByRole("button", { name: /pausar/i })).not.toBeInTheDocument();
   });
 
-  it('shows "Tentar novamente" and the transient error code when the last run failed', async () => {
+  it('shows "Tentar novamente" and the sanitized error message when the job FAILED', async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "ml-1" }),
     ]);
     (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
-      backfillStatus({ status: "ERROR", lastRunErrorCode: "PROVIDER_UNAVAILABLE" }),
+      backfillStatus({
+        job: job({ status: "FAILED", lastErrorCode: "PROVIDER_RATE_LIMITED" }),
+      }),
     );
 
     render(<SincronizacoesPage />);
@@ -209,6 +220,9 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
     expect(
       within(panel).getByRole("button", { name: /tentar novamente/i }),
     ).toBeInTheDocument();
+    expect(within(panel).getByRole("alert")).toHaveTextContent(
+      /limitou as requisições/i,
+    );
   });
 
   it("a status-fetch failure for one Mercado Livre account never crashes the page — only that account's panel shows the error, the other renders normally", async () => {
@@ -230,7 +244,7 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
     expect(
       within(panel1).getByText(/não foi possível carregar/i),
     ).toBeInTheDocument();
-    expect(within(panel2).getByText("Parcial")).toBeInTheDocument();
+    expect(within(panel2).getByText(/buscando histórico/i)).toBeInTheDocument();
   });
 
   it("does not offer the backfill action before the account has ever been synced (NOT_STARTED)", async () => {
@@ -238,216 +252,222 @@ describe("SincronizacoesPage — Completar histórico (Fase 4)", () => {
       mlAccount({ id: "ml-1" }),
     ]);
     (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
-      backfillStatus({ status: "NOT_STARTED", oldestCoveredAt: null, firstOrderAt: null, lastOrderAt: null, synchronizedIntervals: [], lastProcessedChunk: null }),
+      backfillStatus({
+        status: "NOT_STARTED",
+        oldestCoveredAt: null,
+        firstOrderAt: null,
+        lastOrderAt: null,
+        synchronizedIntervals: [],
+        lastProcessedChunk: null,
+        job: null,
+      }),
     );
 
     render(<SincronizacoesPage />);
 
     const panel = await screen.findByTestId("backfill-panel-Meli 1");
     expect(
-      within(panel).queryByRole("button", { name: /histórico/i }),
-    ).not.toBeInTheDocument();
+      within(panel).getByRole("button", { name: /completar histórico/i }),
+    ).toBeDisabled();
     expect(within(panel).getByText(/sincronize esta conta/i)).toBeInTheDocument();
   });
 
-  it("clicking the individual button calls the endpoint exactly once (for one chunk) with the correct accountId, shows immediate loading feedback and disables the button", async () => {
+  it("a double click on Start never fires the endpoint twice — the synchronous busy guard blocks the second click", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
       mlAccount({ id: "ml-1" }),
     ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-
-    let resolveChunk!: (value: unknown) => void;
-    (api.runBackfillNextChunk as jest.Mock).mockReturnValue(
+    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+      backfillStatus({ job: null }),
+    );
+    let resolveStart!: (value: BackfillStatusDto) => void;
+    (api.startBackfill as jest.Mock).mockReturnValue(
       new Promise((resolve) => {
-        resolveChunk = resolve;
+        resolveStart = resolve;
       }),
     );
 
-    const user = userEvent.setup();
     render(<SincronizacoesPage />);
     const panel = await screen.findByTestId("backfill-panel-Meli 1");
     const button = within(panel).getByRole("button", {
-      name: /continuar histórico/i,
-    });
-
-    await user.click(button);
-
-    expect(button).toBeDisabled();
-    expect(within(panel).getByRole("status")).toHaveTextContent(
-      /iniciando histórico/i,
-    );
-
-    resolveChunk({
-      hasMoreHistory: false,
-      oldestCoveredAt: "2026-04-01",
-      ordersFetched: 2,
-    });
-
-    await waitFor(() => expect(button).not.toBeDisabled());
-    expect(api.runBackfillNextChunk).toHaveBeenCalledTimes(1);
-    expect(api.runBackfillNextChunk).toHaveBeenCalledWith("ml-1");
-  });
-
-  it("a double click on the same button never fires the endpoint twice — the synchronous busy guard blocks the second click", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "ml-1" }),
-    ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-    (api.runBackfillNextChunk as jest.Mock).mockResolvedValue({
-      hasMoreHistory: false,
-      oldestCoveredAt: "2026-04-01",
-      ordersFetched: 0,
-    });
-
-    render(<SincronizacoesPage />);
-    const panel = await screen.findByTestId("backfill-panel-Meli 1");
-    const button = within(panel).getByRole("button", {
-      name: /continuar histórico/i,
+      name: /completar histórico/i,
     });
 
     fireEvent.click(button);
     fireEvent.click(button);
 
-    await waitFor(() =>
-      expect(api.runBackfillNextChunk).toHaveBeenCalledTimes(1),
-    );
+    await waitFor(() => expect(api.startBackfill).toHaveBeenCalledTimes(1));
+    resolveStart(backfillStatus());
+    await waitFor(() => expect(button).not.toBeInTheDocument());
   });
 
-  it("success updates the status and the last processed chunk after the loop finishes", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "ml-1" }),
-    ]);
-    (api.fetchBackfillStatus as jest.Mock)
-      .mockResolvedValueOnce(backfillStatus({ lastProcessedChunk: null }))
-      .mockResolvedValueOnce(
-        backfillStatus({
-          lastProcessedChunk: { from: "2026-04-01", to: "2026-05-01", ordersFetched: 7 },
-        }),
+  describe("pausar / continuar", () => {
+    it('clicking "Pausar" calls pauseBackfill and reflects the returned status', async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
+      (api.pauseBackfill as jest.Mock).mockResolvedValue(
+        backfillStatus({ job: job({ status: "PAUSED" }) }),
       );
-    (api.runBackfillNextChunk as jest.Mock).mockResolvedValue({
-      hasMoreHistory: false,
-      oldestCoveredAt: "2026-04-01",
-      ordersFetched: 7,
+
+      const user = userEvent.setup();
+      render(<SincronizacoesPage />);
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      await user.click(within(panel).getByRole("button", { name: /pausar/i }));
+
+      await waitFor(() => expect(api.pauseBackfill).toHaveBeenCalledWith("ml-1"));
+      expect(await within(panel).findByText(/^pausado$/i)).toBeInTheDocument();
     });
 
-    const user = userEvent.setup();
-    render(<SincronizacoesPage />);
-    const panel = await screen.findByTestId("backfill-panel-Meli 1");
-    await user.click(
-      within(panel).getByRole("button", { name: /completar histórico/i }),
-    );
+    it('clicking "Continuar" calls resumeBackfill and reflects the returned status', async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({ job: job({ status: "PAUSED" }) }),
+      );
+      (api.resumeBackfill as jest.Mock).mockResolvedValue(
+        backfillStatus({ job: job({ status: "QUEUED" }) }),
+      );
 
-    await waitFor(() =>
-      expect(within(panel).getByText(/01\/04\/2026 a 01\/05\/2026/)).toBeInTheDocument(),
-    );
+      const user = userEvent.setup();
+      render(<SincronizacoesPage />);
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      await user.click(
+        within(panel).getByRole("button", { name: /continuar/i }),
+      );
+
+      await waitFor(() =>
+        expect(api.resumeBackfill).toHaveBeenCalledWith("ml-1"),
+      );
+      expect(await within(panel).findByText(/na fila/i)).toBeInTheDocument();
+    });
+
+    it("a resume failure on one account never crashes or blocks the other account's panel", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1", nickname: "Meli 1" }),
+        mlAccount({ id: "ml-2", nickname: "Meli 2" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({ job: job({ status: "PAUSED" }) }),
+      );
+      (api.resumeBackfill as jest.Mock).mockImplementation(
+        (accountId: string) =>
+          accountId === "ml-1"
+            ? Promise.reject(fakeApiFetchError("Falha ao retomar.", "SYNC_FAILED"))
+            : Promise.resolve(backfillStatus({ job: job({ status: "QUEUED" }) })),
+      );
+
+      const user = userEvent.setup();
+      render(<SincronizacoesPage />);
+      const panel1 = await screen.findByTestId("backfill-panel-Meli 1");
+      const panel2 = await screen.findByTestId("backfill-panel-Meli 2");
+
+      await user.click(
+        within(panel1).getByRole("button", { name: /continuar/i }),
+      );
+      await waitFor(() =>
+        expect(within(panel1).getByRole("alert")).toBeInTheDocument(),
+      );
+
+      await user.click(
+        within(panel2).getByRole("button", { name: /continuar/i }),
+      );
+      await waitFor(() =>
+        expect(api.resumeBackfill).toHaveBeenCalledWith("ml-2"),
+      );
+      expect(within(panel2).queryByRole("alert")).not.toBeInTheDocument();
+    });
   });
 
-  it("an exhausted-retry failure is shown on screen, never swallowed silently", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "ml-1" }),
-    ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-    // code "RATE_LIMITED" + retryAfterSeconds minúsculo só encurta o
-    // backoff interno entre tentativas (nunca 22s reais de espera aqui) —
-    // não muda o cenário testado: falha persistente que esgota as
-    // tentativas e aparece na tela.
-    (api.runBackfillNextChunk as jest.Mock).mockRejectedValue(
-      fakeApiFetchError(
-        "Não foi possível iniciar o histórico.",
-        "RATE_LIMITED",
-        0.001,
-      ),
-    );
+  describe("acompanhamento (polling leve, sem loop client-side)", () => {
+    it("polls the status endpoint periodically while a job is active, and reflects new progress", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock)
+        .mockResolvedValueOnce(backfillStatus({ job: job({ chunksProcessed: 1 }) }))
+        .mockResolvedValue(backfillStatus({ job: job({ chunksProcessed: 5 }) }));
 
-    const user = userEvent.setup();
-    render(<SincronizacoesPage />);
-    const panel = await screen.findByTestId("backfill-panel-Meli 1");
-    await user.click(
-      within(panel).getByRole("button", { name: /continuar histórico/i }),
-    );
+      render(<SincronizacoesPage />);
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(within(panel).getByText("1")).toBeInTheDocument();
 
-    await waitFor(() =>
-      expect(within(panel).getByRole("alert")).toHaveTextContent(
-        /não foi possível iniciar o histórico/i,
-      ),
-    );
-  }, 10000);
-
-  it("a next-chunk failure on one account never crashes or blocks the other account's panel", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "ml-1", nickname: "Meli 1" }),
-      mlAccount({ id: "ml-2", nickname: "Meli 2" }),
-    ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-    (api.runBackfillNextChunk as jest.Mock).mockImplementation(
-      (accountId: string) =>
-        accountId === "ml-1"
-          ? Promise.reject(
-              // RATE_LIMITED + retryAfterSeconds minúsculo só encurta o
-              // backoff interno entre tentativas neste teste.
-              fakeApiFetchError(
-                "Não foi possível iniciar o histórico.",
-                "RATE_LIMITED",
-                0.001,
-              ),
-            )
-          : Promise.resolve({
-              hasMoreHistory: false,
-              oldestCoveredAt: "2026-04-01",
-              ordersFetched: 1,
-            }),
-    );
-
-    const user = userEvent.setup();
-    render(<SincronizacoesPage />);
-    const panel1 = await screen.findByTestId("backfill-panel-Meli 1");
-    const panel2 = await screen.findByTestId("backfill-panel-Meli 2");
-
-    await user.click(
-      within(panel1).getByRole("button", { name: /continuar histórico/i }),
-    );
-    await waitFor(() =>
-      expect(within(panel1).getByRole("alert")).toBeInTheDocument(),
-    );
-
-    await user.click(
-      within(panel2).getByRole("button", { name: /continuar histórico/i }),
-    );
-    await waitFor(() =>
-      expect(api.runBackfillNextChunk).toHaveBeenCalledWith("ml-2"),
-    );
-    expect(within(panel2).queryByRole("alert")).not.toBeInTheDocument();
-  }, 10000);
-
-  it("respects Retry-After on a 429 before retrying, and eventually succeeds", async () => {
-    (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
-      mlAccount({ id: "ml-1" }),
-    ]);
-    (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
-    (api.runBackfillNextChunk as jest.Mock)
-      .mockRejectedValueOnce(
-        fakeApiFetchError(
-          "Limite de chamadas atingido. Nova tentativa em breve.",
-          "RATE_LIMITED",
-          0.001, // segundos — minúsculo só para o teste não esperar de verdade
-        ),
-      )
-      .mockResolvedValueOnce({
-        hasMoreHistory: false,
-        oldestCoveredAt: "2026-04-01",
-        ordersFetched: 3,
+      const callsBefore = (api.fetchBackfillStatus as jest.Mock).mock.calls.length;
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(4000);
       });
 
-    const user = userEvent.setup();
-    render(<SincronizacoesPage />);
-    const panel = await screen.findByTestId("backfill-panel-Meli 1");
-    await user.click(
-      within(panel).getByRole("button", { name: /continuar histórico/i }),
-    );
+      await waitFor(() =>
+        expect(
+          (api.fetchBackfillStatus as jest.Mock).mock.calls.length,
+        ).toBeGreaterThan(callsBefore),
+      );
+      expect(await within(panel).findByText("5")).toBeInTheDocument();
+    });
 
-    await waitFor(() =>
-      expect(api.runBackfillNextChunk).toHaveBeenCalledTimes(2),
-    );
-    expect(within(panel).queryByRole("alert")).not.toBeInTheDocument();
+    it("stops polling once the job reaches a terminal status (never polls forever)", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({ job: job({ status: "PAUSED" }) }),
+      );
+
+      render(<SincronizacoesPage />);
+      await screen.findByTestId("backfill-panel-Meli 1");
+      const callsAfterInitialLoad = (api.fetchBackfillStatus as jest.Mock).mock
+        .calls.length;
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(10000);
+      });
+
+      expect((api.fetchBackfillStatus as jest.Mock).mock.calls.length).toBe(
+        callsAfterInitialLoad,
+      );
+    });
+
+    it("unmounting the page only stops polling — it never sends any request to cancel or pause the job", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
+
+      const { unmount } = render(<SincronizacoesPage />);
+      await screen.findByTestId("backfill-panel-Meli 1");
+      const callsBeforeUnmount = (api.fetchBackfillStatus as jest.Mock).mock
+        .calls.length;
+
+      unmount();
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(10000);
+      });
+
+      expect((api.fetchBackfillStatus as jest.Mock).mock.calls.length).toBe(
+        callsBeforeUnmount,
+      );
+      expect(api.pauseBackfill).not.toHaveBeenCalled();
+    });
+
+    it("reopening the page (a fresh mount) immediately shows the job's current progress from the backend", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({ job: job({ status: "RETRY_WAIT", chunksProcessed: 8 }) }),
+      );
+
+      render(<SincronizacoesPage />);
+
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(
+        within(panel).getByText(/aguardando nova tentativa/i),
+      ).toBeInTheDocument();
+      expect(within(panel).getByText("8")).toBeInTheDocument();
+    });
   });
 });

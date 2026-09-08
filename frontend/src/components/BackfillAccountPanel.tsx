@@ -1,39 +1,48 @@
 import { describeIntervals } from "./DataCoverageBanner";
-import { formatCalendarDate } from "@/lib/kpi-format";
-import type { BackfillStatusDto } from "@/types/marketplace-backfill";
-
-export interface BackfillProgress {
-  chunksProcessed: number;
-  /** Limite mais antigo alcançado pelo último chunk concluído. */
-  windowFrom: string | null;
-  /** Limite mais recente do chunk que acabou de ser processado. */
-  windowTo: string | null;
-}
+import { BACKFILL_ERROR_MESSAGES } from "@/lib/api";
+import { formatCalendarDate, formatDateTimeSaoPaulo } from "@/lib/kpi-format";
+import type {
+  BackfillJobStatusValue,
+  BackfillStatusDto,
+} from "@/types/marketplace-backfill";
 
 interface BackfillAccountPanelProps {
   label: string;
   status: BackfillStatusDto | null;
   loadError: boolean;
-  progress: BackfillProgress | null;
-  isRunning: boolean;
+  /** Ação (start/pause/resume) em voo agora — desabilita os botões desta conta. */
+  actionPending: boolean;
+  /** Outra conta do lote está em ação agora (ex.: "Completar histórico de todas as lojas"). */
   disabled: boolean;
   errorMessage: string | null;
   onStart: () => void;
+  onPause: () => void;
+  onResume: () => void;
 }
 
-const STATUS_LABELS: Record<BackfillStatusDto["status"], string> = {
-  NOT_STARTED: "Não iniciado",
-  IN_PROGRESS: "Parcial",
+const JOB_STATUS_LABELS: Record<BackfillJobStatusValue, string> = {
+  QUEUED: "Na fila",
+  RUNNING: "Buscando histórico...",
+  RETRY_WAIT: "Aguardando nova tentativa",
+  PAUSED: "Pausado",
+  FAILED: "Falhou",
   SAFETY_LIMIT_REACHED: "Concluído (limite de segurança)",
-  ERROR: "Erro",
 };
 
-const STATUS_COLORS: Record<BackfillStatusDto["status"], string> = {
-  NOT_STARTED: "text-foreground/60",
-  IN_PROGRESS: "text-amber-700",
+const JOB_STATUS_COLORS: Record<BackfillJobStatusValue, string> = {
+  QUEUED: "text-foreground/60",
+  RUNNING: "text-amber-700",
+  RETRY_WAIT: "text-amber-700",
+  PAUSED: "text-foreground/60",
+  FAILED: "text-red-700",
   SAFETY_LIMIT_REACHED: "text-green-700",
-  ERROR: "text-red-700",
 };
+
+const ACTIVE_JOB_STATUSES: BackfillJobStatusValue[] = [
+  "QUEUED",
+  "RUNNING",
+  "RETRY_WAIT",
+];
 
 /**
  * Lacunas entre intervalos sincronizados NÃO adjacentes (Fase 4, item 2) —
@@ -51,22 +60,28 @@ function findGaps(
   return gaps;
 }
 
-function actionLabel(status: BackfillStatusDto): string {
-  if (status.status === "ERROR") return "Tentar novamente";
-  if (status.lastProcessedChunk === null) return "Completar histórico";
-  return "Continuar histórico";
+function formatDateTime(value: string | null): string {
+  const formatted = formatDateTimeSaoPaulo(value);
+  return formatted ? formatted.replace(", ", " às ") : "—";
 }
 
 export function BackfillAccountPanel({
   label,
   status,
   loadError,
-  progress,
-  isRunning,
+  actionPending,
   disabled,
   errorMessage,
   onStart,
+  onPause,
+  onResume,
 }: BackfillAccountPanelProps) {
+  const job = status?.job ?? null;
+  const jobIsActive = job !== null && ACTIVE_JOB_STATUSES.includes(job.status);
+  const jobIsResumable =
+    job !== null && (job.status === "PAUSED" || job.status === "FAILED");
+  const buttonsDisabled = disabled || actionPending;
+
   return (
     <div
       data-testid={`backfill-panel-${label}`}
@@ -105,16 +120,28 @@ export function BackfillAccountPanel({
                 <dd>{describeIntervals(findGaps(status.synchronizedIntervals))}</dd>
               </>
             ) : null}
-            <dt>Último bloco histórico processado</dt>
-            <dd>
-              {status.lastProcessedChunk
-                ? `${formatCalendarDate(status.lastProcessedChunk.from)} a ${formatCalendarDate(status.lastProcessedChunk.to)} (${status.lastProcessedChunk.ordersFetched} pedido(s))`
-                : "nenhum ainda"}
-            </dd>
-            <dt>Status</dt>
-            <dd className={STATUS_COLORS[status.status]}>
-              {STATUS_LABELS[status.status]}
-            </dd>
+
+            {job ? (
+              <>
+                <dt>Status do histórico</dt>
+                <dd className={JOB_STATUS_COLORS[job.status]}>
+                  {JOB_STATUS_LABELS[job.status]}
+                  {job.pauseRequested && job.status === "RUNNING"
+                    ? " (pausando...)"
+                    : ""}
+                </dd>
+                <dt>Blocos processados</dt>
+                <dd>{job.chunksProcessed}</dd>
+                <dt>Última atividade</dt>
+                <dd>{formatDateTime(job.lastActivityAt)}</dd>
+                {job.status === "RETRY_WAIT" ? (
+                  <>
+                    <dt>Próxima tentativa</dt>
+                    <dd>{formatDateTime(job.nextAttemptAt)}</dd>
+                  </>
+                ) : null}
+              </>
+            ) : null}
           </dl>
 
           {status.status === "NOT_STARTED" ? (
@@ -124,7 +151,7 @@ export function BackfillAccountPanel({
             </p>
           ) : null}
 
-          {status.status === "SAFETY_LIMIT_REACHED" ? (
+          {job?.status === "SAFETY_LIMIT_REACHED" ? (
             <p className="text-xs text-foreground/60">
               Histórico completo dentro do limite de segurança do sistema —
               isto não é uma confirmação de que{" "}
@@ -135,19 +162,10 @@ export function BackfillAccountPanel({
             </p>
           ) : null}
 
-          {isRunning ? (
-            <p className="text-xs text-foreground/60" role="status">
-              {!progress || progress.chunksProcessed === 0
-                ? "Iniciando histórico..."
-                : `Processando ${label} — período ${
-                    progress.windowFrom
-                      ? formatCalendarDate(progress.windowFrom)
-                      : "?"
-                  } a ${
-                    progress.windowTo
-                      ? formatCalendarDate(progress.windowTo)
-                      : "?"
-                  } (${progress.chunksProcessed} bloco(s) processado(s))`}
+          {job?.status === "FAILED" && job.lastErrorCode ? (
+            <p role="alert" className="text-xs text-red-700">
+              {BACKFILL_ERROR_MESSAGES[job.lastErrorCode] ??
+                "Não foi possível continuar o histórico agora."}
             </p>
           ) : null}
 
@@ -157,20 +175,51 @@ export function BackfillAccountPanel({
             </p>
           ) : null}
 
-          {status.status !== "SAFETY_LIMIT_REACHED" &&
-          status.status !== "NOT_STARTED" ? (
-            <button
-              type="button"
-              onClick={onStart}
-              disabled={disabled || isRunning}
-              className="mt-1 self-start rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
-            >
-              {isRunning
-                ? !progress || progress.chunksProcessed === 0
-                  ? "Iniciando histórico..."
-                  : "Buscando histórico..."
-                : actionLabel(status)}
-            </button>
+          <div className="mt-1 flex flex-wrap gap-2">
+            {job === null || job.status === "FAILED" ? (
+              <button
+                type="button"
+                onClick={onStart}
+                disabled={
+                  buttonsDisabled ||
+                  status.status === "NOT_STARTED"
+                }
+                className="self-start rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {job?.status === "FAILED"
+                  ? "Tentar novamente"
+                  : "Completar histórico"}
+              </button>
+            ) : null}
+
+            {jobIsActive && job !== null && !job.pauseRequested ? (
+              <button
+                type="button"
+                onClick={onPause}
+                disabled={buttonsDisabled}
+                className="self-start rounded-md border border-border-subtle px-3 py-1.5 text-sm font-medium hover:bg-foreground/5 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Pausar
+              </button>
+            ) : null}
+
+            {jobIsResumable ? (
+              <button
+                type="button"
+                onClick={onResume}
+                disabled={buttonsDisabled}
+                className="self-start rounded-md border border-brand bg-brand/10 px-3 py-1.5 text-sm font-medium text-brand hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Continuar
+              </button>
+            ) : null}
+          </div>
+
+          {jobIsActive ? (
+            <p className="text-xs text-foreground/50" role="status">
+              Processando em segundo plano no servidor — pode fechar esta
+              página, o histórico continua.
+            </p>
           ) : null}
         </>
       )}
