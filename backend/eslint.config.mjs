@@ -45,7 +45,8 @@ export default tseslint.config(
     files: ['{src,apps,libs}/**/*.ts'],
     plugins: { quality },
     rules: {
-      // Baseline: 11 arquivos acima de 350 linhas (medido em 2026-09-09).
+      // Baseline: 10 arquivos acima de 350 linhas (medido em 2026-09-09,
+      // apos split de marketplace-analytics-response.dto.ts).
       'quality/max-lines': ['warn', { max: 350 }],
       // Baseline: 3 ocorrências em src/database/seeds/create-admin.seed.ts
       // (script CLI de seed, roda fora do bootstrap do Nest).
