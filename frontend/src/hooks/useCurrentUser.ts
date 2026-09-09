@@ -6,6 +6,8 @@ import { apiFetch } from "@/lib/api";
 export type CurrentUser = {
   name: string;
   email: string;
+  /** Checkpoint BI-1: só decide se a UI mostra a ação de administrador — o backend nunca confia nisto sozinho. */
+  isAdmin: boolean;
 };
 
 export type CurrentUserState = {
@@ -58,7 +60,11 @@ export function useCurrentUser(): CurrentUserState {
 
         setState({
           user: isUsable
-            ? { name: candidate.name as string, email: candidate.email as string }
+            ? {
+                name: candidate.name as string,
+                email: candidate.email as string,
+                isAdmin: candidate.isAdmin === true,
+              }
             : null,
           isLoading: false,
         });
