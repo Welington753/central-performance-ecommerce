@@ -11,7 +11,8 @@ const eslintConfig = defineConfig([
     files: ["src/**/*.{js,jsx,ts,tsx}"],
     plugins: { quality },
     rules: {
-      // Baseline: 5 arquivos acima de 350 linhas (medido em 2026-09-09).
+      // Baseline: 4 arquivos acima de 350 linhas (medido em 2026-09-09,
+      // apos split de integracoes/page.tsx).
       "quality/max-lines": ["warn", { max: 350 }],
       // Sem módulo de banco/ORM no frontend (SPA consome a API do backend
       // via src/lib/api.ts) — quality/no-direct-data-access não se aplica.
