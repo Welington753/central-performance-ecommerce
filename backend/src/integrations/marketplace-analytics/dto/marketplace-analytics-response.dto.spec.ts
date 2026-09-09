@@ -18,6 +18,8 @@ function totals(
     grossSalesUnits: 0,
     cancelledUnits: 0,
     cancelledRevenueCents: 0n,
+    partiallyRefundedOrders: 0,
+    partiallyRefundedGrossAmountCents: 0n,
     ...overrides,
   };
 }
@@ -138,6 +140,44 @@ describe('toMarketplaceAnalyticsResponse', () => {
     expect(dto.comparison?.grossSalesAvgUnitPricePct).toBeNull();
     expect(dto.comparison?.cancelledUnitsPct).toBeNull();
     expect(dto.comparison?.cancelledRevenuePct).toBeNull();
+  });
+
+  describe('partially_refunded (auditoria "contrato de dados", Checkpoint BI-1)', () => {
+    it('refundCoverage is COMPLETE and the fields are zeroed when there is no partially_refunded order in scope', () => {
+      const dto = toMarketplaceAnalyticsResponse(aggregate());
+      expect(dto.summary?.partiallyRefundedOrders).toBe(0);
+      expect(dto.summary?.partiallyRefundedGrossAmount).toBe('0.00');
+      expect(dto.summary?.refundCoverage).toBe('COMPLETE');
+    });
+
+    it('surfaces partiallyRefundedOrders/GrossAmount and flips refundCoverage to PARTIAL', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({
+            partiallyRefundedOrders: 3,
+            partiallyRefundedGrossAmountCents: 538727n,
+          }),
+        }),
+      );
+      expect(dto.summary?.partiallyRefundedOrders).toBe(3);
+      expect(dto.summary?.partiallyRefundedGrossAmount).toBe('5387.27');
+      expect(dto.summary?.refundCoverage).toBe('PARTIAL');
+    });
+
+    it('never adds partiallyRefundedGrossAmount into grossRevenue or cancelledRevenue', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({
+            grossRevenueCents: 100000n,
+            cancelledRevenueCents: 5000n,
+            partiallyRefundedOrders: 1,
+            partiallyRefundedGrossAmountCents: 999999n,
+          }),
+        }),
+      );
+      expect(dto.summary?.grossRevenue).toBe('1000.00');
+      expect(dto.summary?.cancelledRevenue).toBe('50.00');
+    });
   });
 
   it('never divides by zero for gross-sales averages when there are zero gross-sales orders/units', () => {

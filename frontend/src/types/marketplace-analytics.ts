@@ -40,6 +40,11 @@ export interface AnalyticsSummary {
   /** Painel "Ver cancelamentos" — todos os pedidos cancelados do período. */
   cancelledUnits: number;
   cancelledRevenue: string;
+  /** partially_refunded — nunca somado a grossRevenue/cancelledRevenue acima. */
+  partiallyRefundedOrders: number;
+  /** Valor BRUTO (total_amount) anterior/independente do estorno — nunca receita líquida. */
+  partiallyRefundedGrossAmount: string;
+  refundCoverage: "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
 }
 
 export interface AnalyticsComparison {

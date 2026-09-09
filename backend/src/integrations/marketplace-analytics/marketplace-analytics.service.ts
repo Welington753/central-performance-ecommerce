@@ -6,6 +6,7 @@ import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-
 import {
   CANCELLED_ORDER_STATUS,
   PAID_ORDER_STATUS,
+  PARTIALLY_REFUNDED_ORDER_STATUS,
 } from '../marketplace-orders/order-status';
 import { decimalStringToCents } from '../marketplace-orders/money.util';
 import {
@@ -94,6 +95,21 @@ export interface AnalyticsPeriodTotals {
    */
   cancelledUnits: number;
   cancelledRevenueCents: bigint;
+  /**
+   * Reconhecimento explícito de `partially_refunded` (auditoria "contrato de
+   * dados", Checkpoint BI-1) — NUNCA somado a `grossRevenueCents` nem a
+   * `cancelledRevenueCents` acima; só visível através destes dois campos
+   * próprios, para que a lacuna de cobertura fique explícita em vez de o
+   * pedido simplesmente desaparecer de toda agregação (comportamento antigo,
+   * antes desta correção).
+   */
+  partiallyRefundedOrders: number;
+  /**
+   * Valor BRUTO (`total_amount`) anterior/independente do estorno — nunca o
+   * valor efetivamente reembolsado (esse campo não é persistido hoje; ver
+   * `refund-coverage.util.ts`).
+   */
+  partiallyRefundedGrossAmountCents: bigint;
 }
 
 export interface AnalyticsAccountTotals {
@@ -665,6 +681,8 @@ export class MarketplaceAnalyticsService {
         cancelled_revenue: string;
         gross_sales_revenue: string;
         gross_sales_orders: string;
+        partially_refunded_orders: string;
+        partially_refunded_gross_amount: string;
       }>
     >(
       `SELECT
@@ -677,7 +695,9 @@ export class MarketplaceAnalyticsService {
           ), 0)::text AS gross_sales_revenue,
           COUNT(*) FILTER (
             WHERE status = $3 OR (status = $4 AND total_amount > 0)
-          )::text AS gross_sales_orders
+          )::text AS gross_sales_orders,
+          COUNT(*) FILTER (WHERE status = $7)::text AS partially_refunded_orders,
+          COALESCE(SUM(total_amount) FILTER (WHERE status = $7), 0)::text AS partially_refunded_gross_amount
         FROM marketplace_orders
         WHERE marketplace_account_id = ANY($1)
           AND date_created >= $2::timestamptz
@@ -690,6 +710,7 @@ export class MarketplaceAnalyticsService {
         CANCELLED_ORDER_STATUS,
         window.to,
         classificationValues,
+        PARTIALLY_REFUNDED_ORDER_STATUS,
       ],
     );
 
@@ -750,6 +771,10 @@ export class MarketplaceAnalyticsService {
       grossSalesUnits: Number(itemRow.gross_sales_units),
       cancelledUnits: Number(itemRow.cancelled_units),
       cancelledRevenueCents: decimalCurrencyToCents(orderRow.cancelled_revenue),
+      partiallyRefundedOrders: Number(orderRow.partially_refunded_orders),
+      partiallyRefundedGrossAmountCents: decimalCurrencyToCents(
+        orderRow.partially_refunded_gross_amount,
+      ),
     };
   }
 
@@ -1459,6 +1484,8 @@ function zeroPeriodTotals(): AnalyticsPeriodTotals {
     grossSalesUnits: 0,
     cancelledUnits: 0,
     cancelledRevenueCents: 0n,
+    partiallyRefundedOrders: 0,
+    partiallyRefundedGrossAmountCents: 0n,
   };
 }
 

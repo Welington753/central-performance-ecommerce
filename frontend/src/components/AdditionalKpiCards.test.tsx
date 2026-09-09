@@ -19,6 +19,9 @@ const baseSummary: AnalyticsSummary = {
   grossSalesAvgUnitPrice: "52.50",
   cancelledUnits: 1,
   cancelledRevenue: "50.00",
+  partiallyRefundedOrders: 0,
+  partiallyRefundedGrossAmount: "0.00",
+  refundCoverage: "COMPLETE",
 };
 
 const baseComparison: AnalyticsComparison = {

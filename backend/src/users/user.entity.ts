@@ -31,6 +31,15 @@ export class User {
   @Column({ type: 'boolean', default: true })
   active!: boolean;
 
+  /**
+   * Checkpoint BI-1: primeiro conceito de papel do sistema — só controla,
+   * por ora, quem pode criar/alterar a meta mensal consolidada
+   * (`MonthlyRevenueGoalsController`). Nunca promovido automaticamente por
+   * seed/migration (ver `UsersIsAdmin1788600000000`).
+   */
+  @Column({ name: 'is_admin', type: 'boolean', default: false })
+  isAdmin!: boolean;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

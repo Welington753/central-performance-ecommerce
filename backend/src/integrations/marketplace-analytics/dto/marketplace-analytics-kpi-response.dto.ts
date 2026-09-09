@@ -7,6 +7,7 @@ import type {
   SourceAvailability,
 } from '../source-eligibility.util';
 import type { ConsolidatedCoverageStatus } from '../consolidated-coverage.util';
+import type { RefundCoverage } from '../refund-coverage.util';
 import type { MarketplaceAnalyticsFull } from './marketplace-analytics-full-response.dto';
 
 export interface AnalyticsKpiSummary {
@@ -32,6 +33,17 @@ export interface AnalyticsKpiSummary {
   /** Painel "Ver cancelamentos" — todos os pedidos cancelados do período (ver `cancelledOrders`/`cancellationRate` acima para contagem/taxa). */
   cancelledUnits: number;
   cancelledRevenue: string;
+  /**
+   * Reconhecimento de `partially_refunded` (auditoria "contrato de dados",
+   * Checkpoint BI-1) — aditivo, nunca somado a `grossRevenue`/
+   * `cancelledRevenue` acima. `partiallyRefundedGrossAmount` é o valor BRUTO
+   * (`total_amount`) anterior/independente do estorno, nunca a receita
+   * líquida real (o valor efetivamente estornado não é persistido hoje).
+   */
+  partiallyRefundedOrders: number;
+  partiallyRefundedGrossAmount: string;
+  /** COMPLETE quando não há nenhum `partially_refunded` no escopo; PARTIAL quando há ao menos um (valor de estorno em si nunca disponível hoje). */
+  refundCoverage: RefundCoverage;
 }
 
 export interface AnalyticsKpiComparison {

@@ -18,9 +18,21 @@ export const PAID_ORDER_STATUS = 'paid';
 export const CANCELLED_ORDER_STATUS = 'cancelled';
 export const PENDING_ORDER_STATUS = 'pending';
 export const UNFULFILLABLE_ORDER_STATUS = 'unfulfillable';
+/**
+ * Status bruto real do Mercado Livre (auditoria "contrato de dados",
+ * Checkpoint BI) — pedido pago com estorno PARCIAL confirmado pelo
+ * provedor. Nunca contado como `paid` (o valor bruto não reflete mais o
+ * que foi efetivamente recebido) nem como `cancelled` (a venda não foi
+ * desfeita por completo). Reconhecido explicitamente no vocabulário
+ * canônico para que passe a ser visível como lacuna de cobertura
+ * (`refundCoverage`) em vez de desaparecer silenciosamente de toda
+ * agregação, como acontecia antes desta correção.
+ */
+export const PARTIALLY_REFUNDED_ORDER_STATUS = 'partially_refunded';
 
 export type CanonicalOrderStatus =
   | typeof PAID_ORDER_STATUS
   | typeof CANCELLED_ORDER_STATUS
   | typeof PENDING_ORDER_STATUS
-  | typeof UNFULFILLABLE_ORDER_STATUS;
+  | typeof UNFULFILLABLE_ORDER_STATUS
+  | typeof PARTIALLY_REFUNDED_ORDER_STATUS;

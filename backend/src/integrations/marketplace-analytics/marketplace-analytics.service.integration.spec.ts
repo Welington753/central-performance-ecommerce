@@ -2287,4 +2287,182 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(dto.summary?.orders).toBe(1);
     });
   });
+
+  describe('partially_refunded (auditoria "contrato de dados", Checkpoint BI-1)', () => {
+    it('refundCoverage is COMPLETE and fields are zeroed when the scope has no partially_refunded order', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.partiallyRefundedOrders).toBe(0);
+      expect(dto.summary?.partiallyRefundedGrossAmount).toBe('0.00');
+      expect(dto.summary?.refundCoverage).toBe('COMPLETE');
+    });
+
+    it('counts several partially_refunded orders, sums their gross total_amount, and flips coverage to PARTIAL', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'pr-1',
+        status: 'partially_refunded',
+        totalAmount: '150.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'pr-2',
+        status: 'partially_refunded',
+        totalAmount: '80.50',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.partiallyRefundedOrders).toBe(2);
+      expect(dto.summary?.partiallyRefundedGrossAmount).toBe('230.50');
+      expect(dto.summary?.refundCoverage).toBe('PARTIAL');
+    });
+
+    it('is isolated by account — a partially_refunded order in one account never counts for another', async () => {
+      const accountWithRefund = await seedAccount();
+      const otherAccount = await seedAccount();
+      await seedOrder({
+        accountId: accountWithRefund,
+        externalOrderId: 'pr-1',
+        status: 'partially_refunded',
+        totalAmount: '99.90',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      // Prova de dado real na outra conta — sem isto, `summary` sairia
+      // `null` por falta de histórico (CONNECTED_NO_DATA), o que provaria
+      // a ausência de dado fictício, não o isolamento em si.
+      await seedOrder({
+        accountId: otherAccount,
+        externalOrderId: 'paid-1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId: otherAccount },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.partiallyRefundedOrders).toBe(0);
+      expect(dto.summary?.refundCoverage).toBe('COMPLETE');
+    });
+
+    it('is isolated by period — a partially_refunded order outside the selected window is never counted', async () => {
+      const accountId = await seedAccount();
+      const outsideWindow = new Date('2025-01-01T12:00:00.000Z');
+      await seedOrder({
+        accountId,
+        externalOrderId: 'pr-old',
+        status: 'partially_refunded',
+        totalAmount: '99.90',
+        dateCreated: outsideWindow,
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'paid-current',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.partiallyRefundedOrders).toBe(0);
+      expect(dto.summary?.refundCoverage).toBe('COMPLETE');
+    });
+
+    it('is isolated by marketplace — filtering by AMAZON never surfaces a Mercado Livre partially_refunded order', async () => {
+      const mlAccount = await seedAccount({ marketplace: Marketplace.AMAZON });
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: 'pr-1',
+        status: 'partially_refunded',
+        totalAmount: '99.90',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      const otherMarketplaceAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      await seedOrder({
+        accountId: otherMarketplaceAccount,
+        externalOrderId: 'paid-1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { marketplace: 'MERCADO_LIVRE' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.partiallyRefundedOrders).toBe(0);
+      expect(dto.summary?.refundCoverage).toBe('COMPLETE');
+    });
+
+    it('never adds partiallyRefundedGrossAmount into grossRevenue or cancelledRevenue', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'paid-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'cancelled-1',
+        status: 'cancelled',
+        totalAmount: '30.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'pr-1',
+        status: 'partially_refunded',
+        totalAmount: '9999.99',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.grossRevenue).toBe('100.00');
+      expect(dto.summary?.cancelledRevenue).toBe('30.00');
+      expect(dto.summary?.orders).toBe(1);
+      expect(dto.summary?.cancelledOrders).toBe(1);
+      expect(dto.summary?.partiallyRefundedOrders).toBe(1);
+      expect(dto.summary?.partiallyRefundedGrossAmount).toBe('9999.99');
+    });
+  });
 });

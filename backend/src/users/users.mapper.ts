@@ -11,6 +11,7 @@ export function toUserResponse(user: User): UserResponseDto {
   dto.name = user.name;
   dto.email = user.email;
   dto.active = user.active;
+  dto.isAdmin = user.isAdmin;
   dto.createdAt = user.createdAt;
   dto.updatedAt = user.updatedAt;
   return dto;

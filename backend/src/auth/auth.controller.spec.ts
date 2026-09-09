@@ -19,6 +19,7 @@ function buildUser(): User {
     email: 'ana@example.com',
     passwordHash: 'hash',
     active: true,
+    isAdmin: false,
     createdAt: new Date(),
     updatedAt: new Date(),
   };

@@ -18,6 +18,10 @@ export class UserResponseDto {
   @ApiProperty()
   active!: boolean;
 
+  /** Checkpoint BI-1: usado pelo frontend só para decidir exibir/ocultar a ação de administrador — o backend nunca confia nisto sozinho, sempre revalida via `AdminGuard`. */
+  @ApiProperty()
+  isAdmin!: boolean;
+
   @ApiProperty()
   createdAt!: Date;
 

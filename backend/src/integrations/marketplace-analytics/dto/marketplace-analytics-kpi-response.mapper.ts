@@ -9,6 +9,7 @@ import {
   utcInstantToSaoPauloDateString,
 } from '../../marketplace-orders/period.util';
 import { intervalsToDto } from '../consolidated-coverage.util';
+import { computeRefundCoverage } from '../refund-coverage.util';
 import type {
   AnalyticsAccountTotals,
   AnalyticsDailyPointRaw,
@@ -139,6 +140,11 @@ function toSummary(totals: AnalyticsPeriodTotals): AnalyticsKpiSummary {
     ),
     cancelledUnits: totals.cancelledUnits,
     cancelledRevenue: centsToDecimalString(totals.cancelledRevenueCents),
+    partiallyRefundedOrders: totals.partiallyRefundedOrders,
+    partiallyRefundedGrossAmount: centsToDecimalString(
+      totals.partiallyRefundedGrossAmountCents,
+    ),
+    refundCoverage: computeRefundCoverage(totals.partiallyRefundedOrders),
   };
 }
 
