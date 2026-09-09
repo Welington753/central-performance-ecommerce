@@ -57,9 +57,16 @@ async function bootstrap(): Promise<void> {
   }
 
   const port = configService.get<number>('PORT', 3000);
-  await app.listen(port);
+  // Sem `APP_HOST` definido: `127.0.0.1` fora de produção (nunca expor a
+  // rede local sem decisão explícita), `0.0.0.0` em produção (comportamento
+  // padrão de container, onde a variável tipicamente não é setada).
+  const host = configService.get<string>(
+    'APP_HOST',
+    nodeEnv === 'production' ? '0.0.0.0' : '127.0.0.1',
+  );
+  await app.listen(port, host);
   Logger.log(
-    `Aplicação rodando na porta ${port} (NODE_ENV=${nodeEnv})`,
+    `Aplicação rodando em ${host}:${port} (NODE_ENV=${nodeEnv})`,
     'Bootstrap',
   );
 

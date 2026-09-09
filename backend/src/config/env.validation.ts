@@ -1,4 +1,5 @@
 import Joi from 'joi';
+import { validateAppHost } from './app-host.validator';
 import { validateMercadoLivreRedirectUri } from './mercado-livre-redirect-uri.validator';
 
 /**
@@ -47,6 +48,18 @@ export const envValidationSchema = Joi.object({
     .default('development'),
 
   PORT: Joi.number().port().default(3000),
+
+  // Interface de rede em que o servidor escuta — hostname/IP puro, nunca
+  // URL nem `host:porta` (a porta é `PORT`, acima). Sem valor padrão fixo
+  // aqui: `main.ts` usa `127.0.0.1` como fallback só fora de produção,
+  // preservando a possibilidade de escutar em `0.0.0.0` dentro de um
+  // container de produção sem exigir a variável.
+  APP_HOST: Joi.string()
+    .custom((value: string, helpers) => {
+      if (!validateAppHost(value)) return helpers.error('any.invalid');
+      return value;
+    }, 'APP_HOST hostname/IP validation')
+    .optional(),
 
   // String de conexão do Postgres (local ou hospedado). Sem Docker nesta fase.
   DATABASE_URL: Joi.string()
