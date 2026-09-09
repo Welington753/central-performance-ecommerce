@@ -4,6 +4,8 @@ import eslintPluginPrettierRecommended from 'eslint-plugin-prettier/recommended'
 import globals from 'globals';
 import tseslint from 'typescript-eslint';
 
+import quality from './eslint-rules/index.cjs';
+
 export default tseslint.config(
   {
     ignores: ['eslint.config.mjs'],
@@ -37,6 +39,38 @@ export default tseslint.config(
         { argsIgnorePattern: '^_', varsIgnorePattern: '^_' },
       ],
       "prettier/prettier": ["error", { endOfLine: "auto" }],
+    },
+  },
+  {
+    files: ['{src,apps,libs}/**/*.ts'],
+    plugins: { quality },
+    rules: {
+      // Baseline: 11 arquivos acima de 350 linhas (medido em 2026-09-09).
+      'quality/max-lines': ['warn', { max: 350 }],
+      // Baseline: 3 ocorrências em src/database/seeds/create-admin.seed.ts
+      // (script CLI de seed, roda fora do bootstrap do Nest).
+      'quality/no-direct-console': [
+        'warn',
+        { logger: 'Logger do NestJS (@nestjs/common)' },
+      ],
+      'quality/no-direct-data-access': [
+        'error',
+        {
+          modules: ['typeorm', '@nestjs/typeorm'],
+          bindings: ['Repository', 'DataSource', 'EntityManager', 'InjectRepository'],
+          layers: ['.controller.ts'],
+        },
+      ],
+    },
+  },
+  {
+    files: ['eslint-rules/**/*.cjs'],
+    languageOptions: {
+      sourceType: 'commonjs',
+      globals: { module: 'readonly', require: 'readonly' },
+    },
+    rules: {
+      '@typescript-eslint/no-require-imports': 'off',
     },
   },
 );
