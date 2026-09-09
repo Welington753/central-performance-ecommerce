@@ -122,6 +122,87 @@ describe('validateOrdersSearchResponseBody', () => {
     if (result.valid) expect(result.orders[0].externalOrderId).toBe('42');
   });
 
+  describe('pack_id (pedido pertencente a um pack)', () => {
+    it('extracts a non-null pack_id as-is', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder({ pack_id: '2000000101334825' })]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) {
+        expect(result.orders[0].packId).toBe('2000000101334825');
+      }
+    });
+
+    it('keeps packId null when pack_id is absent', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder({ pack_id: null })]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].packId).toBeNull();
+    });
+  });
+
+  describe('order_items com múltiplos itens', () => {
+    it('maps every item, preserving quantity and unit_price of each one', () => {
+      const order = validOrder({
+        order_items: [
+          {
+            item: {
+              id: 'MLB111',
+              title: 'Produto A',
+              variation_id: null,
+              seller_sku: 'SKU-A',
+            },
+            quantity: 2,
+            unit_price: 10,
+            currency_id: 'BRL',
+          },
+          {
+            item: {
+              id: 'MLB222',
+              title: 'Produto B',
+              variation_id: null,
+              seller_sku: 'SKU-B',
+            },
+            quantity: 3,
+            unit_price: 25.5,
+            currency_id: 'BRL',
+          },
+          {
+            item: {
+              id: 'MLB333',
+              title: 'Produto C',
+              variation_id: null,
+              seller_sku: 'SKU-C',
+            },
+            quantity: 1,
+            unit_price: 7.25,
+            currency_id: 'BRL',
+          },
+        ],
+      });
+
+      const result = validateOrdersSearchResponseBody(validBody([order]));
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+
+      expect(result.orders[0].items).toHaveLength(3);
+      expect(result.orders[0].items.map((item) => item.itemId)).toEqual([
+        'MLB111',
+        'MLB222',
+        'MLB333',
+      ]);
+      expect(result.orders[0].items.map((item) => item.quantity)).toEqual([
+        2, 3, 1,
+      ]);
+      expect(result.orders[0].items.map((item) => item.unitPrice)).toEqual([
+        '10.00',
+        '25.50',
+        '7.25',
+      ]);
+    });
+  });
+
   describe('shipping.id (Fase 4, "Full")', () => {
     it('extracts shipping.id as shippingId, stringified', () => {
       const result = validateOrdersSearchResponseBody(

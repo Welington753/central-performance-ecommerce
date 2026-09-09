@@ -521,6 +521,87 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
       });
     });
 
+    it('persists a non-null packId (order belonging to a pack)', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          packId: '2000000101334825',
+        }),
+      ]);
+
+      const [order] = await dataSource.query<Array<{ pack_id: string | null }>>(
+        'SELECT pack_id FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.pack_id).toBe('2000000101334825');
+    });
+
+    it('persists every item of a multi-item order — none overwrites another, and the units total is the sum of all quantities', async () => {
+      const result = await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          items: [
+            {
+              externalItemId: 'MLB-A',
+              variationId: null,
+              sellerSku: 'SKU-A',
+              title: 'Produto A',
+              quantity: 2,
+              unitPrice: '10.00',
+              currencyId: 'BRL',
+            },
+            {
+              externalItemId: 'MLB-B',
+              variationId: null,
+              sellerSku: 'SKU-B',
+              title: 'Produto B',
+              quantity: 3,
+              unitPrice: '25.50',
+              currencyId: 'BRL',
+            },
+            {
+              externalItemId: 'MLB-C',
+              variationId: null,
+              sellerSku: 'SKU-C',
+              title: 'Produto C',
+              quantity: 1,
+              unitPrice: '7.25',
+              currencyId: 'BRL',
+            },
+          ],
+        }),
+      ]);
+      expect(result.itemsPersisted).toBe(3);
+
+      const [order] = await dataSource.query<
+        Array<Pick<MarketplaceOrderRow, 'id'>>
+      >('SELECT id FROM marketplace_orders WHERE marketplace_account_id = $1', [
+        accountId,
+      ]);
+      const items = await dataSource.query<MarketplaceOrderItemRow[]>(
+        'SELECT * FROM marketplace_order_items WHERE order_id = $1 ORDER BY external_item_id',
+        [order.id],
+      );
+
+      expect(items).toHaveLength(3);
+      // Nenhum item sobrescreve outro: cada external_item_id/quantity chega intacto.
+      expect(
+        items.map((item) => [item.external_item_id, item.quantity]),
+      ).toEqual([
+        ['MLB-A', 2],
+        ['MLB-B', 3],
+        ['MLB-C', 1],
+      ]);
+
+      const [{ total_units: totalUnits }] = await dataSource.query<
+        Array<{ total_units: string }>
+      >(
+        'SELECT SUM(quantity)::text AS total_units FROM marketplace_order_items WHERE order_id = $1',
+        [order.id],
+      );
+      expect(Number(totalUnits)).toBe(6); // 2 + 3 + 1
+    });
+
     it('persists sourceStatus/fulfillmentChannel/externalMarketplaceId when provided (Amazon), leaving them null when omitted (Mercado Livre)', async () => {
       await service.persistOrders([
         orderRecord({

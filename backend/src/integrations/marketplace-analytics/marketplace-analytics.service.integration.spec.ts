@@ -327,6 +327,58 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
     expect(rows[0].distinctListings).toBe(2);
   });
 
+  it('4b. a single order with 3+ items contributes every item to units/revenue — none is dropped or overwritten', async () => {
+    const accountId = await seedAccount();
+    await seedOrder({
+      accountId,
+      externalOrderId: 'multi-1',
+      status: 'paid',
+      totalAmount: '42.75',
+      dateCreated: IN_CURRENT,
+      items: [
+        {
+          externalItemId: 'X1',
+          sellerSku: 'SKU-A',
+          title: 'Produto A',
+          quantity: 2,
+          unitPrice: '10.00',
+        },
+        {
+          externalItemId: 'X2',
+          sellerSku: 'SKU-B',
+          title: 'Produto B',
+          quantity: 3,
+          unitPrice: '7.50',
+        },
+        {
+          externalItemId: 'X3',
+          sellerSku: 'SKU-C',
+          title: 'Produto C',
+          quantity: 1,
+          unitPrice: '0.25',
+        },
+      ],
+    });
+
+    const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+    const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+    // Unidades totais = soma de TODAS as quantidades dos 3 itens (2+3+1).
+    expect(dto.summary?.units).toBe(6);
+    // Produtos distintos = 3 SKUs distintos, mesmo pedido único.
+    expect(dto.summary?.distinctProducts).toBe(3);
+
+    const skuA = dto.topProductsBySku.find((r) => r.sku === 'SKU-A');
+    const skuB = dto.topProductsBySku.find((r) => r.sku === 'SKU-B');
+    const skuC = dto.topProductsBySku.find((r) => r.sku === 'SKU-C');
+    expect(skuA?.units).toBe(2);
+    expect(skuA?.grossRevenue).toBe('20.00');
+    expect(skuB?.units).toBe(3);
+    expect(skuB?.grossRevenue).toBe('22.50');
+    expect(skuC?.units).toBe(1);
+    expect(skuC?.grossRevenue).toBe('0.25');
+  });
+
   it('5. letter O and digit 0 are never confused as the same SKU', async () => {
     const accountId = await seedAccount();
     await seedOrder({
