@@ -151,6 +151,7 @@ export class MercadoLivreOAuthService {
 
       const claimed = await this.authorizationRequestsService.claimByState(
         parsed.state,
+        Marketplace.MERCADO_LIVRE,
       );
       if (!claimed) return redirect('OAUTH_CALLBACK_INVALID');
 

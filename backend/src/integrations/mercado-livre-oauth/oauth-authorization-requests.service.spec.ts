@@ -144,11 +144,17 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
         usePkce: false,
       });
 
-      const firstClaim = await service.claimByState(result.state);
+      const firstClaim = await service.claimByState(
+        result.state,
+        Marketplace.SHOPEE,
+      );
       expect(firstClaim).not.toBeNull();
       expect(firstClaim?.encryptedCodeVerifier).toBeNull();
 
-      const secondClaim = await service.claimByState(result.state);
+      const secondClaim = await service.claimByState(
+        result.state,
+        Marketplace.SHOPEE,
+      );
       expect(secondClaim).toBeNull();
     });
 
@@ -181,7 +187,7 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
         marketplace: Marketplace.SHOPEE,
         usePkce: false,
       });
-      await service.claimByState(pending.state);
+      await service.claimByState(pending.state, Marketplace.SHOPEE);
 
       await expect(
         service.createPending({
@@ -224,7 +230,7 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    await service.claimByState(pending.state);
+    await service.claimByState(pending.state, Marketplace.MERCADO_LIVRE);
 
     await expect(
       service.createPending({
@@ -506,7 +512,7 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    await service.claimByState(pending.state);
+    await service.claimByState(pending.state, Marketplace.MERCADO_LIVRE);
 
     await expect(
       service.createPending({
@@ -524,15 +530,23 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       marketplace: Marketplace.MERCADO_LIVRE,
     });
 
-    const first = await service.claimByState(pending.state);
-    const second = await service.claimByState(pending.state);
+    const first = await service.claimByState(
+      pending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
+    const second = await service.claimByState(
+      pending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
 
     expect(first?.status).toBe('PROCESSING');
     expect(second).toBeNull();
   });
 
   it('claimByState returns null for an unknown state', async () => {
-    expect(await service.claimByState('never-existed')).toBeNull();
+    expect(
+      await service.claimByState('never-existed', Marketplace.MERCADO_LIVRE),
+    ).toBeNull();
   });
 
   it('claimByState returns null for an expired PENDING row', async () => {
@@ -546,7 +560,9 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       [pending.id],
     );
 
-    expect(await service.claimByState(pending.state)).toBeNull();
+    expect(
+      await service.claimByState(pending.state, Marketplace.MERCADO_LIVRE),
+    ).toBeNull();
   });
 
   it('claimByState returns an object with real camelCase property names/values (not snake_case columns)', async () => {
@@ -556,7 +572,10 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       marketplace: Marketplace.MERCADO_LIVRE,
     });
 
-    const claimed = await service.claimByState(pending.state);
+    const claimed = await service.claimByState(
+      pending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
 
     // Prova, por valor, que o `RETURNING` com aliases explícitos produz o
     // shape camelCase que os chamadores (Task 19's
@@ -584,7 +603,10 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    const claimed = await service.claimByState(pending.state);
+    const claimed = await service.claimByState(
+      pending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
 
     expect(await service.finalizeSuccess(claimed!.id)).toBe(true);
     // Replay: already SUCCESS, must not "succeed" again.
@@ -609,7 +631,10 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    const claimed = await service.claimByState(pending.state);
+    const claimed = await service.claimByState(
+      pending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
 
     expect(
       await service.finalizeFailure(claimed!.id, 'IDENTITY_MISMATCH'),
@@ -647,7 +672,7 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    await service.claimByState(processingSeed.state);
+    await service.claimByState(processingSeed.state, Marketplace.MERCADO_LIVRE);
 
     const count = await service.sweepExpiredPending();
     expect(count).toBe(1);
@@ -669,7 +694,10 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    const claimed = await service.claimByState(pending.state);
+    const claimed = await service.claimByState(
+      pending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
     const oldTimestamp = new Date(Date.now() - 10 * 60 * 1000);
     await dataSource.query(
       `UPDATE oauth_authorization_requests SET processing_started_at = $2 WHERE id = $1`,
@@ -707,7 +735,7 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
       initiatedByUserId: userId,
       marketplace: Marketplace.MERCADO_LIVRE,
     });
-    await service.claimByState(pending.state);
+    await service.claimByState(pending.state, Marketplace.MERCADO_LIVRE);
 
     await expect(
       service.createPending({
@@ -789,5 +817,60 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
     expect(fakeQueryRunner.release).toHaveBeenCalledTimes(1);
 
     spy.mockRestore();
+  });
+
+  it('claimByState com expectedMarketplace errado nunca consome a tentativa de outro marketplace (isolamento cross-marketplace)', async () => {
+    const mlPending = await service.createPending({
+      marketplaceAccountId: accountId,
+      initiatedByUserId: userId,
+      marketplace: Marketplace.MERCADO_LIVRE,
+    });
+
+    // State real do Mercado Livre apresentado com expectedMarketplace=SHOPEE
+    // (equivalente a um callback Shopee recebendo um state do ML): não pode
+    // casar com a `UPDATE ... WHERE marketplace = $2` atômica.
+    const claimedAsShopee = await service.claimByState(
+      mlPending.state,
+      Marketplace.SHOPEE,
+    );
+    expect(claimedAsShopee).toBeNull();
+
+    const rows: Array<{ status: string; failure_code: string | null }> =
+      await dataSource.query(
+        'SELECT status, failure_code FROM oauth_authorization_requests WHERE id = $1',
+        [mlPending.id],
+      );
+    expect(rows[0].status).toBe('PENDING');
+    expect(rows[0].failure_code).toBeNull();
+
+    // A tentativa continua intocada e pode ser reclamada normalmente pelo
+    // marketplace correto.
+    const claimedAsMl = await service.claimByState(
+      mlPending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
+    expect(claimedAsMl).not.toBeNull();
+    expect(claimedAsMl?.status).toBe('PROCESSING');
+  });
+
+  it('claimByState com expectedMarketplace errado não reutiliza um state da Shopee (direção inversa)', async () => {
+    const shopeePending = await service.createPending({
+      marketplaceAccountId: accountId,
+      initiatedByUserId: userId,
+      marketplace: Marketplace.SHOPEE,
+      usePkce: false,
+    });
+
+    const claimedAsMl = await service.claimByState(
+      shopeePending.state,
+      Marketplace.MERCADO_LIVRE,
+    );
+    expect(claimedAsMl).toBeNull();
+
+    const rows: Array<{ status: string }> = await dataSource.query(
+      'SELECT status FROM oauth_authorization_requests WHERE id = $1',
+      [shopeePending.id],
+    );
+    expect(rows[0].status).toBe('PENDING');
   });
 });

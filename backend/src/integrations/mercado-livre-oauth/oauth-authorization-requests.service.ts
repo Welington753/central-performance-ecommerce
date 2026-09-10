@@ -167,7 +167,20 @@ export class OAuthAuthorizationRequestsService {
     return { id, state, codeChallenge };
   }
 
-  async claimByState(state: string): Promise<OAuthAuthorizationRequest | null> {
+  /**
+   * `expectedMarketplace` obrigatório (correção pós-CP2C): sem ele, um state
+   * válido de OUTRO marketplace seria consumido e finalizado como FAILED por
+   * este chamador — uma tentativa de um marketplace nunca pode ser alterada
+   * por callback de outro. A condição `marketplace = $2` entra na MESMA
+   * `UPDATE ... WHERE` atômica que já filtra `status`/`expires_at`, então um
+   * state de outro marketplace simplesmente não casa com nenhuma linha —
+   * equivalente, de fora, a state inexistente/expirado/já usado (nenhuma
+   * segunda consulta que permita distinguir os casos).
+   */
+  async claimByState(
+    state: string,
+    expectedMarketplace: Marketplace,
+  ): Promise<OAuthAuthorizationRequest | null> {
     const stateHash = hashState(state);
     // `RETURNING *` devolveria nomes de coluna em snake_case
     // (`marketplace_account_id`, `processing_started_at`, ...) e um cast
@@ -177,7 +190,7 @@ export class OAuthAuthorizationRequestsService {
     const rows = await this.queryReturning<OAuthAuthorizationRequest>(
       `UPDATE oauth_authorization_requests
           SET status = 'PROCESSING', processing_started_at = now(), consumed_at = now()
-        WHERE state_hash = $1 AND status = 'PENDING' AND expires_at > now()
+        WHERE state_hash = $1 AND marketplace = $2 AND status = 'PENDING' AND expires_at > now()
         RETURNING
           id AS "id",
           marketplace_account_id AS "marketplaceAccountId",
@@ -192,7 +205,7 @@ export class OAuthAuthorizationRequestsService {
           consumed_at AS "consumedAt",
           completed_at AS "completedAt",
           created_at AS "createdAt"`,
-      [stateHash],
+      [stateHash, expectedMarketplace],
     );
 
     return rows[0] ?? null;

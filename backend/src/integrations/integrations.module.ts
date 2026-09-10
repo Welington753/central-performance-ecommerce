@@ -8,6 +8,7 @@ import { MarketplaceAnalyticsModule } from './marketplace-analytics/marketplace-
 import { MarketplaceSyncModule } from './marketplace-sync/marketplace-sync.module';
 import { MercadoLivreOAuthModule } from './mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-orders.module';
+import { ShopeeOAuthModule } from './shopee-oauth/shopee-oauth.module';
 
 /**
  * Módulo agregador de integrações com marketplaces.
@@ -26,6 +27,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     AmazonOrdersModule,
     AmazonConnectionModule,
     MarketplaceSyncModule,
+    ShopeeOAuthModule,
   ],
   exports: [
     ConnectorsModule,
@@ -37,6 +39,7 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-o
     AmazonOrdersModule,
     AmazonConnectionModule,
     MarketplaceSyncModule,
+    ShopeeOAuthModule,
   ],
 })
 export class IntegrationsModule {}

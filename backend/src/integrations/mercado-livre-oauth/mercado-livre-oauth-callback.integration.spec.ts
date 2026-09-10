@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { createTestDataSource } from '../../test-utils/create-test-data-source';
 import { EncryptionService } from '../../common/encryption/encryption.service';
+import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAccount } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
 import { AdvisoryLockService } from '../shared/advisory-lock.service';
@@ -212,6 +213,7 @@ describe('Callback atomicity and concurrency (real Postgres)', () => {
     });
     const claimed = await authorizationRequestsService.claimByState(
       pending.state,
+      Marketplace.MERCADO_LIVRE,
     );
     // Simula "a tentativa deixou de estar PROCESSING" entre o claim e a
     // persistência (ex.: recovery job concorrente) — força exatamente o

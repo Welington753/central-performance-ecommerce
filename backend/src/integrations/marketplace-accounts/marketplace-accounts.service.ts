@@ -142,6 +142,14 @@ export class MarketplaceAccountsService {
    * `UPDATE` e devolve o resultado; o chamador é dono do ciclo de vida da
    * transação. Sem um `QueryRunner` externo (uso normal, como nos testes
    * deste task), o método continua totalmente autocontido, como antes.
+   *
+   * Também zera `refresh_failure_count`/`refresh_retry_at`/
+   * `last_refresh_attempt_at` (Checkpoint CP2C, Shopee): uma conexão NOVA
+   * ou RECONECTADA nunca deve herdar contadores/agendamento de falha de
+   * renovação de uma conexão anterior — numa primeira conexão esses campos
+   * já estão no padrão (0/null), então esta mudança é inócua; numa
+   * reconexão após falhas de renovação acumuladas, ela corrige um estado
+   * que ficaria preso sem necessidade.
    */
   async applySuccessfulConnection(
     input: {
@@ -181,6 +189,9 @@ export class MarketplaceAccountsService {
                 failure_code = NULL,
                 connected_by_user_id = $5,
                 token_version = token_version + 1,
+                refresh_failure_count = 0,
+                refresh_retry_at = NULL,
+                last_refresh_attempt_at = NULL,
                 updated_at = now()
           WHERE id = $6 AND token_version = $7
           RETURNING id`,

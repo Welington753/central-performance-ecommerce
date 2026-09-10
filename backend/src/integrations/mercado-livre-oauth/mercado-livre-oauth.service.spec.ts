@@ -320,6 +320,7 @@ describe('MercadoLivreOAuthService.handleCallback', () => {
 
     expect(c.authorizationRequestsService.claimByState).toHaveBeenCalledWith(
       's',
+      Marketplace.MERCADO_LIVRE,
     );
     expect(c.authorizationRequestsService.finalizeFailure).toHaveBeenCalledWith(
       'req-1',
