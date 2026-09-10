@@ -6,7 +6,6 @@ import {
   PrimaryGeneratedColumn,
 } from 'typeorm';
 import { Marketplace } from '../contracts/marketplace.enum';
-import type { MercadoLivreOAuthFailureCode } from './mercado-livre-oauth-failure-code';
 import { OAuthAuthorizationRequestStatus } from './oauth-authorization-request-status.enum';
 
 /**
@@ -43,8 +42,16 @@ export class OAuthAuthorizationRequest {
   })
   status!: OAuthAuthorizationRequestStatus;
 
+  /**
+   * `string` no limite genérico de persistência (Checkpoint CP2A —
+   * generalização mínima): esta entidade é compartilhada por todos os
+   * marketplaces e nunca deve importar o vocabulário fechado de failureCode
+   * de nenhum marketplace concreto. Cada serviço concreto (ex.:
+   * `mercado-livre-oauth.service.ts`) continua restringindo o valor ao seu
+   * próprio union type antes de escrever (ver `shopee-architecture.spec.ts`).
+   */
   @Column({ type: 'varchar', nullable: true })
-  failureCode!: MercadoLivreOAuthFailureCode | null;
+  failureCode!: string | null;
 
   @Column({ type: 'timestamptz' })
   expiresAt!: Date;

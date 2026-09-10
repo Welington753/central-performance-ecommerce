@@ -160,6 +160,29 @@ export const envValidationSchema = Joi.object({
     .min(1)
     .default(60),
 
+  // --- Shopee Open Platform (Checkpoint CP2A — fundação OAuth) -----------
+  // Partner ID/Partner Key da aplicação Shopee. Sem `.required()` nem valor
+  // padrão: a ausência de qualquer uma delas nunca pode impedir o backend
+  // de subir — mesma regra de `AMAZON_*`/`OMIE_*` acima. Só uma operação
+  // Shopee futura (nenhuma existe ainda neste checkpoint — sem controller,
+  // sem cliente HTTP) falharia em runtime, com o erro fechado
+  // SHOPEE_NOT_CONFIGURED.
+  SHOPEE_PARTNER_ID: Joi.string().optional(),
+  SHOPEE_PARTNER_KEY: Joi.string().optional(),
+  // Formato/regra de negócio (HTTPS fora de development, pathname fixo,
+  // sem localhost em produção) validados em runtime por
+  // `validateShopeeRedirectUri`, não aqui — validar aqui exigiria acoplar
+  // este schema a `NODE_ENV` de um jeito que poderia falhar o BOOT, o que
+  // esta variável nunca deve fazer.
+  SHOPEE_REDIRECT_URI: Joi.string().uri().optional(),
+  // Só SANDBOX ou PRODUCTION — nunca uma URL de API livre (resolvida
+  // internamente a partir deste valor, ver `shopee-endpoints.ts`).
+  SHOPEE_ENVIRONMENT: Joi.string()
+    .valid('SANDBOX', 'PRODUCTION')
+    .default('SANDBOX'),
+  SHOPEE_HTTP_TIMEOUT_MS: Joi.number().integer().min(1).default(10000),
+  SHOPEE_TOKEN_REFRESH_SKEW_SECONDS: Joi.number().integer().min(0).default(600),
+
   // Rate limit padrão global (ThrottlerModule). A rota de login usa um
   // limite mais restrito, sobrescrito diretamente no controller (~5/60s)
   // via decorator @Throttle, conforme exigido para essa rota específica.

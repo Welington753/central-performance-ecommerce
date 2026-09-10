@@ -6,7 +6,6 @@ import { EncryptionService } from '../../common/encryption/encryption.service';
 import { Marketplace } from '../contracts/marketplace.enum';
 import { generatePkcePair, generateState, hashState } from './pkce.util';
 import type { OAuthAuthorizationRequest } from './oauth-authorization-request.entity';
-import type { MercadoLivreOAuthFailureCode } from './mercado-livre-oauth-failure-code';
 
 const PENDING_TTL_MS = 10 * 60 * 1000;
 
@@ -169,10 +168,16 @@ export class OAuthAuthorizationRequestsService {
     return rows.length > 0;
   }
 
-  async finalizeFailure(
-    id: string,
-    failureCode: MercadoLivreOAuthFailureCode,
-  ): Promise<boolean> {
+  /**
+   * `failureCode` é `string` no limite genérico de persistência (Checkpoint
+   * CP2A — generalização mínima): este serviço nunca importa o vocabulário
+   * fechado de failureCode de nenhum marketplace concreto — cada chamador
+   * continua restringindo seu próprio union type ao montar a chamada (ex.:
+   * `mercado-livre-oauth.service.ts` só passa valores do vocabulário fechado
+   * do Mercado Livre). A coluna no banco continua `varchar`, sem alteração
+   * de comportamento (ver `shopee-architecture.spec.ts`).
+   */
+  async finalizeFailure(id: string, failureCode: string): Promise<boolean> {
     const rows = await this.queryReturning<{ id: string }>(
       `UPDATE oauth_authorization_requests
           SET status = 'FAILED', completed_at = now(), failure_code = $2,
