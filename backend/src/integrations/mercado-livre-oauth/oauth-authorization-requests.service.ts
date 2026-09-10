@@ -22,6 +22,23 @@ export interface CreatedPendingRequest {
 }
 
 /**
+ * PKCE opcional (Checkpoint CP2B — Shopee não usa PKCE, só o Mercado Livre
+ * usa). `codeChallenge` é `null` neste caso — nunca uma string vazia.
+ */
+export interface CreatedPendingRequestNoPkce {
+  id: string;
+  state: string;
+  codeChallenge: null;
+}
+
+interface CreatePendingInput {
+  marketplaceAccountId: string;
+  initiatedByUserId: string;
+  marketplace: Marketplace;
+  usePkce?: boolean;
+}
+
+/**
  * Todas as escritas/leituras aqui usam SQL cru via `DataSource` (não um
  * `Repository<OAuthAuthorizationRequest>` injetado) — as operações desta
  * classe são exclusivamente `UPDATE ... RETURNING` atômicos e um `INSERT`
@@ -37,17 +54,38 @@ export class OAuthAuthorizationRequestsService {
     private readonly encryptionService: EncryptionService,
   ) {}
 
-  async createPending(input: {
-    marketplaceAccountId: string;
-    initiatedByUserId: string;
-    marketplace: Marketplace;
-  }): Promise<CreatedPendingRequest> {
+  /**
+   * PKCE opcional (Checkpoint CP2B) — retrocompatível: toda chamada
+   * existente do Mercado Livre (sem `usePkce`) continua exatamente igual,
+   * `codeChallenge: string`. Só uma chamada EXPLÍCITA com
+   * `usePkce: false` (o caso Shopee — decisão confirmada: "não utilizar
+   * PKCE no fluxo Shopee") grava `encrypted_code_verifier = NULL` e
+   * devolve `codeChallenge: null`. `state`/`stateHash` continuam sempre
+   * obrigatórios nos dois modos — PKCE opcional nunca implica CSRF
+   * opcional. Nenhuma migration: `encrypted_code_verifier` já é nullable.
+   */
+  async createPending(
+    input: CreatePendingInput & { usePkce?: true },
+  ): Promise<CreatedPendingRequest>;
+  async createPending(
+    input: CreatePendingInput & { usePkce: false },
+  ): Promise<CreatedPendingRequestNoPkce>;
+  async createPending(
+    input: CreatePendingInput,
+  ): Promise<CreatedPendingRequest | CreatedPendingRequestNoPkce> {
+    const usePkce = input.usePkce ?? true;
     const state = generateState();
-    const { codeVerifier, codeChallenge } = generatePkcePair();
     const stateHash = hashState(state);
-    const encryptedCodeVerifier = this.encryptionService.encrypt(codeVerifier);
     const expiresAt = new Date(Date.now() + PENDING_TTL_MS);
     const id = randomUUID();
+
+    let encryptedCodeVerifier: string | null = null;
+    let codeChallenge: string | null = null;
+    if (usePkce) {
+      const pkce = generatePkcePair();
+      encryptedCodeVerifier = this.encryptionService.encrypt(pkce.codeVerifier);
+      codeChallenge = pkce.codeChallenge;
+    }
 
     // `connect()`/`startTransaction()` ficam DENTRO do try: se qualquer um
     // dos dois lançar, o `finally` abaixo ainda libera o QueryRunner
@@ -122,6 +160,10 @@ export class OAuthAuthorizationRequestsService {
       }
     }
 
+    // O par de overloads acima é o contrato público (checado pelo
+    // chamador); a assinatura de implementação só precisa ser compatível
+    // com ambos — `codeChallenge` já foi calculado corretamente acima
+    // conforme `usePkce`.
     return { id, state, codeChallenge };
   }
 

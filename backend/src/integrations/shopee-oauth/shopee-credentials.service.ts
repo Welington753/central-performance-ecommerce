@@ -23,6 +23,30 @@ export class ShopeeCredentialsService {
     return loadShopeeConfig(this.configService).configured;
   }
 
+  /**
+   * Só Partner ID/Partner Key/ambiente presentes — NUNCA valida
+   * `redirectUri` (revisão de segurança do Checkpoint CP2B). Uso
+   * pretendido: qualquer operação que não constrói nem depende de uma URL
+   * de callback, como o cliente de token (`ShopeeHttpClient`) — `code`/
+   * `shop_id` chegam pelo callback, mas trocá-los por tokens não exige
+   * revalidar a URL do próprio callback. Forçar essa dependência ali seria
+   * artificial: a Shopee nunca envia nem espera `redirect_uri` no corpo de
+   * `/auth/token/get`/`/auth/access_token/get`.
+   */
+  ensureCredentials(): ShopeeConfig {
+    const result = loadShopeeConfig(this.configService);
+    if (!result.configured) {
+      throw new ConflictException('SHOPEE_NOT_CONFIGURED');
+    }
+    return result.config;
+  }
+
+  /**
+   * Credenciais + `redirectUri` válido (Checkpoint CP2A, inalterado) — uso
+   * pretendido: a futura iniciação do OAuth (construção da
+   * `authorizationUrl`), que de fato depende da URL de callback estar
+   * correta antes de redirecionar o navegador.
+   */
   ensureConfigured(): ShopeeConfig {
     const result = loadShopeeConfig(this.configService);
     if (!result.configured) {

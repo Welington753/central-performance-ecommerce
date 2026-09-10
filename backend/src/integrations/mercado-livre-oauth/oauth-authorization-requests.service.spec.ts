@@ -93,6 +93,107 @@ describe('OAuthAuthorizationRequestsService (real Postgres)', () => {
     expect(rows[0].encrypted_code_verifier).not.toBeNull();
   });
 
+  describe('PKCE opcional (Checkpoint CP2B)', () => {
+    it('usePkce: false grava encrypted_code_verifier NULL e devolve codeChallenge: null', async () => {
+      const result = await service.createPending({
+        marketplaceAccountId: accountId,
+        initiatedByUserId: userId,
+        marketplace: Marketplace.SHOPEE,
+        usePkce: false,
+      });
+
+      expect(result.codeChallenge).toBeNull();
+      expect(result.state.length).toBeGreaterThan(0);
+
+      const rows: Array<{
+        status: string;
+        encrypted_code_verifier: string | null;
+        marketplace: string;
+      }> = await dataSource.query(
+        'SELECT status, encrypted_code_verifier, marketplace FROM oauth_authorization_requests WHERE id = $1',
+        [result.id],
+      );
+      expect(rows[0].status).toBe('PENDING');
+      expect(rows[0].encrypted_code_verifier).toBeNull();
+      expect(rows[0].marketplace).toBe('SHOPEE');
+    });
+
+    it('sem usePkce (padrão/ML) continua gravando encrypted_code_verifier cifrado e devolvendo codeChallenge: string — comportamento byte a byte igual ao anterior ao CP2B', async () => {
+      const result: CreatedPendingRequest = await service.createPending({
+        marketplaceAccountId: accountId,
+        initiatedByUserId: userId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+
+      expect(typeof result.codeChallenge).toBe('string');
+      expect(result.codeChallenge.length).toBeGreaterThan(0);
+
+      const rows: Array<{ encrypted_code_verifier: string | null }> =
+        await dataSource.query(
+          'SELECT encrypted_code_verifier FROM oauth_authorization_requests WHERE id = $1',
+          [result.id],
+        );
+      expect(rows[0].encrypted_code_verifier).not.toBeNull();
+    });
+
+    it('usePkce: false ainda exige state de uso único — claimByState só funciona uma vez', async () => {
+      const result = await service.createPending({
+        marketplaceAccountId: accountId,
+        initiatedByUserId: userId,
+        marketplace: Marketplace.SHOPEE,
+        usePkce: false,
+      });
+
+      const firstClaim = await service.claimByState(result.state);
+      expect(firstClaim).not.toBeNull();
+      expect(firstClaim?.encryptedCodeVerifier).toBeNull();
+
+      const secondClaim = await service.claimByState(result.state);
+      expect(secondClaim).toBeNull();
+    });
+
+    it('usePkce: false ainda expira uma tentativa PENDING anterior da mesma conta (mesma regra de concorrência do modo padrão)', async () => {
+      const first = await service.createPending({
+        marketplaceAccountId: accountId,
+        initiatedByUserId: userId,
+        marketplace: Marketplace.SHOPEE,
+        usePkce: false,
+      });
+
+      await service.createPending({
+        marketplaceAccountId: accountId,
+        initiatedByUserId: userId,
+        marketplace: Marketplace.SHOPEE,
+        usePkce: false,
+      });
+
+      const rows: Array<{ status: string }> = await dataSource.query(
+        'SELECT status FROM oauth_authorization_requests WHERE id = $1',
+        [first.id],
+      );
+      expect(rows[0].status).toBe('EXPIRED');
+    });
+
+    it('usePkce: false ainda respeita o conflito de tentativa ativa (PROCESSING) por conta', async () => {
+      const pending = await service.createPending({
+        marketplaceAccountId: accountId,
+        initiatedByUserId: userId,
+        marketplace: Marketplace.SHOPEE,
+        usePkce: false,
+      });
+      await service.claimByState(pending.state);
+
+      await expect(
+        service.createPending({
+          marketplaceAccountId: accountId,
+          initiatedByUserId: userId,
+          marketplace: Marketplace.SHOPEE,
+          usePkce: false,
+        }),
+      ).rejects.toThrow(OAuthConnectionInProgressError);
+    });
+  });
+
   it('createPending expires a previous PENDING attempt for the same account', async () => {
     const first = await service.createPending({
       marketplaceAccountId: accountId,

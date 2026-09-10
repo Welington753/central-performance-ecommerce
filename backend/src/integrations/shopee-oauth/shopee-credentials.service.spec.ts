@@ -94,4 +94,24 @@ describe('ShopeeCredentialsService', () => {
       expect(() => service.ensureConfigured()).not.toThrow();
     });
   });
+
+  describe('ensureCredentials', () => {
+    it('returns the config object when Partner ID/Key/environment are present, never validating redirectUri', () => {
+      const service = new ShopeeCredentialsService(
+        configServiceWith({
+          ...FULL_ENV,
+          SHOPEE_REDIRECT_URI:
+            'http://not-https-and-not-localhost/integrations/shopee/callback',
+        }),
+      );
+      expect(() => service.ensureCredentials()).not.toThrow();
+    });
+
+    it('throws ConflictException("SHOPEE_NOT_CONFIGURED") when Partner ID/Key are missing', () => {
+      const service = new ShopeeCredentialsService(configServiceWith({}));
+      expect(() => service.ensureCredentials()).toThrow(
+        'SHOPEE_NOT_CONFIGURED',
+      );
+    });
+  });
 });
