@@ -43,6 +43,8 @@ export interface BackfillStatusDto {
   lastRunErrorCode: string | null;
   /** `null` enquanto nenhum "Completar histórico" jamais foi clicado. */
   job: BackfillJobSummaryDto | null;
+  /** Mesma interpretação efetiva que o worker do backend usa — nunca afirmar "processando" quando `false`. */
+  workerEnabled: boolean;
 }
 
 export interface BackfillChunkResultDto {

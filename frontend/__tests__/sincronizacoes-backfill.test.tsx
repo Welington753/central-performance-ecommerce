@@ -72,6 +72,7 @@ function backfillStatus(
     lastProcessedChunk: { from: "2026-05-02", to: "2026-06-01", ordersFetched: 3 },
     lastRunErrorCode: null,
     job: job(),
+    workerEnabled: true,
     ...overrides,
   };
 }
@@ -120,7 +121,7 @@ describe("SincronizacoesPage — Completar histórico (job durável, Fase 4)", (
     const panel = await screen.findByTestId("backfill-panel-Meli 1");
     expect(within(panel).getByText("01/06/2026")).toBeInTheDocument();
     expect(within(panel).getByText("30/08/2026")).toBeInTheDocument();
-    expect(within(panel).getByText(/buscando histórico/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/processando histórico em segundo plano/i)).toBeInTheDocument();
   });
 
   it('clicking "Completar histórico" calls start exactly once — never a next-chunk loop', async () => {
@@ -244,7 +245,7 @@ describe("SincronizacoesPage — Completar histórico (job durável, Fase 4)", (
     expect(
       within(panel1).getByText(/não foi possível carregar/i),
     ).toBeInTheDocument();
-    expect(within(panel2).getByText(/buscando histórico/i)).toBeInTheDocument();
+    expect(within(panel2).getByText(/processando histórico em segundo plano/i)).toBeInTheDocument();
   });
 
   it("does not offer the backfill action before the account has ever been synced (NOT_STARTED)", async () => {
@@ -316,7 +317,7 @@ describe("SincronizacoesPage — Completar histórico (job durável, Fase 4)", (
       await user.click(within(panel).getByRole("button", { name: /pausar/i }));
 
       await waitFor(() => expect(api.pauseBackfill).toHaveBeenCalledWith("ml-1"));
-      expect(await within(panel).findByText(/^pausado$/i)).toBeInTheDocument();
+      expect(await within(panel).findByText(/histórico pausado.$/i)).toBeInTheDocument();
     });
 
     it('clicking "Continuar" calls resumeBackfill and reflects the returned status', async () => {
@@ -468,6 +469,113 @@ describe("SincronizacoesPage — Completar histórico (job durável, Fase 4)", (
         within(panel).getByText(/aguardando nova tentativa/i),
       ).toBeInTheDocument();
       expect(within(panel).getByText("8")).toBeInTheDocument();
+    });
+  });
+
+  describe("clareza de status (worker habilitado/desabilitado)", () => {
+    it("QUEUED + worker habilitado: diz que o histórico será processado em segundo plano e mostra o aviso de 'pode fechar esta página'", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({
+          job: job({ status: "QUEUED" }),
+          workerEnabled: true,
+        }),
+      );
+
+      render(<SincronizacoesPage />);
+
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(
+        within(panel).getByText(
+          "Na fila — o histórico será processado em segundo plano.",
+        ),
+      ).toBeInTheDocument();
+      expect(
+        within(panel).getByText(/pode fechar esta/i),
+      ).toBeInTheDocument();
+    });
+
+    it("QUEUED + worker desabilitado: nunca afirma que está processando, e omite o aviso de 'pode fechar esta página'", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({
+          job: job({ status: "QUEUED" }),
+          workerEnabled: false,
+        }),
+      );
+
+      render(<SincronizacoesPage />);
+
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(
+        within(panel).getByText(
+          "Aguardando — o processamento do histórico está desativado neste ambiente.",
+        ),
+      ).toBeInTheDocument();
+      expect(within(panel).queryByText(/segundo plano/i)).not.toBeInTheDocument();
+      expect(within(panel).queryByText(/pode fechar esta/i)).not.toBeInTheDocument();
+    });
+
+    it("RUNNING sempre diz 'Processando histórico em segundo plano.' — worker ativo processando de fato", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({
+          job: job({ status: "RUNNING" }),
+          workerEnabled: true,
+        }),
+      );
+
+      render(<SincronizacoesPage />);
+
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(
+        within(panel).getByText("Processando histórico em segundo plano."),
+      ).toBeInTheDocument();
+    });
+
+    it("PAUSED diz 'Histórico pausado.' independente do worker estar habilitado", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(
+        backfillStatus({
+          job: job({ status: "PAUSED" }),
+          workerEnabled: false,
+        }),
+      );
+
+      render(<SincronizacoesPage />);
+
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(
+        within(panel).getByText("Histórico pausado."),
+      ).toBeInTheDocument();
+    });
+
+    it("mostra o rótulo 'Período já consultado' com a explicação de que inclui períodos sem venda encontrada", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        mlAccount({ id: "ml-1" }),
+      ]);
+      (api.fetchBackfillStatus as jest.Mock).mockResolvedValue(backfillStatus());
+
+      render(<SincronizacoesPage />);
+
+      const panel = await screen.findByTestId("backfill-panel-Meli 1");
+      expect(
+        within(panel).getByText("Período já consultado"),
+      ).toBeInTheDocument();
+      expect(within(panel).queryByText("Intervalos sincronizados")).not.toBeInTheDocument();
+      expect(
+        within(panel).getByText(
+          "Inclui períodos consultados com sucesso, mesmo quando nenhuma venda foi encontrada.",
+        ),
+      ).toBeInTheDocument();
     });
   });
 });

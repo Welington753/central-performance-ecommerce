@@ -406,6 +406,9 @@ function normalizeBackfillStatus(raw: unknown): BackfillStatusDto {
       value.job && typeof value.job === "object"
         ? (value.job as BackfillStatusDto["job"])
         : null,
+    // Padrão seguro (`false`) contra um backend ainda não reiniciado sem
+    // este campo — nunca afirma "processando em segundo plano" por engano.
+    workerEnabled: value.workerEnabled === true,
   };
 }
 

@@ -96,6 +96,7 @@ function buildService(
     amazonSyncService?: Record<string, jest.Mock>;
     syncRunsService?: Record<string, jest.Mock>;
     jobsPersistence?: Record<string, jest.Mock>;
+    env?: Record<string, string>;
   } = {},
 ) {
   const marketplaceAccountsService = {
@@ -139,6 +140,15 @@ function buildService(
     resumeJob: jest.fn().mockResolvedValue(null),
     ...overrides.jobsPersistence,
   };
+  const env: Record<string, string> = {
+    NODE_ENV: 'production',
+    ...overrides.env,
+  };
+  const configService = {
+    get: jest.fn((key: string, fallback?: unknown) =>
+      key in env ? env[key] : fallback,
+    ),
+  };
 
   const service = new MarketplaceBackfillService(
     marketplaceAccountsService as never,
@@ -147,6 +157,7 @@ function buildService(
     amazonSyncService as never,
     syncRunsService as never,
     jobsPersistence as never,
+    configService as never,
   );
 
   return {
@@ -157,6 +168,7 @@ function buildService(
     amazonSyncService,
     syncRunsService,
     jobsPersistence,
+    configService,
   };
 }
 
@@ -182,7 +194,46 @@ describe('MarketplaceBackfillService', () => {
         lastProcessedChunk: null,
         lastRunErrorCode: null,
         job: null,
+        workerEnabled: true,
       });
+    });
+
+    it('exposes workerEnabled=true when BACKFILL_WORKER_ENABLED is unset (default) in a non-test environment', async () => {
+      const { service } = buildService();
+      const status = await service.getStatus('acc-1');
+      expect(status.workerEnabled).toBe(true);
+    });
+
+    it('exposes workerEnabled=false when BACKFILL_WORKER_ENABLED=false — same interpretation the worker uses to skip creating its timer', async () => {
+      const { service } = buildService({
+        env: { BACKFILL_WORKER_ENABLED: 'false' },
+      });
+      const status = await service.getStatus('acc-1');
+      expect(status.workerEnabled).toBe(false);
+    });
+
+    it('exposes workerEnabled=false when NODE_ENV=test even if BACKFILL_WORKER_ENABLED says true — matches the worker, which never starts under NODE_ENV=test', async () => {
+      const { service } = buildService({
+        env: { NODE_ENV: 'test', BACKFILL_WORKER_ENABLED: 'true' },
+      });
+      const status = await service.getStatus('acc-1');
+      expect(status.workerEnabled).toBe(false);
+    });
+
+    it('exposes workerEnabled even when the account has no coverage yet (NOT_STARTED)', async () => {
+      const { service } = buildService({
+        persistence: {
+          getAccountSyncCoverage: jest.fn().mockResolvedValue({
+            intervals: [],
+            oldestFrom: null,
+            oldestRunRecordsRead: null,
+          }),
+        },
+        env: { BACKFILL_WORKER_ENABLED: 'false' },
+      });
+      const status = await service.getStatus('acc-1');
+      expect(status.status).toBe('NOT_STARTED');
+      expect(status.workerEnabled).toBe(false);
     });
 
     it('reports IN_PROGRESS with firstOrderAt/lastOrderAt/intervals/last chunk when there is coverage and room before the safety floor', async () => {

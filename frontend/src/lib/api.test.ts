@@ -69,6 +69,7 @@ describe("fetchBackfillStatus (normalização — correção de regressão)", ()
       lastProcessedChunk: null,
       lastRunErrorCode: null,
       job: null,
+      workerEnabled: true,
     };
     global.fetch = jest.fn().mockResolvedValue(jsonResponse(200, full));
 
@@ -100,6 +101,7 @@ describe("fetchBackfillStatus (normalização — correção de regressão)", ()
       lastProcessedChunk: null,
       lastRunErrorCode: null,
       job: null,
+      workerEnabled: false,
     });
   });
 

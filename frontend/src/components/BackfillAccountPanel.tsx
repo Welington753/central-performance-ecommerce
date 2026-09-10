@@ -65,6 +65,29 @@ function formatDateTime(value: string | null): string {
   return formatted ? formatted.replace(", ", " às ") : "—";
 }
 
+/**
+ * Texto de status em voz ATIVA (Fase 4, "clareza de status") — nunca afirma
+ * "processando"/"segundo plano" quando `workerEnabled` é `false`: aí o job
+ * fica `QUEUED` indefinidamente porque nenhum worker vai reivindicá-lo.
+ */
+function describeJobStatus(
+  jobStatus: BackfillJobStatusValue,
+  workerEnabled: boolean,
+): string {
+  if (jobStatus === "QUEUED") {
+    return workerEnabled
+      ? "Na fila — o histórico será processado em segundo plano."
+      : "Aguardando — o processamento do histórico está desativado neste ambiente.";
+  }
+  if (jobStatus === "RUNNING") {
+    return "Processando histórico em segundo plano.";
+  }
+  if (jobStatus === "PAUSED") {
+    return "Histórico pausado.";
+  }
+  return JOB_STATUS_LABELS[jobStatus];
+}
+
 export function BackfillAccountPanel({
   label,
   status,
@@ -108,7 +131,7 @@ export function BackfillAccountPanel({
             <dd>
               {status.lastOrderAt ? formatCalendarDate(status.lastOrderAt) : "—"}
             </dd>
-            <dt>Intervalos sincronizados</dt>
+            <dt>Período já consultado</dt>
             <dd>
               {status.synchronizedIntervals.length > 0
                 ? describeIntervals(status.synchronizedIntervals)
@@ -125,7 +148,7 @@ export function BackfillAccountPanel({
               <>
                 <dt>Status do histórico</dt>
                 <dd className={JOB_STATUS_COLORS[job.status]}>
-                  {JOB_STATUS_LABELS[job.status]}
+                  {describeJobStatus(job.status, status.workerEnabled)}
                   {job.pauseRequested && job.status === "RUNNING"
                     ? " (pausando...)"
                     : ""}
@@ -143,6 +166,11 @@ export function BackfillAccountPanel({
               </>
             ) : null}
           </dl>
+
+          <p className="text-xs text-foreground/50">
+            Inclui períodos consultados com sucesso, mesmo quando nenhuma
+            venda foi encontrada.
+          </p>
 
           {status.status === "NOT_STARTED" ? (
             <p className="text-xs text-foreground/60">
@@ -215,7 +243,7 @@ export function BackfillAccountPanel({
             ) : null}
           </div>
 
-          {jobIsActive ? (
+          {jobIsActive && status.workerEnabled ? (
             <p className="text-xs text-foreground/50" role="status">
               Processando em segundo plano no servidor — pode fechar esta
               página, o histórico continua.

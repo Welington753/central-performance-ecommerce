@@ -26,6 +26,7 @@ import {
   type BackfillWorkerClock,
   type BackfillWorkerTimers,
 } from './backfill-worker.clock';
+import { isBackfillWorkerEnabled } from './backfill-worker-config.util';
 
 type ErrorClass = 'TERMINAL' | 'REQUEUE' | 'RATE_LIMITED' | 'TRANSIENT';
 
@@ -67,11 +68,8 @@ export interface BackfillWorkerConfig {
 }
 
 function readWorkerConfig(configService: ConfigService): BackfillWorkerConfig {
-  const nodeEnv = configService.get<string>('NODE_ENV', 'development');
-  const enabledFlag =
-    configService.get<string>('BACKFILL_WORKER_ENABLED', 'true') === 'true';
   return {
-    enabled: nodeEnv !== 'test' && enabledFlag,
+    enabled: isBackfillWorkerEnabled(configService),
     tickMs: configService.get<number>('BACKFILL_WORKER_TICK_MS', 5000),
     maxConcurrentJobs: configService.get<number>(
       'BACKFILL_WORKER_MAX_CONCURRENT_JOBS',

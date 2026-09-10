@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
 import { SyncRunsService } from '../../sync/sync-runs.service';
 import { Marketplace } from '../contracts/marketplace.enum';
@@ -23,6 +24,7 @@ import {
   type BackfillJobRow,
   type BackfillJobStatus,
 } from './backfill-jobs-persistence.service';
+import { isBackfillWorkerEnabled } from './backfill-worker-config.util';
 
 /**
  * Além dos códigos originais (Fase 4, "Histórico completo"), o worker
@@ -109,6 +111,14 @@ export interface BackfillStatus {
   lastRunErrorCode: string | null;
   /** Aditivo (Fase 4, "Backfill durável") — campos antigos acima nunca mudam de sentido. */
   job: BackfillJobSummary | null;
+  /**
+   * Aditivo (clareza de status) — mesma interpretação efetiva de
+   * `BACKFILL_WORKER_ENABLED` que `MarketplaceBackfillWorkerService` usa
+   * para decidir se cria o timer (`isBackfillWorkerEnabled`). Nunca expõe a
+   * env var em si, só o booleano resultante: o frontend usa isto para nunca
+   * afirmar "processando" com o worker desligado.
+   */
+  workerEnabled: boolean;
 }
 
 // Bem maior que a duração plausível de qualquer chunk real (Amazon/ML) —
@@ -135,6 +145,7 @@ export class MarketplaceBackfillService {
     private readonly amazonSyncService: AmazonOrdersSyncService,
     private readonly syncRunsService: SyncRunsService,
     private readonly jobsPersistence: BackfillJobsPersistenceService,
+    private readonly configService: ConfigService,
   ) {}
 
   async getStatus(accountId: string): Promise<BackfillStatus> {
@@ -142,6 +153,7 @@ export class MarketplaceBackfillService {
     const coverage = await this.persistence.getAccountSyncCoverage(accountId);
     const jobRow = await this.jobsPersistence.findLatestJob(accountId);
     const job = jobRow ? this.toJobSummary(jobRow) : null;
+    const workerEnabled = isBackfillWorkerEnabled(this.configService);
 
     if (coverage.oldestFrom === null) {
       return {
@@ -153,6 +165,7 @@ export class MarketplaceBackfillService {
         lastProcessedChunk: null,
         lastRunErrorCode: null,
         job,
+        workerEnabled,
       };
     }
 
@@ -203,6 +216,7 @@ export class MarketplaceBackfillService {
           : null,
       lastRunErrorCode,
       job,
+      workerEnabled,
     };
   }
 
