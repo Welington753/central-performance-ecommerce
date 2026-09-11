@@ -12,7 +12,7 @@ const VALID_INPUT = {
 };
 
 describe('buildShopeeAuthorizationUrl', () => {
-  it('1: usa exatamente o host Sandbox Brasil confirmado', () => {
+  it('1: usa exatamente o host Sandbox confirmado (CP2F-R1: host global, sem .com.br — NXDOMAIN)', () => {
     const url = new URL(
       buildShopeeAuthorizationUrl({
         ...VALID_INPUT,
@@ -20,7 +20,7 @@ describe('buildShopeeAuthorizationUrl', () => {
       }),
     );
     expect(`${url.protocol}//${url.host}`).toBe(
-      'https://open.sandbox.test-stable.shopee.com.br',
+      'https://open.sandbox.test-stable.shopee.com',
     );
   });
 
@@ -89,6 +89,16 @@ describe('buildShopeeAuthorizationUrl', () => {
       buildShopeeAuthorizationUrl({
         ...VALID_INPUT,
         authorizationHost: 'https://evil.example.com/auth',
+      }),
+    ).toThrow(ShopeeAuthorizationUrlBuildError);
+  });
+
+  it('CP2F-R1: rejeita o host Sandbox antigo .com.br (nunca resolveu em DNS real, removido da allowlist)', () => {
+    expect(() =>
+      buildShopeeAuthorizationUrl({
+        ...VALID_INPUT,
+        authorizationHost:
+          'https://open.sandbox.test-stable.shopee.com.br/auth',
       }),
     ).toThrow(ShopeeAuthorizationUrlBuildError);
   });

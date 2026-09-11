@@ -10,10 +10,19 @@ interface ShopeeEndpointSet {
    * URL de produção como substituto de um ambiente não confirmado.
    *
    * Checkpoint CP2D: hosts de autorização Brasil (Sandbox e Produção) agora
-   * CONFIRMADOS e registrados nesta allowlist — `open.sandbox.test-stable.
-   * shopee.com.br` é um host distinto de `openplatform.sandbox.test-stable.
-   * shopee.sg` (API Sandbox, sem alteração): a tela de autorização Sandbox
-   * Brasil tem domínio próprio, nunca compartilha host com a API.
+   * CONFIRMADOS e registrados nesta allowlist — este host de autorização é
+   * distinto de `openplatform.sandbox.test-stable.shopee.sg` (API Sandbox,
+   * sem alteração): a tela de autorização Sandbox tem domínio próprio,
+   * nunca compartilha host com a API.
+   *
+   * Checkpoint CP2F-R1 (correção): `open.sandbox.test-stable.shopee.com.br`
+   * NUNCA resolveu em DNS real (NXDOMAIN confirmado) — o host `.com.br`
+   * para Sandbox nunca existiu de fato na infraestrutura da Shopee. O
+   * fluxo real de autorização Sandbox (confirmado no Console da Shopee,
+   * login + autorização completos) usa o host global
+   * `open.sandbox.test-stable.shopee.com` (sem `.br`). Produção
+   * (`open.shopee.com.br`) permanece inalterada — só o Sandbox tinha o
+   * host `.com.br` inválido.
    */
   authorizationHost: string | null;
 }
@@ -40,7 +49,7 @@ export const SHOPEE_ENDPOINTS: Record<ShopeeEnvironment, ShopeeEndpointSet> = {
   },
   SANDBOX: {
     apiHost: 'https://openplatform.sandbox.test-stable.shopee.sg',
-    authorizationHost: 'https://open.sandbox.test-stable.shopee.com.br/auth',
+    authorizationHost: 'https://open.sandbox.test-stable.shopee.com/auth',
   },
 };
 

@@ -3,10 +3,16 @@
  * pelo frontend antes de redirecionar o navegador (CP2E) — espelha
  * `SHOPEE_ENDPOINTS` do backend (`shopee-endpoints.ts`), nunca uma URL
  * arbitrária vinda da resposta do backend sem essa checagem.
+ *
+ * CP2F-R1: o host Sandbox `open.sandbox.test-stable.shopee.com.br` nunca
+ * resolveu em DNS real (NXDOMAIN confirmado) — substituído pelo host global
+ * `open.sandbox.test-stable.shopee.com` (sem `.br`), único confirmado pelo
+ * fluxo real de autorização no Console da Shopee. Produção
+ * (`open.shopee.com.br`) permanece inalterada.
  */
 const SHOPEE_AUTHORIZATION_URL_ALLOWLIST: ReadonlySet<string> = new Set([
   "https://open.shopee.com.br/auth",
-  "https://open.sandbox.test-stable.shopee.com.br/auth",
+  "https://open.sandbox.test-stable.shopee.com/auth",
 ]);
 
 /**

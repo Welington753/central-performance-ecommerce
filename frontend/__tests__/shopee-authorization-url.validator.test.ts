@@ -7,12 +7,20 @@ describe("isAllowedShopeeAuthorizationUrl", () => {
     ).toBe(true);
   });
 
-  it("accepts the exact sandbox host+path", () => {
+  it("accepts the exact sandbox host+path (CP2F-R1: global host, no .com.br)", () => {
+    expect(
+      isAllowedShopeeAuthorizationUrl(
+        "https://open.sandbox.test-stable.shopee.com/auth",
+      ),
+    ).toBe(true);
+  });
+
+  it("CP2F-R1: rejects the old .com.br sandbox host (never resolved in real DNS, removed from allowlist)", () => {
     expect(
       isAllowedShopeeAuthorizationUrl(
         "https://open.sandbox.test-stable.shopee.com.br/auth",
       ),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   it("accepts an allowlisted URL that also carries a query string", () => {
@@ -63,6 +71,22 @@ describe("isAllowedShopeeAuthorizationUrl", () => {
     expect(
       isAllowedShopeeAuthorizationUrl(
         "https://open.shopee.com.br.evil.com/auth",
+      ),
+    ).toBe(false);
+  });
+
+  it("CP2F-R1: rejects a lookalike subdomain of the new sandbox host", () => {
+    expect(
+      isAllowedShopeeAuthorizationUrl(
+        "https://evil.open.sandbox.test-stable.shopee.com/auth",
+      ),
+    ).toBe(false);
+  });
+
+  it("CP2F-R1: rejects a suffix-trick host built on the new sandbox host", () => {
+    expect(
+      isAllowedShopeeAuthorizationUrl(
+        "https://open.sandbox.test-stable.shopee.com.evil.com/auth",
       ),
     ).toBe(false);
   });
