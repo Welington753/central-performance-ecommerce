@@ -1,11 +1,13 @@
 import { render, screen, waitFor, fireEvent } from "@testing-library/react";
-import { useSearchParams } from "next/navigation";
+import { useSearchParams, useRouter, usePathname } from "next/navigation";
 import IntegracoesPage from "./page";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
 
 jest.mock("next/navigation", () => ({
   useSearchParams: jest.fn(),
+  useRouter: jest.fn(),
+  usePathname: jest.fn(),
 }));
 
 // `jest.mock`/`jest.requireActual` resolvem o próprio argumento fora do
@@ -80,6 +82,8 @@ function mockSearchParams(params: Record<string, string> = {}) {
 beforeEach(() => {
   jest.clearAllMocks();
   mockSearchParams();
+  (usePathname as jest.Mock).mockReturnValue("/integracoes");
+  (useRouter as jest.Mock).mockReturnValue({ replace: jest.fn() });
   api.fetchMarketplaceAccounts.mockResolvedValue([]);
   api.fetchAmazonSetupStatus.mockResolvedValue(amazonStatus());
 });

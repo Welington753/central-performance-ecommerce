@@ -22,10 +22,16 @@ import type { MarketplaceAccountDto } from "@/types/marketplace";
 
 jest.mock("next/navigation", () => ({
   useSearchParams: jest.fn(),
+  useRouter: jest.fn(),
+  usePathname: jest.fn(),
 }));
 
-const { useSearchParams } = jest.requireMock("next/navigation") as {
+const { useSearchParams, useRouter, usePathname } = jest.requireMock(
+  "next/navigation",
+) as {
   useSearchParams: jest.Mock;
+  useRouter: jest.Mock;
+  usePathname: jest.Mock;
 };
 
 function mockSearchParams(params: Record<string, string> = {}) {
@@ -88,6 +94,8 @@ function amazonSetupStatus(
 beforeEach(() => {
   jest.resetAllMocks();
   mockSearchParams();
+  usePathname.mockReturnValue("/integracoes");
+  useRouter.mockReturnValue({ replace: jest.fn() });
   (api.redirectTo as jest.Mock).mockImplementation(() => {});
   // Default: aplicação configurada, sem conta Amazon ainda — testes de
   // Mercado Livre que não se importam com Amazon usam este default e
@@ -103,9 +111,12 @@ describe("IntegracoesPage", () => {
 
     render(<IntegracoesPage />);
 
-    await waitFor(() =>
-      expect(screen.getByText("Status: Não conectado")).toBeInTheDocument(),
+    const card = await screen.findByTestId(
+      "marketplace-account-mercado-livre-empty",
     );
+    expect(
+      within(card).getByText("Status: Não conectado"),
+    ).toBeInTheDocument();
     expect(
       screen.getByRole("button", { name: /conectar mercado livre/i }),
     ).toBeEnabled();
@@ -265,9 +276,12 @@ describe("IntegracoesPage", () => {
 
     render(<IntegracoesPage />);
 
-    expect(
-      await screen.findByText(/não foi possível carregar suas contas/i),
-    ).toBeInTheDocument();
+    // ML e Shopee compartilham o mesmo `loadError` e a mesma mensagem fixa —
+    // cada seção mostra a sua própria instância do alerta.
+    const alerts = await screen.findAllByText(
+      /não foi possível carregar suas contas/i,
+    );
+    expect(alerts.length).toBeGreaterThan(0);
     expect(screen.queryByText("Status: Não conectado")).not.toBeInTheDocument();
   });
 
@@ -327,19 +341,18 @@ describe("IntegracoesPage", () => {
 });
 
 describe("IntegracoesPage — Amazon (Checkpoint 4-C)", () => {
-  it("Amazon never shows 'Disponível futuramente' anymore — Shopee still does", async () => {
+  it("Amazon and Shopee never show 'Disponível futuramente' anymore (CP2E: Shopee connector wired)", async () => {
     (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([]);
 
     render(<IntegracoesPage />);
 
     await screen.findByText("Amazon");
-    expect(screen.getByText("Shopee")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: /conectar shopee/i }),
+    ).toBeEnabled();
     expect(
       screen.queryByText("Status: Disponível futuramente"),
-    ).toBeInTheDocument(); // só Shopee
-    expect(
-      screen.getAllByText("Status: Disponível futuramente"),
-    ).toHaveLength(1);
+    ).not.toBeInTheDocument();
   });
 
   it("shows a 'Configurar Amazon' button and 'Conta Amazon ainda não configurada' when the app is configured but no account exists", async () => {

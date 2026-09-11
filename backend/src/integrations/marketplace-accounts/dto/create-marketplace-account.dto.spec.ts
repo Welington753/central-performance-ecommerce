@@ -28,9 +28,8 @@ describe('CreateMarketplaceAccountDto', () => {
     expect(await validateBody({ marketplace: 'AMAZON' })).toHaveLength(0);
   });
 
-  it('rejects SHOPEE (no connector wired yet)', async () => {
-    const errors = await validateBody({ marketplace: 'SHOPEE' });
-    expect(errors.length).toBeGreaterThan(0);
+  it('accepts a valid SHOPEE body (Checkpoint CP2E: Shopee connector wired)', async () => {
+    expect(await validateBody({ marketplace: 'SHOPEE' })).toHaveLength(0);
   });
 
   it('rejects an unrecognized marketplace string', async () => {

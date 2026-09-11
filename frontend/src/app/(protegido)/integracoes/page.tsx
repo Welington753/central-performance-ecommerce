@@ -3,7 +3,7 @@
 import { Suspense, useCallback, useEffect, useState } from "react";
 import { AmazonSection } from "@/components/integracoes/AmazonSection";
 import { MercadoLivreSection } from "@/components/integracoes/MercadoLivreSection";
-import { MarketplaceCard } from "@/components/MarketplaceCard";
+import { ShopeeSection } from "@/components/integracoes/ShopeeSection";
 import {
   fetchAmazonSetupStatus,
   fetchMarketplaceAccounts,
@@ -104,20 +104,12 @@ function IntegracoesContent() {
         renamePropsFor={renamePropsFor}
       />
 
-      <section className="flex flex-col gap-4">
-        <h2 className="text-lg font-semibold">Outros marketplaces</h2>
-        <div className="grid grid-cols-1 gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          <MarketplaceCard
-            card={{
-              id: "shopee",
-              name: "Shopee",
-              statusLabel: "Disponível futuramente",
-              description:
-                "Integração planejada para uma etapa futura do roadmap multi-marketplace.",
-            }}
-          />
-        </div>
-      </section>
+      <ShopeeSection
+        accounts={accounts}
+        loadError={loadError}
+        onRefresh={loadAccounts}
+        renamePropsFor={renamePropsFor}
+      />
     </div>
   );
 }

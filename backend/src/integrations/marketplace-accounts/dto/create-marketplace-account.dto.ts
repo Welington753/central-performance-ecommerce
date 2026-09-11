@@ -3,11 +3,15 @@ import { IsIn, IsOptional, IsString, MaxLength } from 'class-validator';
 import { Marketplace } from '../../contracts/marketplace.enum';
 
 export class CreateMarketplaceAccountDto {
-  // Checkpoint 4-C: Amazon também tem conector wired (Fase 4) — Shopee
-  // continua fora da allowlist (nenhum conector existe ainda).
-  @ApiProperty({ enum: [Marketplace.MERCADO_LIVRE, Marketplace.AMAZON] })
-  @IsIn([Marketplace.MERCADO_LIVRE, Marketplace.AMAZON])
-  marketplace!: Marketplace.MERCADO_LIVRE | Marketplace.AMAZON;
+  // Checkpoint CP2E: Shopee entra na allowlist — o conector OAuth já existe
+  // (`ShopeeOAuthService.startConnection`), que exige uma conta pré-existente
+  // com `marketplace = SHOPEE` para conectar.
+  @ApiProperty({
+    enum: [Marketplace.MERCADO_LIVRE, Marketplace.AMAZON, Marketplace.SHOPEE],
+  })
+  @IsIn([Marketplace.MERCADO_LIVRE, Marketplace.AMAZON, Marketplace.SHOPEE])
+  marketplace!:
+    Marketplace.MERCADO_LIVRE | Marketplace.AMAZON | Marketplace.SHOPEE;
 
   @ApiProperty({ required: false })
   @IsOptional()

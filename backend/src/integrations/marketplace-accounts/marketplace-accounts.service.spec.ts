@@ -146,6 +146,17 @@ describe('MarketplaceAccountsService', () => {
     expect(account.tokenVersion).toBe(0);
   });
 
+  it('provisions a SHOPEE account (Checkpoint CP2E: allowlist widened) born DISCONNECTED, with externalSellerId null and a real backend-generated UUID', async () => {
+    const account = await service.create({ marketplace: Marketplace.SHOPEE });
+
+    expect(account.marketplace).toBe(Marketplace.SHOPEE);
+    expect(account.status).toBe(MarketplaceAccountStatus.DISCONNECTED);
+    expect(account.externalSellerId).toBeNull();
+    expect(account.id).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i,
+    );
+  });
+
   it('rejects two accounts of the same marketplace with the same non-null externalSellerId', async () => {
     await service.create({
       marketplace: Marketplace.MERCADO_LIVRE,

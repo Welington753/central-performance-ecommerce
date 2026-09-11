@@ -180,6 +180,21 @@ export async function connectMercadoLivre(
   return (await response.json()) as { authorizationUrl: string };
 }
 
+export async function connectShopee(
+  accountId: string,
+): Promise<{ authorizationUrl: string }> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/shopee/connect`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível iniciar a conexão com a Shopee.",
+    );
+  }
+  return (await response.json()) as { authorizationUrl: string };
+}
+
 export class InvalidKpiPeriodApiError extends ApiFetchError {}
 
 export async function fetchMercadoLivreKpis(
