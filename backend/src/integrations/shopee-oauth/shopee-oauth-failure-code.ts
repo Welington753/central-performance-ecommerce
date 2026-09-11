@@ -35,6 +35,9 @@ export const SHOPEE_OAUTH_FAILURE_CODES = [
   'ACCOUNT_NOT_ELIGIBLE',
   'CREDENTIAL_ENCRYPTION_FAILED',
   'ACCOUNT_BUSY',
+
+  // --- Checkpoint CP2D (início da conexão e callback HTTP) ---------------
+  'AUTHORIZATION_URL_BUILD_FAILED',
 ] as const;
 
 export type ShopeeOAuthFailureCode =

@@ -9,6 +9,7 @@ import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-
 import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { OAuthAuthorizationRequest } from '../mercado-livre-oauth/oauth-authorization-request.entity';
 import { OAuthAuthorizationRequestsService } from '../mercado-livre-oauth/oauth-authorization-requests.service';
+import type { ShopeeCredentialsService } from './shopee-credentials.service';
 import type { ShopeeTokenOutcome } from './shopee-http.client';
 import { ShopeeHttpClient } from './shopee-http.client';
 import { ShopeeOAuthService } from './shopee-oauth.service';
@@ -34,6 +35,15 @@ function fakeHttpClient(
   exchangeAuthorizationCode: jest.Mock,
 ): ShopeeHttpClient {
   return { exchangeAuthorizationCode } as unknown as ShopeeHttpClient;
+}
+
+// Este arquivo só exercita `handleAuthorizationCallback`/`handleCallback`
+// (nunca `startConnection`, coberto em `shopee-oauth.service.startconnection.
+// integration.spec.ts`) — `ShopeeCredentialsService` nunca é chamada pelos
+// testes aqui, um stub sem comportamento é suficiente só para satisfazer a
+// assinatura do construtor.
+function fakeCredentialsService(): ShopeeCredentialsService {
+  return {} as unknown as ShopeeCredentialsService;
 }
 
 const FIXED_NOW_MS = 1700000000000;
@@ -109,6 +119,8 @@ describe('ShopeeOAuthService — callback transacional (Postgres real)', () => {
       advisoryLockService,
       fakeHttpClient(exchangeAuthorizationCode),
       encryptionService,
+      fakeCredentialsService(),
+      fakeConfigService(),
       dataSource,
       clock,
     );

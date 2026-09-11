@@ -244,6 +244,30 @@ export class OAuthAuthorizationRequestsService {
     return rows.length > 0;
   }
 
+  /**
+   * Fecha uma tentativa ainda PENDING (nunca reivindicada) como FAILED
+   * (Checkpoint CP2D) — distinto de `finalizeFailure` (que só atua sobre
+   * PROCESSING, depois do `claimByState`). Uso pretendido: uma falha
+   * inesperada entre `createPending` e a construção da URL de autorização
+   * (ex.: `ShopeeOAuthService.startConnection`) — sem isto, a tentativa
+   * ficaria PENDING até o TTL de 10 minutos expirar ou até uma nova
+   * tentativa da mesma conta a substituir, nunca refletindo a falha real.
+   * `WHERE id = $1` (chave primária) garante que nunca afeta outra
+   * tentativa, de qualquer conta/marketplace. Preserva a linha para
+   * auditoria — nunca um `DELETE`, mesmo padrão de todo o resto da classe.
+   */
+  async failPending(id: string, failureCode: string): Promise<boolean> {
+    const rows = await this.queryReturning<{ id: string }>(
+      `UPDATE oauth_authorization_requests
+          SET status = 'FAILED', completed_at = now(), failure_code = $2,
+              encrypted_code_verifier = NULL
+        WHERE id = $1 AND status = 'PENDING'
+        RETURNING id`,
+      [id, failureCode],
+    );
+    return rows.length > 0;
+  }
+
   async sweepExpiredPending(): Promise<number> {
     const rows = await this.queryReturning<{ id: string }>(
       `UPDATE oauth_authorization_requests

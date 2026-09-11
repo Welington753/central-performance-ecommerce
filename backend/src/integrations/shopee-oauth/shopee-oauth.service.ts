@@ -1,4 +1,11 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import {
+  ConflictException,
+  Inject,
+  Injectable,
+  Logger,
+  NotFoundException,
+} from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 import { redactSensitiveData } from '../../common/logging/redact.util';
@@ -7,9 +14,19 @@ import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
 import { AdvisoryLockService } from '../shared/advisory-lock.service';
-import { OAuthAuthorizationRequestsService } from '../mercado-livre-oauth/oauth-authorization-requests.service';
+import {
+  OAuthAuthorizationRequestsService,
+  OAuthConnectionInProgressError,
+} from '../mercado-livre-oauth/oauth-authorization-requests.service';
 import { validateShopeeCallbackInput } from './shopee-callback-input.validator';
+import { buildShopeeCallbackRedirectUrl } from './shopee-callback-redirect-url';
+import { mapShopeeCallbackOutcomeToPublicReason } from './shopee-callback-reason.mapper';
+import { ShopeeCredentialsService } from './shopee-credentials.service';
+import { parsePositiveSafeIntegerString } from './shopee-decimal-id.util';
+import { SHOPEE_ENDPOINTS } from './shopee-endpoints';
+import { validateShopeeFrontendUrl } from './shopee-frontend-url.validator';
 import { ShopeeHttpClient, ShopeeTokenOutcome } from './shopee-http.client';
+import { buildShopeeAuthorizationUrl } from './shopee-build-authorization-url';
 
 /**
  * Relógio injetável (Checkpoint CP2C) — devolve milissegundos desde a
@@ -64,10 +81,143 @@ export class ShopeeOAuthService {
     private readonly advisoryLockService: AdvisoryLockService,
     private readonly httpClient: ShopeeHttpClient,
     private readonly encryptionService: EncryptionService,
+    private readonly credentialsService: ShopeeCredentialsService,
+    private readonly configService: ConfigService,
     @InjectDataSource() private readonly dataSource: DataSource,
     @Inject(SHOPEE_OAUTH_CLOCK)
     private readonly clock: ShopeeOAuthClock = defaultShopeeOAuthClock,
   ) {}
+
+  /**
+   * Início da conexão (Checkpoint CP2D) — ORDEM SEGURA deliberada (evita
+   * tentativa ativa órfã): 1) conta existe/elegível; 2) credenciais +
+   * `redirectUri` válidos (`ensureConfigured`); 3) host de autorização
+   * resolvido SÓ pela allowlist + `partnerId` em formato válido; 4) SÓ
+   * ENTÃO `createPending`; 5) `buildShopeeAuthorizationUrl` com dados já
+   * validados nos passos 2/3 — na prática nunca deveria lançar depois do
+   * `createPending`, mas nenhuma etapa anterior ao passo 4 tem efeito
+   * colateral no banco, então qualquer falha até ali nunca deixa rastro.
+   * Autorização idêntica à do Mercado Livre (`MercadoLivreOAuthController.
+   * connect`): `AccessTokenGuard`, sem RBAC/ownership adicional nesta fase —
+   * decisão verificada na revisão final do CP2D, não só herdada: `AppModule`
+   * só registra `ThrottlerGuard` como `APP_GUARD` (rate limiting, nenhum
+   * guard de autenticação global), e `MarketplaceAccount`
+   * (`marketplace-account.entity.ts`) não tem `ownerId`/`tenantId` — é um
+   * recurso GLOBAL do sistema nesta fase, não por conta/usuário. Qualquer
+   * usuário autenticado e ativo pode conectar/reconectar qualquer conta,
+   * exatamente como o Mercado Livre já permite. Nunca criar uma política
+   * nova só para a Shopee, nunca reduzir a proteção existente do ML.
+   */
+  async startConnection(input: {
+    marketplaceAccountId: string;
+    initiatedByUserId: string;
+  }): Promise<{ authorizationUrl: string }> {
+    const account = await this.marketplaceAccountsService.findByIdOrFail(
+      input.marketplaceAccountId,
+    );
+
+    if (
+      account.marketplace !== Marketplace.SHOPEE ||
+      !CONNECTABLE_STATUSES.includes(account.status)
+    ) {
+      throw new NotFoundException('Conta de marketplace não encontrada.');
+    }
+
+    // `ensureConfigured` (não `ensureCredentials`) — a ÚNICA operação
+    // Shopee que de fato depende da URL de callback estar correta antes de
+    // redirecionar o navegador (CP2A, já valida `redirectUri` via
+    // `validateShopeeRedirectUri`, com `NODE_ENV`).
+    const config = this.credentialsService.ensureConfigured();
+
+    const authorizationHost =
+      SHOPEE_ENDPOINTS[config.environment].authorizationHost;
+    if (authorizationHost === null) {
+      // Ambiente sem host de autorização confirmado na allowlist — nunca
+      // usa produção como fallback (mesma regra do builder).
+      throw new ConflictException('SHOPEE_NOT_CONFIGURED');
+    }
+    if (parsePositiveSafeIntegerString(config.partnerId) === null) {
+      throw new ConflictException('SHOPEE_NOT_CONFIGURED');
+    }
+
+    let pending: { id: string; state: string };
+    try {
+      pending = await this.authorizationRequestsService.createPending({
+        marketplaceAccountId: account.id,
+        initiatedByUserId: input.initiatedByUserId,
+        marketplace: Marketplace.SHOPEE,
+        usePkce: false,
+      });
+    } catch (error) {
+      if (error instanceof OAuthConnectionInProgressError) {
+        throw new ConflictException('OAUTH_CONNECTION_IN_PROGRESS');
+      }
+      throw error;
+    }
+
+    // Passos 1-3 já validaram tudo que `buildShopeeAuthorizationUrl`
+    // verifica — em operação normal, isto nunca deveria lançar depois do
+    // `createPending`. Mesmo assim, esta rede de segurança fecha a
+    // tentativa IMEDIATAMENTE (nunca confia só no TTL de 10 minutos para
+    // "curar" uma órfã): `failPending` atua por `id` primário, então nunca
+    // afeta nenhuma tentativa de outra conta/marketplace. Nunca retorna
+    // `state`/detalhes de configuração — só um código interno fechado.
+    try {
+      // Nunca retorna `codeChallenge` (sempre `null` aqui, `usePkce: false`)
+      // nem Partner ID/Key separadamente — só a URL final.
+      return {
+        authorizationUrl: buildShopeeAuthorizationUrl({
+          authorizationHost,
+          partnerId: config.partnerId,
+          redirectUri: config.redirectUri,
+          state: pending.state,
+        }),
+      };
+    } catch (error) {
+      await this.authorizationRequestsService.failPending(
+        pending.id,
+        'AUTHORIZATION_URL_BUILD_FAILED',
+      );
+      this.logger.error('shopee_oauth_start_connection_unexpected_error', {
+        message: redactSensitiveData(
+          error instanceof Error ? error.message : 'erro desconhecido',
+        ),
+      });
+      throw new ConflictException('CONNECTION_FAILED');
+    }
+  }
+
+  /**
+   * Callback HTTP (Checkpoint CP2D) — usado pelo controller público
+   * (`GET /integrations/shopee/callback`). Sempre devolve um redirect fixo
+   * para `FRONTEND_URL/integracoes`, nunca JSON, nunca token/code/state/
+   * shopId. `FRONTEND_URL` é validada ANTES de chamar
+   * `handleAuthorizationCallback` — uma configuração inválida falha de
+   * forma fechada (exceção genérica, nunca um redirect malformado) sem
+   * desperdiçar o claim do state.
+   */
+  async handleCallback(input: {
+    state: unknown;
+    code: unknown;
+    shopId: unknown;
+  }): Promise<{ redirectUrl: string }> {
+    const frontendUrl = this.configService.getOrThrow<string>('FRONTEND_URL');
+    const nodeEnv = this.configService.get<string>('NODE_ENV', 'development');
+
+    if (!validateShopeeFrontendUrl(frontendUrl, nodeEnv)) {
+      throw new Error('SHOPEE_FRONTEND_URL_INVALID');
+    }
+
+    const outcome = await this.handleAuthorizationCallback(input);
+    const reason =
+      outcome.kind === 'success'
+        ? 'success'
+        : mapShopeeCallbackOutcomeToPublicReason(outcome.kind);
+
+    return {
+      redirectUrl: buildShopeeCallbackRedirectUrl({ frontendUrl, reason }),
+    };
+  }
 
   async handleAuthorizationCallback(input: {
     state: unknown;
