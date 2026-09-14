@@ -27,6 +27,19 @@ function defaultShopeeAccessTokenClock(): number {
 }
 
 /**
+ * Checkpoint CP2J — `accessToken` + `shopId` (`externalSellerId`) SEMPRE da
+ * MESMA leitura/versão da conta: nunca um `shopId` relido separadamente
+ * depois de obter o `accessToken`, o que arriscaria emparelhar um token com
+ * o `shopId` de uma reconexão concorrente mais nova (ou vice-versa).
+ * Estritamente interno — nunca serializado, logado, ou devolvido por um
+ * controller.
+ */
+export interface ShopeeShopCredentials {
+  accessToken: string;
+  shopId: string;
+}
+
+/**
  * Orquestração segura de renovação do access token da Shopee (Checkpoint
  * CP2H) — extraído para um serviço dedicado (não `ShopeeOAuthService`, já
  * acima do limite de linhas do projeto). Estruturalmente inspirado em
@@ -53,12 +66,20 @@ export class ShopeeAccessTokenService {
     private readonly clock: ShopeeAccessTokenClock = defaultShopeeAccessTokenClock,
   ) {}
 
+  /** Wrapper compatível — só o `accessToken` de {@link ensureValidShopCredentials}. */
   async ensureValidAccessToken(accountId: string): Promise<string> {
+    const { accessToken } = await this.ensureValidShopCredentials(accountId);
+    return accessToken;
+  }
+
+  async ensureValidShopCredentials(
+    accountId: string,
+  ): Promise<ShopeeShopCredentials> {
     const skewMs = this.tokenRefreshSkewMs();
 
     const account = await this.assertEligibleForToken(accountId);
     if (this.isWithinSkew(account.tokenExpiresAt, skewMs)) {
-      return this.decryptOrMarkError(
+      return this.buildCredentials(
         account,
         account.encryptedAccessToken as string,
       );
@@ -72,7 +93,7 @@ export class ShopeeAccessTokenService {
     try {
       const reread = await this.assertEligibleForToken(accountId);
       if (this.isWithinSkew(reread.tokenExpiresAt, skewMs)) {
-        return this.decryptOrMarkError(
+        return this.buildCredentials(
           reread,
           reread.encryptedAccessToken as string,
         );
@@ -84,7 +105,24 @@ export class ShopeeAccessTokenService {
     }
   }
 
-  private async attemptRefresh(reread: MarketplaceAccount): Promise<string> {
+  /**
+   * Sempre extrai `shopId` do MESMO objeto `account` cujo `encryptedAccessToken`
+   * está sendo descriptografado aqui — nunca de uma releitura separada.
+   */
+  private async buildCredentials(
+    account: MarketplaceAccount,
+    encryptedAccessToken: string,
+  ): Promise<ShopeeShopCredentials> {
+    const accessToken = await this.decryptOrMarkError(
+      account,
+      encryptedAccessToken,
+    );
+    return { accessToken, shopId: account.externalSellerId as string };
+  }
+
+  private async attemptRefresh(
+    reread: MarketplaceAccount,
+  ): Promise<ShopeeShopCredentials> {
     const refreshTokenPlain = await this.decryptOrMarkError(
       reread,
       reread.encryptedRefreshToken as string,
@@ -127,7 +165,10 @@ export class ShopeeAccessTokenService {
           return this.recoverFromLostRefreshCas(reread.id, reread.tokenVersion);
         }
 
-        return outcome.token.accessToken;
+        return {
+          accessToken: outcome.token.accessToken,
+          shopId: reread.externalSellerId as string,
+        };
       }
 
       case 'provider_rejected': {
@@ -201,11 +242,16 @@ export class ShopeeAccessTokenService {
    * atualizada), CONNECTED, com ambos os tokens e expiração futura
    * presentes. Qualquer outra coisa falha fechado, nunca sobrescreve nem
    * infere um estado que não foi realmente observado.
+   *
+   * Checkpoint CP2J: também exige um `externalSellerId` válido na releitura
+   * — o `shopId` devolvido é SEMPRE o desta mesma linha vencedora, nunca o
+   * `shopId` da tentativa que perdeu o CAS (que pode já pertencer a uma loja
+   * diferente, se a reconexão concorrente trocou de loja).
    */
   private async recoverFromLostRefreshCas(
     accountId: string,
     expectedTokenVersion: number,
-  ): Promise<string> {
+  ): Promise<ShopeeShopCredentials> {
     const current =
       await this.marketplaceAccountsService.findByIdOrFail(accountId);
 
@@ -216,9 +262,11 @@ export class ShopeeAccessTokenService {
       current.encryptedAccessToken &&
       current.encryptedRefreshToken &&
       current.tokenExpiresAt &&
-      current.tokenExpiresAt.getTime() > this.clock()
+      current.tokenExpiresAt.getTime() > this.clock() &&
+      current.externalSellerId !== null &&
+      parsePositiveSafeIntegerString(current.externalSellerId) !== null
     ) {
-      return this.decryptOrMarkError(current, current.encryptedAccessToken);
+      return this.buildCredentials(current, current.encryptedAccessToken);
     }
 
     throw new ConflictException('REFRESH_RESULT_NOT_COMMITTED');

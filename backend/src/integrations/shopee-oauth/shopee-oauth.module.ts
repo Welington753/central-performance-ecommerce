@@ -15,6 +15,8 @@ import {
 import { ShopeeCredentialsService } from './shopee-credentials.service';
 import { ShopeeOAuthController } from './shopee-oauth.controller';
 import { ShopeeShopApiClient } from './shopee-shop-api.client';
+import { ShopeeShopController } from './shopee-shop.controller';
+import { ShopeeShopService } from './shopee-shop.service';
 import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
 
 /**
@@ -47,10 +49,16 @@ import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
  * reaproveita os mesmos `SHOPEE_FETCH`/`SHOPEE_CLOCK` do cliente de token —
  * exportado para o próximo checkpoint consumir; nenhum controller/rota
  * pública o expõe ainda.
+ *
+ * `ShopeeShopController`/`ShopeeShopService` (Checkpoint CP2J) expõem
+ * `GET marketplace-accounts/:id/shopee/shop-info` — primeira rota pública
+ * que efetivamente chama a Shop API. Mesmo escopo arquitetural do restante
+ * de `integrations/shopee-oauth/` (ver `shopee-architecture.spec.ts`):
+ * nenhum connector concreto nem o registro central de connectors.
  */
 @Module({
   imports: [MarketplaceAccountsModule, AuthModule],
-  controllers: [ShopeeOAuthController],
+  controllers: [ShopeeOAuthController, ShopeeShopController],
   providers: [
     OAuthAuthorizationRequestsService,
     AdvisoryLockService,
@@ -66,6 +74,7 @@ import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
     ShopeeOAuthService,
     ShopeeAccessTokenService,
     ShopeeShopApiClient,
+    ShopeeShopService,
   ],
   exports: [ShopeeOAuthService, ShopeeAccessTokenService, ShopeeShopApiClient],
 })
