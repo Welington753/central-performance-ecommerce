@@ -14,6 +14,7 @@ import {
 } from './shopee-access-token.service';
 import { ShopeeCredentialsService } from './shopee-credentials.service';
 import { ShopeeOAuthController } from './shopee-oauth.controller';
+import { ShopeeShopApiClient } from './shopee-shop-api.client';
 import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
 
 /**
@@ -41,6 +42,11 @@ import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
  * `ShopeeAccessTokenService` (Checkpoint CP2H) exportado para uso futuro por
  * clientes internos da Shopee (ex.: a Shop API) — nenhum controller/rota
  * pública o expõe ainda.
+ *
+ * `ShopeeShopApiClient` (Checkpoint CP2I, `GET /api/v2/shop/get_shop_info`)
+ * reaproveita os mesmos `SHOPEE_FETCH`/`SHOPEE_CLOCK` do cliente de token —
+ * exportado para o próximo checkpoint consumir; nenhum controller/rota
+ * pública o expõe ainda.
  */
 @Module({
   imports: [MarketplaceAccountsModule, AuthModule],
@@ -59,7 +65,8 @@ import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
     ShopeeHttpClient,
     ShopeeOAuthService,
     ShopeeAccessTokenService,
+    ShopeeShopApiClient,
   ],
-  exports: [ShopeeOAuthService, ShopeeAccessTokenService],
+  exports: [ShopeeOAuthService, ShopeeAccessTokenService, ShopeeShopApiClient],
 })
 export class ShopeeOAuthModule {}

@@ -3,6 +3,21 @@ export type ShopeeEnvironment = 'SANDBOX' | 'PRODUCTION';
 interface ShopeeEndpointSet {
   apiHost: string;
   /**
+   * Host da Shop API (Checkpoint CP2I) — DISTINTO de `apiHost` em produção.
+   * `apiHost` (`partner.shopeemobile.com`) é usado exclusivamente pelo
+   * cliente de token (`ShopeeHttpClient`, endpoints `/auth/token/get` e
+   * `/auth/access_token/get`) e NUNCA foi alterado aqui — nenhuma alteração
+   * ampla/silenciosa de host de fluxo já existente. A documentação oficial
+   * confirmada para a Shop API (ex.: `/api/v2/shop/get_shop_info`) usa hosts
+   * diferentes por ambiente:
+   *   - Sandbox: mesmo host de `apiHost` (`openplatform.sandbox.test-stable.shopee.sg`);
+   *   - Produção Brasil: `openplatform.shopee.com.br` (não
+   *     `partner.shopeemobile.com`).
+   * Qualquer cliente da Shop API (`ShopeeShopApiClient`) deve resolver o host
+   * exclusivamente a partir deste campo, nunca de `apiHost`.
+   */
+  shopApiHost: string;
+  /**
    * Host de autorização (tela de login/consentimento da loja), por
    * ambiente. `null` quando não confirmado na documentação oficial
    * disponível nesta fase — NUNCA inventado. Qualquer código que precise
@@ -42,13 +57,18 @@ interface ShopeeEndpointSet {
 export const SHOPEE_TOKEN_PATH = '/api/v2/auth/token/get';
 export const SHOPEE_REFRESH_TOKEN_PATH = '/api/v2/auth/access_token/get';
 
+/** Path fechado da Shop API `v2.shop.get_shop_info` (Checkpoint CP2I). */
+export const SHOPEE_SHOP_INFO_PATH = '/api/v2/shop/get_shop_info';
+
 export const SHOPEE_ENDPOINTS: Record<ShopeeEnvironment, ShopeeEndpointSet> = {
   PRODUCTION: {
     apiHost: 'https://partner.shopeemobile.com',
+    shopApiHost: 'https://openplatform.shopee.com.br',
     authorizationHost: 'https://open.shopee.com.br/auth',
   },
   SANDBOX: {
     apiHost: 'https://openplatform.sandbox.test-stable.shopee.sg',
+    shopApiHost: 'https://openplatform.sandbox.test-stable.shopee.sg',
     authorizationHost: 'https://open.sandbox.test-stable.shopee.com/auth',
   },
 };
