@@ -361,6 +361,15 @@ export class MarketplaceAccountsService {
    * uma renovação bem-sucedida concorrente (que já teria incrementado
    * `tokenVersion`) — quando o CAS falha aqui, a chamada é descartada em
    * silêncio pelo chamador, nunca reaplicada.
+   *
+   * `failureCode` fechado ao vocabulário do Mercado Livre (revisão CP2H-R1:
+   * a Shopee inicialmente reutilizava este método para `RATE_LIMITED`, mas
+   * a revisão de segurança reclassificou `rate_limited` como resultado
+   * AMBÍGUO — a documentação oficial não confirma que um 429 garante que o
+   * refresh_token de uso único não foi consumido — então a Shopee passou a
+   * usar `markError` (fail-closed), nunca mais um backoff-com-retry. Sem
+   * nenhum chamador Shopee real, o tipo volta a ser a união fechada
+   * original: nenhum motivo técnico para alargar para `string`.
    */
   async markRefreshDeferred(input: {
     id: string;

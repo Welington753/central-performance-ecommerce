@@ -8,6 +8,10 @@ import {
   SHOPEE_FETCH,
   ShopeeHttpClient,
 } from './shopee-http.client';
+import {
+  SHOPEE_ACCESS_TOKEN_CLOCK,
+  ShopeeAccessTokenService,
+} from './shopee-access-token.service';
 import { ShopeeCredentialsService } from './shopee-credentials.service';
 import { ShopeeOAuthController } from './shopee-oauth.controller';
 import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
@@ -33,6 +37,10 @@ import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
  * Produção usa `globalThis.fetch` via provider controlado (`SHOPEE_FETCH`)
  * — nos testes, este provider é sempre sobrescrito por um mock; nenhum
  * teste chama rede real.
+ *
+ * `ShopeeAccessTokenService` (Checkpoint CP2H) exportado para uso futuro por
+ * clientes internos da Shopee (ex.: a Shop API) — nenhum controller/rota
+ * pública o expõe ainda.
  */
 @Module({
   imports: [MarketplaceAccountsModule, AuthModule],
@@ -47,9 +55,11 @@ import { SHOPEE_OAUTH_CLOCK, ShopeeOAuthService } from './shopee-oauth.service';
     },
     { provide: SHOPEE_CLOCK, useValue: () => Math.floor(Date.now() / 1000) },
     { provide: SHOPEE_OAUTH_CLOCK, useValue: () => Date.now() },
+    { provide: SHOPEE_ACCESS_TOKEN_CLOCK, useValue: () => Date.now() },
     ShopeeHttpClient,
     ShopeeOAuthService,
+    ShopeeAccessTokenService,
   ],
-  exports: [ShopeeOAuthService],
+  exports: [ShopeeOAuthService, ShopeeAccessTokenService],
 })
 export class ShopeeOAuthModule {}

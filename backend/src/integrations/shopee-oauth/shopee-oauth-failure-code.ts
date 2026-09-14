@@ -38,6 +38,20 @@ export const SHOPEE_OAUTH_FAILURE_CODES = [
 
   // --- Checkpoint CP2D (início da conexão e callback HTTP) ---------------
   'AUTHORIZATION_URL_BUILD_FAILED',
+
+  // --- Checkpoint CP2H (renovação segura do access token) ----------------
+  // `RATE_LIMITED` já estava reservado (ver acima) — primeiro escritor real
+  // é `ShopeeAccessTokenService` (backoff, NUNCA muda status). `REFRESH_FAILED`
+  // (também já reservado) passa a ser escrito para rejeição DEFINITIVA do
+  // refresh_token pela Shopee (`provider_rejected`) — marca TOKEN_EXPIRED.
+  'CREDENTIAL_DECRYPTION_FAILED',
+  // Resultado de rede AMBÍGUO após o envio (timeout, JSON inválido, 5xx):
+  // pode significar que a Shopee já consumiu o refresh_token (de uso único)
+  // sem o sistema ter recebido os tokens novos. NUNCA retenta
+  // automaticamente com o mesmo refresh_token — marca ERROR (reconexão
+  // manual), nunca TOKEN_EXPIRED (não é uma rejeição confirmada) nem um
+  // simples backoff (não é comprovadamente seguro reenviar).
+  'REFRESH_RESULT_AMBIGUOUS',
 ] as const;
 
 export type ShopeeOAuthFailureCode =
