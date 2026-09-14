@@ -90,3 +90,55 @@ export function validOrderListBody(
 export function fixedClock(): number {
   return FIXED_TIMESTAMP;
 }
+
+export const VALID_ORDER_SN_LIST = ['2404098R48U37H'];
+
+/** Item mínimo válido de `get_order_detail` (Checkpoint CP2K-2), campos exatamente como no exemplo oficial. */
+export function validOrderDetailItem(overrides: Record<string, unknown> = {}) {
+  return {
+    item_id: 2600144043,
+    item_name: 'backpack',
+    item_sku: 'sku',
+    model_id: 221404189791,
+    model_name: '60g',
+    model_sku: 'QAZ-SADOER-05',
+    model_quantity_purchased: 1,
+    model_original_price: 300000,
+    model_discounted_price: 48000,
+    ...overrides,
+  };
+}
+
+/** Pedido mínimo válido de `get_order_detail` (Checkpoint CP2K-2). */
+export function validOrderDetailOrder(overrides: Record<string, unknown> = {}) {
+  return {
+    order_sn: '2404098R48U37H',
+    region: 'VN',
+    currency: 'VND',
+    order_status: 'COMPLETED',
+    total_amount: 1004.0,
+    create_time: 1712601591,
+    update_time: 1713139948,
+    fulfillment_flag: 'fulfilled_by_local_seller',
+    item_list: [validOrderDetailItem()],
+    ...overrides,
+  };
+}
+
+export function validOrderDetailBody(
+  overrides: {
+    orders?: Record<string, unknown>[];
+    error?: string;
+    message?: string;
+    request_id?: string;
+  } = {},
+) {
+  return {
+    error: overrides.error ?? '',
+    message: overrides.message ?? '',
+    request_id: overrides.request_id ?? 'req-abc123',
+    response: {
+      order_list: overrides.orders ?? [validOrderDetailOrder()],
+    },
+  };
+}

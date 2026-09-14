@@ -52,7 +52,8 @@ function isPositiveSafeInteger(value: unknown): value is number {
  * problema do `no-control-regex`/exceção de lint) - checagem por código de
  * caractere, char a char.
  */
-function containsControlCharacter(value: string): boolean {
+/** Exportado (Checkpoint CP2K-2) para reaproveito por `shopee-order-detail-input.ts` - evita duplicar a mesma checagem. */
+export function containsControlCharacter(value: string): boolean {
   for (let i = 0; i < value.length; i += 1) {
     const code = value.charCodeAt(i);
     if (code <= 0x1f || code === 0x7f) return true;
