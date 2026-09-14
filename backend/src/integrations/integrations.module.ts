@@ -9,6 +9,7 @@ import { MarketplaceSyncModule } from './marketplace-sync/marketplace-sync.modul
 import { MercadoLivreOAuthModule } from './mercado-livre-oauth/mercado-livre-oauth.module';
 import { MercadoLivreOrdersModule } from './mercado-livre-orders/mercado-livre-orders.module';
 import { ShopeeOAuthModule } from './shopee-oauth/shopee-oauth.module';
+import { ShopeeOrdersModule } from './shopee-orders/shopee-orders.module';
 
 /**
  * Módulo agregador de integrações com marketplaces.
@@ -28,6 +29,7 @@ import { ShopeeOAuthModule } from './shopee-oauth/shopee-oauth.module';
     AmazonConnectionModule,
     MarketplaceSyncModule,
     ShopeeOAuthModule,
+    ShopeeOrdersModule,
   ],
   exports: [
     ConnectorsModule,
@@ -40,6 +42,7 @@ import { ShopeeOAuthModule } from './shopee-oauth/shopee-oauth.module';
     AmazonConnectionModule,
     MarketplaceSyncModule,
     ShopeeOAuthModule,
+    ShopeeOrdersModule,
   ],
 })
 export class IntegrationsModule {}
