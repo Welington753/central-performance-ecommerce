@@ -23,7 +23,14 @@ const MAX_ORDER_SN_LENGTH = 64;
 /** Mesmo teto local de `shopee-order-list-input.ts` (`MAX_CURSOR_LENGTH`). */
 const MAX_CURSOR_LENGTH = 512;
 
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+/**
+ * Checkpoint CP2K-3B-R2: formato real observado no Sandbox usa `:` como
+ * separador (ex.: `abc123:def456:00112233`), não documentado antecipadamente
+ * - adicionado ao conjunto aceito sem abrir mão de nenhuma outra proteção
+ * (string vazia, caracteres de controle, tamanho acima de 128 continuam
+ * rejeitados).
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_:-]{1,128}$/;
 
 function isValidOrderEntry(value: unknown): value is { order_sn: string } {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {

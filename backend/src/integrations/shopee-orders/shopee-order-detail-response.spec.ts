@@ -388,6 +388,19 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
   );
 });
 
+describe('validateShopeeOrderDetailResponseBody - request_id', () => {
+  it('accepts a colon-delimited request_id (mesmo formato real observado em get_order_list, Checkpoint CP2K-3B-R2)', () => {
+    const result = validateShopeeOrderDetailResponseBody(
+      baseBody({ request_id: 'abc123:def456:00112233' }),
+      REQUESTED,
+    );
+    expect(result.valid).toBe(true);
+    if (result.valid) {
+      expect(result.result.requestId).toBe('abc123:def456:00112233');
+    }
+  });
+});
+
 describe('validateShopeeOrderDetailResponseBody - IDs int64 seguros vs. unsafe', () => {
   it('rejects an item_id that already lost int64 precision after JSON.parse', () => {
     const text = JSON.stringify(baseBody()).replace(

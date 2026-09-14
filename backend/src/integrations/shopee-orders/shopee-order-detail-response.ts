@@ -66,7 +66,12 @@ const CURRENCY_LENGTH = 3;
 const MAX_ITEM_NAME_LENGTH = 512;
 const MAX_SKU_LENGTH = 128;
 const MAX_FULFILLMENT_FLAG_LENGTH = 64;
-const REQUEST_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+/**
+ * Checkpoint CP2K-3B-R2: mesmo ajuste de `shopee-order-list-response.ts` -
+ * formato real usa `:` como separador; string vazia, caracteres de controle
+ * e tamanho acima de 128 continuam rejeitados.
+ */
+const REQUEST_ID_PATTERN = /^[A-Za-z0-9_:-]{1,128}$/;
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value > 0;

@@ -247,6 +247,21 @@ describe('validateShopeeOrderListResponseBody - request_id', () => {
       ),
     ).toEqual({ valid: false });
   });
+
+  it('accepts a colon-delimited request_id (formato real observado no Sandbox, Checkpoint CP2K-3B-R2)', () => {
+    const result = validateShopeeOrderListResponseBody(
+      baseBody({ request_id: 'abc123:def456:00112233' }),
+    );
+    expect(result).toEqual({
+      valid: true,
+      result: {
+        orders: [],
+        more: false,
+        nextCursor: null,
+        requestId: 'abc123:def456:00112233',
+      },
+    });
+  });
 });
 
 describe('validateShopeeOrderListResponseBody - envelope estruturalmente invalido', () => {
