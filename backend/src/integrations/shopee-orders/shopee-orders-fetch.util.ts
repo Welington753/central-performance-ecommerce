@@ -99,10 +99,24 @@ export async function fetchShopeeOrderSns(input: {
         if (!orderSnSet.has(order.orderSn)) {
           orderSnSet.add(order.orderSn);
           orderSns.push(order.orderSn);
-          if (orderSnSet.size >= MAX_TOTAL_ORDERS_PER_SYNC) {
-            return { orderSns, pagesFetched, capped: true };
-          }
         }
+      }
+
+      // Checkpoint CP2K-5B-R1: o teto só é aplicado NA FRONTEIRA entre
+      // páginas, nunca no meio de uma página já recebida - todos os
+      // `order_sn` de uma página são sempre preservados (nunca truncados
+      // silenciosamente), mesmo quando a página sozinha ultrapassa
+      // `MAX_TOTAL_ORDERS_PER_SYNC` (o pedido de página é sempre fixo em
+      // `ORDER_LIST_PAGE_SIZE` = 100, então a ultrapassagem máxima normal é
+      // limitada ao restante dessa página, nunca ilimitada). `more=false`
+      // decide sozinho: a Shopee confirmou que a enumeração da janela
+      // terminou aqui, então NUNCA é cap de verdade, mesmo que o total final
+      // exceda o teto (cai no `if (!outcome.result.more) break` abaixo,
+      // nunca no `return` deste bloco). Só quando `more=true` (existe página
+      // não enumerada) E o teto já foi atingido/ultrapassado é que a busca
+      // para com `capped: true`, sem buscar mais nenhuma página.
+      if (outcome.result.more && orderSnSet.size >= MAX_TOTAL_ORDERS_PER_SYNC) {
+        return { orderSns, pagesFetched, capped: true };
       }
 
       if (!outcome.result.more) break;

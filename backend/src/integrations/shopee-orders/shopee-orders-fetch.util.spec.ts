@@ -258,6 +258,98 @@ describe('fetchShopeeOrderSns', () => {
       ).rejects.toMatchObject(new ShopeeOrdersSyncError(expectedCode));
     },
   );
+
+  it('exatamente MAX_TOTAL_ORDERS_PER_SYNC pedidos com more=false: capped=false, enumeração concluída normalmente (CP2K-5B)', async () => {
+    const orderSns = Array.from(
+      { length: MAX_TOTAL_ORDERS_PER_SYNC },
+      (_, i) => `order-${i}`,
+    );
+    const getOrderList = jest
+      .fn()
+      .mockResolvedValue(listSuccess(orderSns, { more: false }));
+
+    const result = await fetchShopeeOrderSns({
+      client: { getOrderList },
+      credentials: CREDENTIALS,
+      blocks: [BLOCK],
+    });
+
+    expect(result.capped).toBe(false);
+    expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
+    expect(getOrderList).toHaveBeenCalledTimes(1);
+  });
+
+  it('exatamente MAX_TOTAL_ORDERS_PER_SYNC pedidos com more=true: capped=true, nunca busca a próxima página (CP2K-5B)', async () => {
+    const orderSns = Array.from(
+      { length: MAX_TOTAL_ORDERS_PER_SYNC },
+      (_, i) => `order-${i}`,
+    );
+    const getOrderList = jest
+      .fn()
+      .mockResolvedValue(
+        listSuccess(orderSns, { more: true, nextCursor: 'cur-next' }),
+      );
+
+    const result = await fetchShopeeOrderSns({
+      client: { getOrderList },
+      credentials: CREDENTIALS,
+      blocks: [BLOCK],
+    });
+
+    expect(result.capped).toBe(true);
+    expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
+    expect(getOrderList).toHaveBeenCalledTimes(1);
+  });
+
+  it('última página leva o total a 5050 mas more=false: capped=false, nenhum order_sn truncado (CP2K-5B-R1)', async () => {
+    const firstPage = Array.from(
+      { length: MAX_TOTAL_ORDERS_PER_SYNC - 50 },
+      (_, i) => `p1-${i}`,
+    );
+    const secondPage = Array.from({ length: 100 }, (_, i) => `p2-${i}`);
+    const getOrderList = jest
+      .fn()
+      .mockResolvedValueOnce(
+        listSuccess(firstPage, { more: true, nextCursor: 'cur-1' }),
+      )
+      .mockResolvedValueOnce(listSuccess(secondPage, { more: false }));
+
+    const result = await fetchShopeeOrderSns({
+      client: { getOrderList },
+      credentials: CREDENTIALS,
+      blocks: [BLOCK],
+    });
+
+    expect(result.capped).toBe(false);
+    expect(result.orderSns.length).toBe(MAX_TOTAL_ORDERS_PER_SYNC - 50 + 100);
+    expect(getOrderList).toHaveBeenCalledTimes(2);
+  });
+
+  it('página NÃO final leva o total a 5050 com more=true: capped=true, nenhuma chamada seguinte (CP2K-5B-R1)', async () => {
+    const firstPage = Array.from(
+      { length: MAX_TOTAL_ORDERS_PER_SYNC - 50 },
+      (_, i) => `p1-${i}`,
+    );
+    const secondPage = Array.from({ length: 100 }, (_, i) => `p2-${i}`);
+    const getOrderList = jest
+      .fn()
+      .mockResolvedValueOnce(
+        listSuccess(firstPage, { more: true, nextCursor: 'cur-1' }),
+      )
+      .mockResolvedValueOnce(
+        listSuccess(secondPage, { more: true, nextCursor: 'cur-2' }),
+      );
+
+    const result = await fetchShopeeOrderSns({
+      client: { getOrderList },
+      credentials: CREDENTIALS,
+      blocks: [BLOCK],
+    });
+
+    expect(result.capped).toBe(true);
+    expect(result.orderSns.length).toBe(MAX_TOTAL_ORDERS_PER_SYNC - 50 + 100);
+    expect(getOrderList).toHaveBeenCalledTimes(2);
+  });
 });
 
 describe('fetchShopeeOrderDetails', () => {
