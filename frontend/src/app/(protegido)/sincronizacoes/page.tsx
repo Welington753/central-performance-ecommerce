@@ -12,6 +12,7 @@ import {
   startBackfill,
   syncAmazonOrders,
   syncMercadoLivreOrders,
+  syncShopeeOrders,
 } from "@/lib/api";
 import { SyncTable } from "@/components/SyncTable";
 import { BackfillAccountPanel } from "@/components/BackfillAccountPanel";
@@ -49,13 +50,25 @@ const SYNC_ERROR_MESSAGES: Record<string, string> = {
   PROVIDER_UNAVAILABLE:
     "O marketplace está indisponível no momento. Tente novamente mais tarde.",
   AMAZON_NOT_CONFIGURED: "Integração Amazon não configurada no servidor.",
+  // Vocabulário fechado da Shopee (ver ShopeeOrdersSyncErrorCode no
+  // backend) — códigos exatos devolvidos por
+  // POST /marketplace-accounts/:id/shopee/sync-orders.
+  NOT_CONNECTED: "Esta conta não está mais conectada. Reconecte-a em Integrações.",
+  CONNECTION_BUSY:
+    "Esta conta está processando outra operação agora. Tente novamente em instantes.",
+  NOT_CONFIGURED: "Integração Shopee não configurada no servidor.",
+  DATA_UNAVAILABLE:
+    "O marketplace retornou uma resposta inesperada. Tente novamente mais tarde.",
+  TEMPORARILY_UNAVAILABLE:
+    "O marketplace está indisponível no momento. Tente novamente mais tarde.",
+  SYNC_FAILED: "Falha ao consultar o marketplace. Tente novamente.",
 };
 
 type AccountOutcome = "PENDING" | "SKIPPED" | "SUCCESS" | "FAILED";
 
 interface AccountSyncRow {
   accountId: string;
-  marketplace: "MERCADO_LIVRE" | "AMAZON";
+  marketplace: "MERCADO_LIVRE" | "AMAZON" | "SHOPEE";
   label: string;
   outcome: AccountOutcome;
   reason: string | null;
@@ -241,6 +254,17 @@ export default function SincronizacoesPage() {
           reason: eligible ? null : "Conta não conectada ao Mercado Livre.",
         });
       }
+      for (const account of accounts) {
+        if (account.marketplace !== "SHOPEE") continue;
+        const eligible = account.status === "CONNECTED";
+        next.push({
+          accountId: account.id,
+          marketplace: "SHOPEE",
+          label: `Shopee — ${accountLabel(account)}`,
+          outcome: eligible ? "PENDING" : "SKIPPED",
+          reason: eligible ? null : "Conta não conectada à Shopee.",
+        });
+      }
       for (const account of amazonStatus.accounts) {
         const eligible =
           account.status === "CONNECTED" && amazonStatus.applicationConfigured;
@@ -309,6 +333,8 @@ export default function SincronizacoesPage() {
       try {
         if (row.marketplace === "MERCADO_LIVRE") {
           await syncMercadoLivreOrders(row.accountId);
+        } else if (row.marketplace === "SHOPEE") {
+          await syncShopeeOrders(row.accountId);
         } else {
           await syncAmazonOrders(row.accountId);
         }

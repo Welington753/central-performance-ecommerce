@@ -338,6 +338,35 @@ export async function syncAmazonOrders(
   return (await response.json()) as AmazonSyncSummary;
 }
 
+export interface ShopeeSyncSummary {
+  syncRunId: string;
+  status: "SUCCESS" | "INCOMPLETE";
+  periodFrom: string;
+  periodTo: string;
+  pagesFetched: number;
+  ordersFetched: number;
+  ordersCreated: number;
+  ordersUpdated: number;
+  itemsPersisted: number;
+}
+
+export async function syncShopeeOrders(
+  accountId: string,
+): Promise<ShopeeSyncSummary> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/shopee/sync-orders`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      "Não foi possível sincronizar agora. Tente novamente.",
+      code,
+    );
+  }
+  return (await response.json()) as ShopeeSyncSummary;
+}
+
 export async function syncMercadoLivreOrders(
   accountId: string,
 ): Promise<MercadoLivreSyncSummary> {
