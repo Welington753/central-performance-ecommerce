@@ -1,0 +1,205 @@
+name: cpe-staging
+
+# Stack de avaliação Shopee (Checkpoint CP2K-6B-2B/R1) — provider-neutral,
+# usa os Dockerfiles já existentes (backend/Dockerfile, frontend/Dockerfile,
+# ambos Node 24 LTS). Somente Caddy publica porta no host. Postgres nunca
+# tem porta publicada. Nenhum serviço roda como root (herdado dos
+# Dockerfiles: usuário "node"). Migrations e criação do usuário revisor
+# NUNCA rodam automaticamente — só via `docker compose run` explícito
+# (services "migrate" e "seed-reviewer", profile "tools", nunca subidos por
+# `docker compose up`).
+#
+# Redes segmentadas (Checkpoint R1): "edge" (com saída normal — Caddy e
+# backend precisam de egress para ACME/Shopee/ML/Amazon) e "data"
+# (internal: true — só backend/migrate/seed-reviewer/postgres; Caddy e
+# frontend nunca participam dela).
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    networks:
+      - data
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?defina POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:?defina POSTGRES_DB}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    # Sem "ports": acessível só pela rede "data" (backend, migrate,
+    # seed-reviewer). Nunca exposto no host. Rede "data" é internal: true —
+    # sem saída para a internet, mesmo que alguém tentasse.
+
+  backend:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - edge
+      - data
+    environment:
+      NODE_ENV: production
+      COOKIE_SECURE: "true"
+      ENABLE_SWAGGER: "false"
+      MARKETPLACE_AUTO_SYNC_ENABLED: "false"
+      BACKFILL_WORKER_ENABLED: "false"
+      SHOPEE_ENVIRONMENT: SANDBOX
+      DATABASE_URL: postgres://${POSTGRES_USER:?defina POSTGRES_USER}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?defina POSTGRES_DB}
+      FRONTEND_URL: https://${FRONTEND_HOST:?defina FRONTEND_HOST}
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET:?defina ACCESS_TOKEN_SECRET}
+      ACCESS_TOKEN_TTL_SECONDS: ${ACCESS_TOKEN_TTL_SECONDS:-900}
+      REFRESH_TOKEN_TTL_DAYS: ${REFRESH_TOKEN_TTL_DAYS:-30}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?defina CREDENTIAL_ENCRYPTION_KEY}
+      ML_CLIENT_ID: ${ML_CLIENT_ID:?defina ML_CLIENT_ID}
+      ML_CLIENT_SECRET: ${ML_CLIENT_SECRET:?defina ML_CLIENT_SECRET}
+      ML_REDIRECT_URI: ${ML_REDIRECT_URI:?defina ML_REDIRECT_URI}
+      SHOPEE_PARTNER_ID: ${SHOPEE_PARTNER_ID:?defina SHOPEE_PARTNER_ID}
+      SHOPEE_PARTNER_KEY: ${SHOPEE_PARTNER_KEY:?defina SHOPEE_PARTNER_KEY}
+      SHOPEE_REDIRECT_URI: https://${BACKEND_HOST:?defina BACKEND_HOST}/integrations/shopee/callback
+      SHOPEE_HTTP_TIMEOUT_MS: ${SHOPEE_HTTP_TIMEOUT_MS:-10000}
+      SHOPEE_TOKEN_REFRESH_SKEW_SECONDS: ${SHOPEE_TOKEN_REFRESH_SKEW_SECONDS:-600}
+      THROTTLE_TTL_MS: ${THROTTLE_TTL_MS:-60000}
+      THROTTLE_LIMIT: ${THROTTLE_LIMIT:-100}
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/health',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Sem "ports": só alcançável via rede "edge" (Caddy também está nela).
+    # Também participa de "data" para alcançar o Postgres.
+
+  frontend:
+    build:
+      context: ../../frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: https://${BACKEND_HOST:?defina BACKEND_HOST}
+    restart: unless-stopped
+    depends_on:
+      - backend
+    networks:
+      - edge
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "node -e \"require('http').get('http://127.0.0.1:3000/login',r=>process.exit(r.statusCode===200?0:1)).on('error',()=>process.exit(1))\"",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    # Sem "ports": só alcançável via rede "edge" (Caddy também está nela).
+    # Não está na rede "data": frontend nunca precisa alcançar o Postgres.
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    networks:
+      - edge
+    ports:
+      - "${CADDY_HTTP_PORT:-80}:80"
+      - "${CADDY_HTTPS_PORT:-443}:443"
+    environment:
+      FRONTEND_HOST: ${FRONTEND_HOST:?defina FRONTEND_HOST}
+      BACKEND_HOST: ${BACKEND_HOST:?defina BACKEND_HOST}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    healthcheck:
+      test: ["CMD", "caddy", "version"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  # Roda migration:run manualmente contra o mesmo Postgres do compose.
+  # NUNCA sobe com `docker compose up` (sem healthcheck/restart, não é
+  # referenciado por "depends_on" de nenhum serviço de longa duração).
+  # Uso: docker compose run --rm migrate
+  migrate:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    networks:
+      - data
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:?defina POSTGRES_USER}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?defina POSTGRES_DB}
+    entrypoint:
+      [
+        "node",
+        "node_modules/typeorm/cli.js",
+        "migration:run",
+        "-d",
+        "dist/database/data-source.js",
+      ]
+    profiles: ["tools"]
+
+  # Cria o usuário revisor rodando o seed compilado (sem ts-node, ausente na
+  # imagem de produção — ver dist/database/seeds/create-admin.seed.js).
+  # NUNCA sobe com `docker compose up`. Idempotente: se o e-mail já existir,
+  # não faz nada (ver backend/src/database/seeds/create-admin.seed.ts).
+  # Uso: docker compose run --rm seed-reviewer
+  seed-reviewer:
+    build:
+      context: ../../backend
+      dockerfile: Dockerfile
+    networks:
+      - data
+    environment:
+      # O seed inicializa o AppModule inteiro (NestFactory.createApplicationContext),
+      # não só o TypeORM — por isso exige o mesmo schema de env do backend
+      # (env.validation.ts), não só DATABASE_URL/INITIAL_ADMIN_*.
+      NODE_ENV: production
+      COOKIE_SECURE: "true"
+      ENABLE_SWAGGER: "false"
+      MARKETPLACE_AUTO_SYNC_ENABLED: "false"
+      BACKFILL_WORKER_ENABLED: "false"
+      SHOPEE_ENVIRONMENT: SANDBOX
+      DATABASE_URL: postgres://${POSTGRES_USER:?defina POSTGRES_USER}:${POSTGRES_PASSWORD:?defina POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:?defina POSTGRES_DB}
+      FRONTEND_URL: https://${FRONTEND_HOST:?defina FRONTEND_HOST}
+      ACCESS_TOKEN_SECRET: ${ACCESS_TOKEN_SECRET:?defina ACCESS_TOKEN_SECRET}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?defina CREDENTIAL_ENCRYPTION_KEY}
+      ML_CLIENT_ID: ${ML_CLIENT_ID:?defina ML_CLIENT_ID}
+      ML_CLIENT_SECRET: ${ML_CLIENT_SECRET:?defina ML_CLIENT_SECRET}
+      ML_REDIRECT_URI: ${ML_REDIRECT_URI:?defina ML_REDIRECT_URI}
+      INITIAL_ADMIN_EMAIL: ${INITIAL_ADMIN_EMAIL:?defina INITIAL_ADMIN_EMAIL}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:?defina INITIAL_ADMIN_PASSWORD}
+    entrypoint: ["node", "dist/database/seeds/create-admin.seed.js"]
+    profiles: ["tools"]
+
+networks:
+  # Rede com saída normal (egress) — Caddy precisa dela para obter
+  # certificados públicos (ACME) em produção; backend precisa dela para
+  # chamar Shopee/Mercado Livre/Amazon. Nunca "internal: true".
+  edge:
+    driver: bridge
+  # Rede sem saída — só tráfego interno entre backend/migrate/seed-reviewer
+  # e o Postgres. Caddy e frontend NUNCA participam desta rede.
+  data:
+    driver: bridge
+    internal: true
+
+volumes:
+  postgres-data:
+  caddy-data:
+  caddy-config:

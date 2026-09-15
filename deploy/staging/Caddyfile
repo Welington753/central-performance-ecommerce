@@ -1,0 +1,29 @@
+# Caddyfile — stack de avaliação Shopee (Checkpoint CP2K-6B-2B).
+# Domínios vêm só de variáveis (FRONTEND_HOST/BACKEND_HOST), nunca
+# hardcoded. HTTP -> HTTPS é automático no Caddy 2 quando o host não é
+# "localhost"/IP puro (comportamento padrão, sem bloco extra). Sem log de
+# access com query string (formato default do Caddy já não inclui query
+# string; nunca habilitamos log de wrapper customizado que a exponha).
+
+{
+	# Painel admin do Caddy desligado — nunca expor administração da stack.
+	admin off
+}
+
+https://{$FRONTEND_HOST} {
+	reverse_proxy frontend:3000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
+
+https://{$BACKEND_HOST} {
+	reverse_proxy backend:3000 {
+		header_up Host {host}
+		header_up X-Real-IP {remote_host}
+		header_up X-Forwarded-For {remote_host}
+		header_up X-Forwarded-Proto {scheme}
+	}
+}
