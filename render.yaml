@@ -119,19 +119,22 @@ services:
     autoDeployTrigger: off
     healthCheckPath: /login
     numInstances: 1
-    dockerBuildArgs:
-      # URL pública fixa, derivada do nome proposto para o backend
-      # (cpe-avaliacao-shopee-backend, acima) — precisa estar disponível já
-      # no primeiro `docker build` (o Next grava os rewrites no
-      # routes-manifest em build time, não os reavalia em runtime). Não é
-      # segredo. NUNCA a URL do backend chega ao navegador: BACKEND_PROXY_URL
-      # só é lida pelo servidor Next.js para montar os rewrites (ver
-      # frontend/next.config.ts) — o navegador só fala com a própria origem
-      # do frontend (NEXT_PUBLIC_API_URL permanece ausente, de propósito).
-      # Se o nome do backend não estiver disponível no painel, ajustar esta
-      # URL, FRONTEND_URL, SHOPEE_REDIRECT_URI e ML_REDIRECT_URI juntos,
-      # antes de criar o Blueprint (ver README).
-      BACKEND_PROXY_URL: https://cpe-avaliacao-shopee-backend.onrender.com
     envVars:
       - key: NODE_ENV
         value: production
+      # URL pública fixa, derivada do nome proposto para o backend
+      # (cpe-avaliacao-shopee-backend, acima). Declarada como envVar porque
+      # `dockerBuildArgs` não é campo suportado pela especificação Blueprint
+      # do Render — o próprio Render disponibiliza envVars também como
+      # Docker build argument (--build-arg) automaticamente. Também existe
+      # em runtime, mas não é segredo. O Next.js efetivamente a usa em build
+      # time para gravar os rewrites no routes-manifest (o Next não os
+      # reavalia em runtime) — ver frontend/next.config.ts. NUNCA chega ao
+      # bundle público do navegador: só é lida pelo servidor Next.js para
+      # montar os rewrites; o navegador só fala com a própria origem do
+      # frontend (NEXT_PUBLIC_API_URL permanece ausente, de propósito).
+      # Se o nome do backend não estiver disponível no painel, ajustar esta
+      # URL, FRONTEND_URL, SHOPEE_REDIRECT_URI e ML_REDIRECT_URI juntos,
+      # antes de criar o Blueprint (ver README).
+      - key: BACKEND_PROXY_URL
+        value: https://cpe-avaliacao-shopee-backend.onrender.com

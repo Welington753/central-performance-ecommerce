@@ -86,8 +86,16 @@ Públicas fixas: `NODE_ENV`, `PORT`, `ENABLE_SWAGGER`, `COOKIE_SECURE`,
 
 Públicas derivadas dos nomes propostos (fixas em `render.yaml`, não
 segredo, já disponíveis no primeiro build): `FRONTEND_URL`,
-`SHOPEE_REDIRECT_URI`, `ML_REDIRECT_URI`, `BACKEND_PROXY_URL` (build arg
-do frontend).
+`SHOPEE_REDIRECT_URI`, `ML_REDIRECT_URI`, `BACKEND_PROXY_URL`. No Render
+todas são declaradas como `envVars` — `dockerBuildArgs` não é campo
+suportado pela especificação Blueprint do Render, então
+`BACKEND_PROXY_URL` do frontend também é `envVar`; o Render a
+disponibiliza automaticamente como Docker build argument (`--build-arg`)
+durante o `docker build`. A variável também existe em runtime, mas não é
+segredo. O Next.js efetivamente a usa em build time para gravar os
+rewrites no `routes-manifest.json` (não reavaliado em runtime) — ver
+`frontend/next.config.ts`. Nunca é incluída no bundle público do
+navegador.
 
 Segredos (painel, `sync: false`): `ACCESS_TOKEN_SECRET`,
 `CREDENTIAL_ENCRYPTION_KEY`, `ML_CLIENT_ID`, `ML_CLIENT_SECRET`,
