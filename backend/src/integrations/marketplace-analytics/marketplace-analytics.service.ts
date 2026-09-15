@@ -598,6 +598,16 @@ export class MarketplaceAnalyticsService {
               SELECT 1 FROM sync_runs sr
               WHERE sr.marketplace_account_id = a.id AND sr.status = 'SUCCESS'
             )
+            -- Checkpoint CP2K-5C-4: PARTIAL com covered_through provado
+            -- (fronteira real, nunca a janela requisitada) conta como
+            -- historico legitimo, igual a SUCCESS - um PARTIAL sem
+            -- covered_through (cap antes de concluir qualquer bloco) nunca
+            -- entra aqui, mesma exclusao de fetchSourceCoverage abaixo.
+            OR EXISTS (
+              SELECT 1 FROM sync_runs sr
+              WHERE sr.marketplace_account_id = a.id AND sr.status = 'PARTIAL'
+                AND sr.covered_through IS NOT NULL
+            )
           ) AS has_history
         FROM marketplace_accounts a`,
     );
@@ -1045,22 +1055,37 @@ export class MarketplaceAnalyticsService {
     if (accounts.length === 0) return [];
     const accountIds = accounts.map((a) => a.id);
 
+    // Checkpoint CP2K-5C-4: `PARTIAL` com `covered_through` preenchido
+    // contribui cobertura igual a `SUCCESS`, mas SÓ até `covered_through`
+    // (a fronteira PROVADA) — NUNCA até `date_to` (a janela apenas
+    // REQUISITADA daquele run, que pode nunca ter sido enumerada por
+    // inteiro). `PARTIAL` com `covered_through` nulo (cap antes de concluir
+    // qualquer bloco) é excluído por completo pelo próprio `WHERE`, mesma
+    // exclusão de `FAILED`/`RUNNING`.
     const rows = await this.dataSource.query<
-      Array<{ marketplace_account_id: string; date_from: Date; date_to: Date }>
+      Array<{
+        marketplace_account_id: string;
+        date_from: Date;
+        effective_to: Date;
+      }>
     >(
-      `SELECT marketplace_account_id, date_from, date_to
+      `SELECT marketplace_account_id, date_from,
+              CASE WHEN status = 'SUCCESS' THEN date_to ELSE covered_through END
+                AS effective_to
         FROM sync_runs
         WHERE marketplace_account_id = ANY($1)
-          AND status = 'SUCCESS'
           AND date_from IS NOT NULL
-          AND date_to IS NOT NULL`,
+          AND (
+            (status = 'SUCCESS' AND date_to IS NOT NULL)
+            OR (status = 'PARTIAL' AND covered_through IS NOT NULL)
+          )`,
       [accountIds],
     );
 
     const runsByAccount = new Map<string, SyncedInterval[]>();
     for (const row of rows) {
       const list = runsByAccount.get(row.marketplace_account_id) ?? [];
-      list.push({ from: row.date_from, to: row.date_to });
+      list.push({ from: row.date_from, to: row.effective_to });
       runsByAccount.set(row.marketplace_account_id, list);
     }
 

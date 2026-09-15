@@ -148,6 +148,78 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
     );
   }
 
+  /**
+   * Checkpoint CP2K-5C-4: `sync_runs` com `status = 'PARTIAL'` — nasce de um
+   * teto de segurança interrompendo uma sincronização (Shopee,
+   * `finalizeSyncRunPartial`). `coveredThrough === null` (cap ANTES de
+   * concluir qualquer bloco) é o mesmo formato real que
+   * `finalizeSyncRunPartial` grava — nunca é sintetizado aqui.
+   */
+  async function seedPartialSyncRun(
+    accountId: string,
+    dateFrom: Date,
+    dateTo: Date,
+    coveredThrough: Date | null,
+  ): Promise<void> {
+    await dataSource.query(
+      `INSERT INTO sync_runs
+          (marketplace_account_id, marketplace, type, status, started_at, finished_at, date_from, date_to, covered_through)
+        VALUES ($1, $2, $3, $4, $5, $5, $6, $7, $8)`,
+      [
+        accountId,
+        Marketplace.MERCADO_LIVRE,
+        SyncRunType.MANUAL,
+        SyncRunStatus.PARTIAL,
+        new Date(),
+        dateFrom,
+        dateTo,
+        coveredThrough,
+      ],
+    );
+  }
+
+  async function seedFailedSyncRun(
+    accountId: string,
+    dateFrom: Date,
+    dateTo: Date,
+  ): Promise<void> {
+    await dataSource.query(
+      `INSERT INTO sync_runs
+          (marketplace_account_id, marketplace, type, status, started_at, finished_at, date_from, date_to)
+        VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
+      [
+        accountId,
+        Marketplace.MERCADO_LIVRE,
+        SyncRunType.MANUAL,
+        SyncRunStatus.FAILED,
+        new Date(),
+        dateFrom,
+        dateTo,
+      ],
+    );
+  }
+
+  async function seedRunningSyncRun(
+    accountId: string,
+    dateFrom: Date,
+    dateTo: Date,
+  ): Promise<void> {
+    await dataSource.query(
+      `INSERT INTO sync_runs
+          (marketplace_account_id, marketplace, type, status, started_at, date_from, date_to)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [
+        accountId,
+        Marketplace.MERCADO_LIVRE,
+        SyncRunType.MANUAL,
+        SyncRunStatus.RUNNING,
+        new Date(),
+        dateFrom,
+        dateTo,
+      ],
+    );
+  }
+
   function defaultWindows() {
     return resolveKpiPeriod({}, REFERENCE_NOW);
   }
@@ -2463,6 +2535,307 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(dto.summary?.cancelledOrders).toBe(1);
       expect(dto.summary?.partiallyRefundedOrders).toBe(1);
       expect(dto.summary?.partiallyRefundedGrossAmount).toBe('9999.99');
+    });
+  });
+
+  /**
+   * Checkpoint CP2K-5C-4: `fetchSourceCoverage`/`fetchHasHistoryMap` também
+   * reconhecem `sync_runs` `PARTIAL` com `covered_through` preenchido — nunca
+   * a janela requisitada (`date_to`) de um `PARTIAL`, nunca `FAILED`/
+   * `RUNNING`, nunca um `PARTIAL` com `covered_through` nulo (cap antes de
+   * concluir qualquer bloco — nenhum prefixo provado).
+   */
+  describe('PARTIAL sync run coverage (Checkpoint CP2K-5C-4)', () => {
+    function sourceOf(
+      aggregate: Awaited<
+        ReturnType<MarketplaceAnalyticsService['getAggregate']>
+      >,
+      accountId: string,
+    ) {
+      const source = aggregate.sources.find((s) => s.accountId === accountId);
+      if (!source) throw new Error('source não encontrada no agregado');
+      return source;
+    }
+
+    it('1. SUCCESS isolado continua cobrindo date_from → date_to', async () => {
+      const accountId = await seedAccount();
+      const from = new Date('2026-07-01T00:00:00.000Z');
+      const to = new Date('2026-09-02T12:00:00.000Z');
+      await seedSuccessfulSyncRun(accountId, from, to);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.hasAnySuccess).toBe(true);
+      expect(source.coverage.intervals).toHaveLength(1);
+      expect(source.coverage.intervals[0].from.getTime()).toBe(from.getTime());
+      expect(source.coverage.intervals[0].to.getTime()).toBe(to.getTime());
+    });
+
+    it('2. PARTIAL com covered_through cobre somente date_from → covered_through', async () => {
+      const accountId = await seedAccount();
+      const from = new Date('2026-07-01T00:00:00.000Z');
+      const coveredThrough = new Date('2026-07-16T00:00:00.000Z');
+      const to = new Date('2026-09-02T12:00:00.000Z');
+      await seedPartialSyncRun(accountId, from, to, coveredThrough);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.hasAnySuccess).toBe(true);
+      expect(source.coverage.intervals).toHaveLength(1);
+      expect(source.coverage.intervals[0].from.getTime()).toBe(from.getTime());
+      expect(source.coverage.intervals[0].to.getTime()).toBe(
+        coveredThrough.getTime(),
+      );
+    });
+
+    it('3. PARTIAL com covered_through=null é ignorado', async () => {
+      // Precisa de OUTRA conta com dado provado no escopo — do contrário
+      // `getAggregate` cai no early-return de "sem prova de dado" (mesmo
+      // caminho do teste 9) e `sources` nem chega a ser calculado.
+      const accountWithNullPartial = await seedAccount();
+      await seedPartialSyncRun(
+        accountWithNullPartial,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+        null,
+      );
+      const provenAccount = await seedAccount();
+      await seedSuccessfulSyncRun(
+        provenAccount,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+      );
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const source = sourceOf(aggregate, accountWithNullPartial);
+      expect(source.coverage.hasAnySuccess).toBe(false);
+      expect(source.coverage.intervals).toHaveLength(0);
+    });
+
+    it('4. PARTIAL nunca cobre até date_to, mesmo com date_to muito maior que covered_through', async () => {
+      const accountId = await seedAccount();
+      const from = new Date('2026-01-01T00:00:00.000Z');
+      const coveredThrough = new Date('2026-01-16T00:00:00.000Z');
+      const to = new Date('2027-01-01T00:00:00.000Z');
+      await seedPartialSyncRun(accountId, from, to, coveredThrough);
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.intervals[0].to.getTime()).not.toBe(to.getTime());
+      expect(source.coverage.intervals[0].to.getTime()).toBe(
+        coveredThrough.getTime(),
+      );
+      expect(source.coverage.selectedPeriodComplete).toBe(false);
+    });
+
+    it('5. SUCCESS + PARTIAL contínuos são fundidos em um único intervalo', async () => {
+      const accountId = await seedAccount();
+      const successFrom = new Date('2026-07-01T00:00:00.000Z');
+      const successTo = new Date('2026-07-16T00:00:00.000Z');
+      await seedSuccessfulSyncRun(accountId, successFrom, successTo);
+      // 1 dia de sobreposição — mesmo padrão de
+      // `computeIncrementalSyncWindow` (INCREMENTAL_OVERLAP_MS).
+      const partialFrom = new Date('2026-07-15T00:00:00.000Z');
+      const partialTo = new Date('2026-09-02T12:00:00.000Z');
+      const coveredThrough = new Date('2026-07-30T00:00:00.000Z');
+      await seedPartialSyncRun(
+        accountId,
+        partialFrom,
+        partialTo,
+        coveredThrough,
+      );
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.intervals).toHaveLength(1);
+      expect(source.coverage.intervals[0].from.getTime()).toBe(
+        successFrom.getTime(),
+      );
+      expect(source.coverage.intervals[0].to.getTime()).toBe(
+        coveredThrough.getTime(),
+      );
+    });
+
+    it('6. SUCCESS + PARTIAL com lacuna permanecem intervalos separados', async () => {
+      const accountId = await seedAccount();
+      await seedSuccessfulSyncRun(
+        accountId,
+        new Date('2026-01-01T00:00:00.000Z'),
+        new Date('2026-01-15T00:00:00.000Z'),
+      );
+      // Lacuna deliberada entre 2026-01-15 e 2026-07-01 — nenhuma
+      // sobreposição, nunca deve fundir.
+      await seedPartialSyncRun(
+        accountId,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+        new Date('2026-07-16T00:00:00.000Z'),
+      );
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.intervals).toHaveLength(2);
+    });
+
+    it('7. vários PARTIAL contínuos convergem até a última covered_through', async () => {
+      const accountId = await seedAccount();
+      await seedPartialSyncRun(
+        accountId,
+        new Date('2026-01-01T00:00:00.000Z'),
+        new Date('2026-01-20T00:00:00.000Z'),
+        new Date('2026-01-16T00:00:00.000Z'),
+      );
+      await seedPartialSyncRun(
+        accountId,
+        new Date('2026-01-15T00:00:00.000Z'),
+        new Date('2026-02-05T00:00:00.000Z'),
+        new Date('2026-01-31T00:00:00.000Z'),
+      );
+      const lastCoveredThrough = new Date('2026-02-15T00:00:00.000Z');
+      await seedPartialSyncRun(
+        accountId,
+        new Date('2026-01-30T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+        lastCoveredThrough,
+      );
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.intervals).toHaveLength(1);
+      expect(source.coverage.intervals[0].from.getTime()).toBe(
+        new Date('2026-01-01T00:00:00.000Z').getTime(),
+      );
+      expect(source.coverage.intervals[0].to.getTime()).toBe(
+        lastCoveredThrough.getTime(),
+      );
+    });
+
+    it('8. FAILED e RUNNING não contribuem para cobertura', async () => {
+      // Mesmo motivo do teste 3: precisa de outra conta com dado provado no
+      // escopo para não cair no early-return de "sem prova de dado" antes
+      // de `sources` ser calculado.
+      const accountId = await seedAccount();
+      await seedFailedSyncRun(
+        accountId,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+      );
+      await seedRunningSyncRun(
+        accountId,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+      );
+      const provenAccount = await seedAccount();
+      await seedSuccessfulSyncRun(
+        provenAccount,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+      );
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const source = sourceOf(aggregate, accountId);
+      expect(source.coverage.hasAnySuccess).toBe(false);
+      expect(source.coverage.intervals).toHaveLength(0);
+    });
+
+    it('9. cenário só com PARTIAL(covered_through=null): sem cobertura/histórico útil (CONNECTED_NO_DATA)', async () => {
+      const accountId = await seedAccount({
+        status: MarketplaceAccountStatus.CONNECTED,
+      });
+      await seedPartialSyncRun(
+        accountId,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-02T12:00:00.000Z'),
+        null,
+      );
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      expect(aggregate.availability).toBe('CONNECTED_NO_DATA');
+      expect(aggregate.current).toBeNull();
+    });
+
+    it('10. fixtures Mercado Livre e Amazon (SUCCESS) mantêm exatamente os resultados anteriores, sem nenhum PARTIAL no escopo', async () => {
+      const mlAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+        externalSellerId: '111',
+      });
+      await seedSuccessfulSyncRun(
+        mlAccount,
+        new Date('2026-07-01T00:00:00.000Z'),
+        new Date('2026-09-05T00:00:00.000Z'),
+      );
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: 'ml-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+        externalSellerId: '222',
+      });
+      await dataSource.query(
+        `INSERT INTO sync_runs
+            (marketplace_account_id, marketplace, type, status, started_at, finished_at, date_from, date_to)
+          VALUES ($1, $2, $3, $4, $5, $5, $6, $7)`,
+        [
+          amazonAccount,
+          Marketplace.AMAZON,
+          SyncRunType.MANUAL,
+          SyncRunStatus.SUCCESS,
+          new Date(),
+          new Date('2026-07-01T00:00:00.000Z'),
+          new Date('2026-09-05T00:00:00.000Z'),
+        ],
+      );
+      await seedOrder({
+        accountId: amazonAccount,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '200.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const mlAggregate = await analyticsService.getAggregate(
+        { accountId: mlAccount },
+        REFERENCE_NOW,
+      );
+      const mlDto = toMarketplaceAnalyticsResponse(mlAggregate);
+      expect(mlDto.summary?.grossRevenue).toBe('100.00');
+      expect(mlAggregate.dataCoverage.status).toBe('complete');
+
+      const amazonAggregate = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+      const amazonDto = toMarketplaceAnalyticsResponse(amazonAggregate);
+      expect(amazonDto.summary?.grossRevenue).toBe('200.00');
+      expect(amazonAggregate.dataCoverage.status).toBe('complete');
     });
   });
 });
