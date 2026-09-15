@@ -1,0 +1,137 @@
+# Checkpoint CP2K-6B-2E — plano de deploy Render Free para o ambiente
+# provisório de avaliação Shopee. NÃO EXECUTADO: nenhum recurso foi criado
+# no Render a partir deste arquivo nesta etapa. Nomes de serviço/banco
+# abaixo são sugestões específicas, mas sua disponibilidade real só é
+# confirmada no painel do Render no momento da criação (ver
+# deploy/render/README.md).
+#
+# Somente Sandbox Shopee. Nunca credenciais Live, nunca loja real, nunca
+# token de produção. Este ambiente nunca deve virar produção (ver README).
+
+databases:
+  - name: cpe-avaliacao-shopee-db
+    plan: free
+    region: virginia
+    databaseName: cpe_avaliacao_shopee
+    user: cpe_avaliacao_shopee_app
+    ipAllowList: []
+
+services:
+  # --- Backend (NestJS) -------------------------------------------------
+  - type: web
+    name: cpe-avaliacao-shopee-backend
+    runtime: docker
+    plan: free
+    region: virginia
+    branch: feat/shopee-oauth
+    dockerContext: ./backend
+    dockerfilePath: ./backend/Dockerfile
+    autoDeployTrigger: off
+    healthCheckPath: /health
+    numInstances: 1
+    # Sem disk, sem preDeployCommand (indisponível no plano free), sem
+    # worker/cron. Migration + seed idempotente rodam aqui, encadeados,
+    # antes do processo principal — nunca alteram backend/Dockerfile (o
+    # CMD original do Dockerfile continua existindo e válido para uso
+    # fora do Render; este dockerCommand apenas o substitui em runtime).
+    dockerCommand: >-
+      /bin/sh -c "node node_modules/typeorm/cli.js migration:run -d
+      dist/database/data-source.js && node
+      dist/database/seeds/create-admin.seed.js && exec node dist/main.js"
+    envVars:
+      # --- Valores públicos e seguros (versionados) ----------------------
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "3000"
+      - key: ENABLE_SWAGGER
+        value: "false"
+      - key: COOKIE_SECURE
+        value: "true"
+      - key: MARKETPLACE_AUTO_SYNC_ENABLED
+        value: "false"
+      - key: BACKFILL_WORKER_ENABLED
+        value: "false"
+      - key: SHOPEE_ENVIRONMENT
+        value: SANDBOX
+      - key: ACCESS_TOKEN_TTL_SECONDS
+        value: "900"
+      - key: REFRESH_TOKEN_TTL_DAYS
+        value: "30"
+      - key: SHOPEE_HTTP_TIMEOUT_MS
+        value: "10000"
+      - key: SHOPEE_TOKEN_REFRESH_SKEW_SECONDS
+        value: "600"
+      - key: THROTTLE_TTL_MS
+        value: "60000"
+      - key: THROTTLE_LIMIT
+        value: "100"
+      # --- URLs públicas derivadas dos nomes fixos propostos acima --------
+      # Não são segredo — sabidas antes do primeiro deploy, a partir do
+      # nome proposto para o serviço frontend (cpe-avaliacao-shopee-frontend,
+      # abaixo). Controla também o CORS (main.ts: origin = FRONTEND_URL).
+      # Se o nome do frontend não estiver disponível no painel, ajustar esta
+      # URL, SHOPEE_REDIRECT_URI, ML_REDIRECT_URI e o BACKEND_PROXY_URL do
+      # frontend juntos, antes de criar o Blueprint (ver README).
+      - key: FRONTEND_URL
+        value: https://cpe-avaliacao-shopee-frontend.onrender.com
+      # Caminho exato confirmado em
+      # backend/src/integrations/shopee-oauth/shopee-oauth.controller.ts
+      # (@Get('integrations/shopee/callback')).
+      - key: SHOPEE_REDIRECT_URI
+        value: https://cpe-avaliacao-shopee-frontend.onrender.com/integrations/shopee/callback
+      # Caminho exato confirmado em
+      # backend/src/integrations/mercado-livre-oauth/mercado-livre-oauth.controller.ts
+      # (@Get('integrations/mercado-livre/callback')).
+      - key: ML_REDIRECT_URI
+        value: https://cpe-avaliacao-shopee-frontend.onrender.com/integrations/mercado-livre/callback
+      - key: DATABASE_URL
+        fromDatabase:
+          name: cpe-avaliacao-shopee-db
+          property: connectionString
+      # --- Segredos (preenchidos manualmente no painel) -------------------
+      - key: ACCESS_TOKEN_SECRET
+        sync: false
+      - key: CREDENTIAL_ENCRYPTION_KEY
+        sync: false
+      - key: ML_CLIENT_ID
+        sync: false
+      - key: ML_CLIENT_SECRET
+        sync: false
+      - key: SHOPEE_PARTNER_ID
+        sync: false
+      - key: SHOPEE_PARTNER_KEY
+        sync: false
+      - key: INITIAL_ADMIN_EMAIL
+        sync: false
+      - key: INITIAL_ADMIN_PASSWORD
+        sync: false
+
+  # --- Frontend (Next.js) -------------------------------------------------
+  - type: web
+    name: cpe-avaliacao-shopee-frontend
+    runtime: docker
+    plan: free
+    region: virginia
+    branch: feat/shopee-oauth
+    dockerContext: ./frontend
+    dockerfilePath: ./frontend/Dockerfile
+    autoDeployTrigger: off
+    healthCheckPath: /login
+    numInstances: 1
+    dockerBuildArgs:
+      # URL pública fixa, derivada do nome proposto para o backend
+      # (cpe-avaliacao-shopee-backend, acima) — precisa estar disponível já
+      # no primeiro `docker build` (o Next grava os rewrites no
+      # routes-manifest em build time, não os reavalia em runtime). Não é
+      # segredo. NUNCA a URL do backend chega ao navegador: BACKEND_PROXY_URL
+      # só é lida pelo servidor Next.js para montar os rewrites (ver
+      # frontend/next.config.ts) — o navegador só fala com a própria origem
+      # do frontend (NEXT_PUBLIC_API_URL permanece ausente, de propósito).
+      # Se o nome do backend não estiver disponível no painel, ajustar esta
+      # URL, FRONTEND_URL, SHOPEE_REDIRECT_URI e ML_REDIRECT_URI juntos,
+      # antes de criar o Blueprint (ver README).
+      BACKEND_PROXY_URL: https://cpe-avaliacao-shopee-backend.onrender.com
+    envVars:
+      - key: NODE_ENV
+        value: production

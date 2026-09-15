@@ -6,6 +6,13 @@
 # NEXT_PUBLIC_API_URL é embutida em BUILD TIME (padrão Next.js para
 # variáveis NEXT_PUBLIC_*) — recebida como ARG explícito, nunca com fallback
 # localhost.
+#
+# Checkpoint CP2K-6B-2E: ausência/vazio de NEXT_PUBLIC_API_URL é uma
+# configuração same-origin válida (ver next.config.ts/src/lib/api.ts) — não
+# é mais obrigatória. BACKEND_PROXY_URL é um segundo ARG, só usado por
+# `next build` para gravar os rewrites no manifesto de rotas (nunca embutido
+# no bundle do navegador, nunca copiado para o estágio de runtime — cada
+# stage só herda ARG/ENV que declara de novo).
 
 ARG NODE_VERSION=24-alpine
 
@@ -19,12 +26,17 @@ RUN npm ci
 FROM node:${NODE_VERSION} AS build
 WORKDIR /app
 
-# Sem valor padrão: falha explicitamente se não for passada (nunca usa
-# localhost como substituto silencioso em produção).
+# Sem valor padrão fixo aqui (nunca localhost). Ausência/vazio é
+# same-origin intencional (ver next.config.ts) — só preenchida quando o
+# frontend deve falar com uma URL absoluta do backend (uso local/dev).
 ARG NEXT_PUBLIC_API_URL
-RUN test -n "$NEXT_PUBLIC_API_URL" || \
-    (echo "ERRO: build ARG NEXT_PUBLIC_API_URL é obrigatório (ex.: --build-arg NEXT_PUBLIC_API_URL=https://api.exemplo.com)" && exit 1)
 ENV NEXT_PUBLIC_API_URL=${NEXT_PUBLIC_API_URL}
+
+# Só usada por `next build` para montar os rewrites (proxy same-origin,
+# Checkpoint CP2K-6B-2E) — nunca um segredo, nunca embutida no bundle do
+# navegador. Ausente = nenhum rewrite (comportamento local preservado).
+ARG BACKEND_PROXY_URL
+ENV BACKEND_PROXY_URL=${BACKEND_PROXY_URL}
 
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .

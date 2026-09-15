@@ -6,6 +6,16 @@
  *   corretamente pelo navegador.
  * - Usa `NEXT_PUBLIC_API_URL` como base da API. Nenhum segredo é lido ou
  *   embutido aqui — apenas a URL pública do backend.
+ *
+ * Checkpoint CP2K-6B-2E: ausência ou valor vazio de `NEXT_PUBLIC_API_URL` é
+ * uma configuração same-origin INTENCIONAL, não um erro — produz caminhos
+ * relativos (`/auth/login`) que o navegador resolve contra a própria origem
+ * do frontend (necessário em ambientes como o Render Free, onde frontend e
+ * backend ficam em subdomínios distintos de um domínio público
+ * compartilhado; ver `next.config.ts` para o proxy `rewrites()` que
+ * encaminha essas chamadas ao backend do lado do servidor). Definir
+ * `NEXT_PUBLIC_API_URL` com uma URL absoluta continua funcionando
+ * normalmente (uso local/desenvolvimento, backend em porta diferente).
  */
 
 import type { MarketplaceAccountDto } from "@/types/marketplace";
@@ -27,7 +37,21 @@ import type {
   BackfillStatusDto,
 } from "@/types/marketplace-backfill";
 
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL ?? "";
+/**
+ * Normaliza a base da API: `undefined`/vazia vira `""` (same-origin,
+ * caminho relativo); uma URL absoluta tem a(s) barra(s) final(is) removidas,
+ * para nunca produzir barra dupla ao concatenar com `path` (que sempre
+ * começa com "/"). Único ponto de montagem da base — todo call site usa
+ * `apiFetch`, nunca monta a URL por conta própria.
+ */
+function normalizeApiBaseUrl(raw: string | undefined): string {
+  if (!raw) {
+    return "";
+  }
+  return raw.replace(/\/+$/, "");
+}
+
+const API_BASE_URL = normalizeApiBaseUrl(process.env.NEXT_PUBLIC_API_URL);
 
 export class ApiFetchError extends Error {
   constructor(
@@ -118,17 +142,21 @@ export async function createMarketplaceAccount(
 const RENAME_ERROR_MESSAGES: Record<string, string> = {
   INVALID_NICKNAME:
     "Nome inválido. Use até 60 caracteres (letras, números, espaços, hífen e pontuação simples).",
-  NICKNAME_ALREADY_IN_USE: "Já existe uma conta com esse nome neste marketplace.",
+  NICKNAME_ALREADY_IN_USE:
+    "Já existe uma conta com esse nome neste marketplace.",
 };
 
 export async function renameMarketplaceAccount(
   accountId: string,
   nickname: string | null,
 ): Promise<MarketplaceAccountDto> {
-  const response = await apiFetch(`/marketplace-accounts/${accountId}/nickname`, {
-    method: "PATCH",
-    body: JSON.stringify({ nickname }),
-  });
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/nickname`,
+    {
+      method: "PATCH",
+      body: JSON.stringify({ nickname }),
+    },
+  );
   if (!response.ok) {
     const code = await parseSanitizedErrorCode(response);
     throw new ApiFetchError(
@@ -188,9 +216,7 @@ export async function connectShopee(
     { method: "POST" },
   );
   if (!response.ok) {
-    throw new ApiFetchError(
-      "Não foi possível iniciar a conexão com a Shopee.",
-    );
+    throw new ApiFetchError("Não foi possível iniciar a conexão com a Shopee.");
   }
   return (await response.json()) as { authorizationUrl: string };
 }
@@ -251,7 +277,9 @@ export async function fetchMarketplaceAnalyticsKpis(
     params.set("logisticsScope", query.logisticsScope);
   }
 
-  const response = await apiFetch(`/marketplace-analytics/kpis?${params.toString()}`);
+  const response = await apiFetch(
+    `/marketplace-analytics/kpis?${params.toString()}`,
+  );
   if (response.status === 401 || response.status === 403) {
     throw new UnauthorizedAnalyticsApiError(
       "Sessão expirada ou sem permissão para este escopo. Entre novamente.",
@@ -438,8 +466,7 @@ function normalizeBackfillStatus(raw: unknown): BackfillStatusDto {
       ? (value.synchronizedIntervals as BackfillStatusDto["synchronizedIntervals"])
       : [],
     lastProcessedChunk:
-      value.lastProcessedChunk &&
-      typeof value.lastProcessedChunk === "object"
+      value.lastProcessedChunk && typeof value.lastProcessedChunk === "object"
         ? (value.lastProcessedChunk as BackfillStatusDto["lastProcessedChunk"])
         : null,
     lastRunErrorCode:
@@ -463,9 +490,7 @@ export async function fetchBackfillStatus(
     `/marketplace-accounts/${accountId}/backfill/status`,
   );
   if (!response.ok) {
-    throw new ApiFetchError(
-      "Não foi possível carregar o status do histórico.",
-    );
+    throw new ApiFetchError("Não foi possível carregar o status do histórico.");
   }
   return normalizeBackfillStatus(await response.json());
 }
@@ -534,7 +559,10 @@ export async function runBackfillNextChunk(
   }
 
   if (response.status === 401) {
-    throw new ApiFetchError("Sessão expirada. Entre novamente.", "UNAUTHENTICATED");
+    throw new ApiFetchError(
+      "Sessão expirada. Entre novamente.",
+      "UNAUTHENTICATED",
+    );
   }
   if (response.status === 429) {
     const retryAfterHeader = response.headers.get("Retry-After");
