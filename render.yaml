@@ -35,9 +35,9 @@ services:
     # CMD original do Dockerfile continua existindo e válido para uso
     # fora do Render; este dockerCommand apenas o substitui em runtime).
     dockerCommand: >-
-      /bin/sh -c "node node_modules/typeorm/cli.js migration:run -d
+      node node_modules/typeorm/cli.js migration:run -d
       dist/database/data-source.js && node
-      dist/database/seeds/create-admin.seed.js && exec node dist/main.js"
+      dist/database/seeds/create-admin.seed.js && exec node dist/main.js
     envVars:
       # --- Valores públicos e seguros (versionados) ----------------------
       - key: NODE_ENV
