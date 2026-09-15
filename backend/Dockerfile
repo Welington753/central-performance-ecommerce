@@ -46,6 +46,13 @@ COPY --from=prod-deps /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY --from=build /app/package.json ./package.json
 
+# Script de inicialização usado só pelo Render (CP2K-6B-3-R3): o Render
+# executa `dockerCommand` diretamente, sem interpretar operadores de shell
+# (&&, aspas) — o script concentra migration -> seed -> exec node em um
+# único executável. Nunca é usado pelo CMD abaixo (comportamento local
+# intacto).
+COPY --chown=node:node scripts/render-start.sh ./render-start.sh
+
 # Imagem oficial `node` já cria o usuário não-root "node" (uid 1000) — nunca
 # roda como root a partir daqui.
 RUN chown -R node:node /app

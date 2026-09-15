@@ -30,14 +30,13 @@ services:
     healthCheckPath: /health
     numInstances: 1
     # Sem disk, sem preDeployCommand (indisponível no plano free), sem
-    # worker/cron. Migration + seed idempotente rodam aqui, encadeados,
-    # antes do processo principal — nunca alteram backend/Dockerfile (o
-    # CMD original do Dockerfile continua existindo e válido para uso
-    # fora do Render; este dockerCommand apenas o substitui em runtime).
-    dockerCommand: >-
-      node node_modules/typeorm/cli.js migration:run -d
-      dist/database/data-source.js && node
-      dist/database/seeds/create-admin.seed.js && exec node dist/main.js
+    # worker/cron. O Render executa dockerCommand diretamente, sem
+    # interpretar operadores de shell (&&, aspas) — por isso migration ->
+    # seed -> exec node vivem em backend/scripts/render-start.sh, copiado
+    # para a imagem em backend/Dockerfile. O CMD original do Dockerfile
+    # (node dist/main.js) continua intacto para uso fora do Render; este
+    # dockerCommand apenas o substitui em runtime.
+    dockerCommand: /bin/sh ./render-start.sh
     envVars:
       # --- Valores públicos e seguros (versionados) ----------------------
       - key: NODE_ENV

@@ -17,10 +17,18 @@ navegador -> https://<frontend>.onrender.com (Web Service, Next.js standalone)
                  |  /sync-runs, /integrations (inclui callback Shopee/ML)
                  v
              https://<backend>.onrender.com (Web Service, NestJS)
-                 |  dockerCommand: migration:run -> seed -> node dist/main.js
+                 |  dockerCommand: /bin/sh ./render-start.sh
+                 |  (migration:run -> seed -> exec node dist/main.js)
                  v
              Render Postgres Free (1 GB, expira em 30 dias, sem backup)
 ```
+
+O Render executa `dockerCommand` diretamente, sem interpretar operadores
+de shell (`&&`, aspas) — por isso a sequência migration → seed → exec
+Nest vive em `backend/scripts/render-start.sh`, copiado para a imagem
+por `backend/Dockerfile` e invocado como um único executável e argumento
+(`/bin/sh ./render-start.sh`). O `CMD` original do Dockerfile (`node
+dist/main.js`) permanece intacto para uso fora do Render.
 
 O navegador **nunca** acessa a URL do backend diretamente — só a do
 frontend. Isso é necessário porque `onrender.com` está na Public Suffix
