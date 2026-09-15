@@ -16,6 +16,7 @@ function buildSyncRun(overrides: Partial<SyncRun>): SyncRun {
     finishedAt: null,
     dateFrom: null,
     dateTo: null,
+    coveredThrough: null,
     recordsRead: 0,
     recordsCreated: 0,
     recordsUpdated: 0,

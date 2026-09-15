@@ -62,6 +62,17 @@ export class SyncRun {
   @Column({ type: 'timestamptz', nullable: true })
   dateTo!: Date | null;
 
+  /**
+   * Checkpoint CP2K-5C-1: até onde a janela (`dateFrom`/`dateTo`) foi de
+   * fato ENUMERADA POR INTEIRO quando um safety cap interrompe a
+   * sincronização (`status = 'PARTIAL'`) — `null` quando nenhum prefixo foi
+   * provado (cap antes de concluir qualquer bloco) ou quando o status não é
+   * `PARTIAL`. Nunca a janela requisitada inteira; nunca usado por `SUCCESS`
+   * (que usa `dateTo` diretamente) nem por `FAILED`/`RUNNING`.
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  coveredThrough!: Date | null;
+
   @Column({ type: 'int', default: 0 })
   recordsRead!: number;
 

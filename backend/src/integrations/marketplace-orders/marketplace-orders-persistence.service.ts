@@ -14,6 +14,22 @@ export interface AccountSyncCoverage {
 
 export class SyncAlreadyRunningError extends Error {}
 
+/**
+ * `coveredThrough` fora de `[date_from, date_to]` do próprio run (Checkpoint
+ * CP2K-5C-1) — nunca inclui os valores reais no `message` (nem a fronteira
+ * recebida, nem `date_from`/`date_to` armazenados): só o código fechado,
+ * mesmo padrão de `ShopeeOrdersSyncError`/erros de vocabulário fechado do
+ * projeto. O CHECK `CK_sync_runs_covered_through_within_period` (migration)
+ * é a última linha de defesa contra QUALQUER escritor futuro; esta exceção
+ * é a validação em nível de aplicação que detecta o mesmo problema antes de
+ * qualquer escrita, com uma mensagem própria do domínio.
+ */
+export class InvalidCoveredThroughError extends Error {
+  constructor() {
+    super('INVALID_COVERED_THROUGH');
+  }
+}
+
 export interface BeginSyncRunInput {
   marketplaceAccountId: string;
   marketplace: Marketplace;
@@ -178,25 +194,124 @@ export class MarketplaceOrdersPersistenceService {
   }
 
   /**
-   * Cobertura já sincronizada com sucesso para UMA conta — base tanto da
-   * janela incremental (`computeIncrementalSyncWindow`) quanto do backfill
-   * histórico (`computeBackfillChunkWindow`/`oldestFrom`). `oldestRunRecordsRead`
-   * é o `records_read` do run SUCCESS mais antigo (por `date_from`): quando é
-   * `0`, o provedor já confirmou que não há pedido mais antigo que aquela
-   * janela — sinal de "backfill completo" sem precisar de nenhuma coluna
-   * nova (nunca inferido da menor/maior data de PEDIDO, só de runs SUCCESS
-   * reais, que é o que prova cobertura de verdade).
+   * Finaliza um `sync_run` como `PARTIAL` (Checkpoint CP2K-5C-1) — usado
+   * exclusivamente quando um safety cap interrompe uma sincronização,
+   * NUNCA para falha real de provider/parsing/mapping/persistência (isso
+   * continua `finalizeSyncRunFailure`). Ao contrário de
+   * `finalizeSyncRunIncomplete` (que grava `FAILED`, sem nenhum conceito de
+   * prefixo provado), esta grava `coveredThrough` — `null` quando o cap
+   * ocorreu antes de concluir qualquer bloco (nenhum prefixo provado, igual
+   * a `FAILED` para efeito de cobertura), ou o fim do último bloco
+   * inteiramente enumerado.
+   *
+   * Uma única leitura (nunca escrita) valida `coveredThrough` contra o
+   * `date_from`/`date_to` JÁ ARMAZENADOS deste run antes de qualquer
+   * escrita — nunca confia em uma cópia separada em memória que o chamador
+   * possa ter deixado dessincronizar. Quando válido (ou `null`), a
+   * finalização inteira é UM ÚNICO `UPDATE` atômico — nunca duas escritas
+   * separadas, nunca um estado intermediário com `status` novo e contadores
+   * antigos (ou vice-versa). Lança {@link InvalidCoveredThroughError} sem
+   * escrever nada quando a validação falha — mesmo comportamento do CHECK
+   * `CK_sync_runs_covered_through_within_period` da migration, verificado
+   * aqui antes para dar ao chamador um erro de domínio claro em vez de uma
+   * violação de constraint Postgres crua.
+   */
+  async finalizeSyncRunPartial(
+    syncRunId: string,
+    counts: {
+      ordersFetched: number;
+      ordersCreated: number;
+      ordersUpdated: number;
+      recordsFailed: number;
+      pagesFetched: number;
+      itemsPersisted: number;
+    },
+    coveredThrough: Date | null,
+    errorCode: string,
+    errorSummary: string,
+    finishedAt: Date,
+  ): Promise<void> {
+    if (coveredThrough !== null) {
+      const [row] = await this.dataSource.query<
+        Array<{ date_from: Date | null; date_to: Date | null }>
+      >(`SELECT date_from, date_to FROM sync_runs WHERE id = $1`, [syncRunId]);
+      const withinPeriod =
+        row !== undefined &&
+        row.date_from !== null &&
+        row.date_to !== null &&
+        coveredThrough.getTime() >= row.date_from.getTime() &&
+        coveredThrough.getTime() <= row.date_to.getTime();
+      if (!withinPeriod) {
+        throw new InvalidCoveredThroughError();
+      }
+    }
+
+    await this.dataSource.query(
+      `UPDATE sync_runs
+          SET status = $2, finished_at = $3, covered_through = $4,
+              records_read = $5, records_created = $6, records_updated = $7,
+              records_failed = $8, pages_fetched = $9, items_persisted = $10,
+              error_code = $11, error_summary = $12
+        WHERE id = $1`,
+      [
+        syncRunId,
+        SyncRunStatus.PARTIAL,
+        finishedAt,
+        coveredThrough,
+        counts.ordersFetched,
+        counts.ordersCreated,
+        counts.ordersUpdated,
+        counts.recordsFailed,
+        counts.pagesFetched,
+        counts.itemsPersisted,
+        errorCode,
+        errorSummary,
+      ],
+    );
+  }
+
+  /**
+   * Cobertura já PROVADA para UMA conta — base tanto da janela incremental
+   * (`computeIncrementalSyncWindow`) quanto do backfill histórico
+   * (`computeBackfillChunkWindow`/`oldestFrom`). Duas fontes contribuem
+   * intervalo (Checkpoint CP2K-5C-1): `SUCCESS` inteiro (`date_from` até
+   * `date_to`, como sempre) e `PARTIAL` com `covered_through` PREENCHIDO
+   * (`date_from` até `covered_through` — nunca até `date_to`, que ali é só a
+   * janela REQUISITADA, não a provada). `PARTIAL` com `covered_through`
+   * nulo (cap antes de concluir qualquer bloco) e `FAILED`/`RUNNING` nunca
+   * contribuem — idêntico ao comportamento anterior a este checkpoint.
+   *
+   * `oldestRunRecordsRead` continua EXCLUSIVAMENTE calculado a partir de
+   * runs `SUCCESS` (nunca `PARTIAL`, mesmo que ele tenha `date_from` mais
+   * antigo) — é o `records_read` do run SUCCESS mais antigo (por
+   * `date_from`): quando é `0`, o provedor já confirmou que não há pedido
+   * mais antigo que aquela janela — sinal de "backfill completo" que só um
+   * SUCCESS real pode emitir (um `PARTIAL` nunca prova exaustão, só um
+   * prefixo).
    */
   async getAccountSyncCoverage(
     accountId: string,
   ): Promise<AccountSyncCoverage> {
     const rows = await this.dataSource.query<
-      Array<{ date_from: Date; date_to: Date; records_read: number }>
+      Array<{
+        date_from: Date;
+        effective_to: Date;
+        status: string;
+        records_read: number;
+      }>
     >(
-      `SELECT date_from, date_to, records_read
+      `SELECT date_from,
+              CASE WHEN status = 'SUCCESS' THEN date_to ELSE covered_through END
+                AS effective_to,
+              status,
+              records_read
          FROM sync_runs
-        WHERE marketplace_account_id = $1 AND status = 'SUCCESS'
-          AND date_from IS NOT NULL AND date_to IS NOT NULL
+        WHERE marketplace_account_id = $1
+          AND date_from IS NOT NULL
+          AND (
+            (status = 'SUCCESS' AND date_to IS NOT NULL)
+            OR (status = 'PARTIAL' AND covered_through IS NOT NULL)
+          )
         ORDER BY date_from ASC`,
       [accountId],
     );
@@ -204,12 +319,15 @@ export class MarketplaceOrdersPersistenceService {
       return { intervals: [], oldestFrom: null, oldestRunRecordsRead: null };
     }
     const intervals = mergeIntervals(
-      rows.map((row) => ({ from: row.date_from, to: row.date_to })),
+      rows.map((row) => ({ from: row.date_from, to: row.effective_to })),
     );
+    const oldestSuccessRow = rows.find((row) => row.status === 'SUCCESS');
     return {
       intervals,
       oldestFrom: rows[0].date_from,
-      oldestRunRecordsRead: rows[0].records_read,
+      oldestRunRecordsRead: oldestSuccessRow
+        ? oldestSuccessRow.records_read
+        : null,
     };
   }
 

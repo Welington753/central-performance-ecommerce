@@ -7,10 +7,12 @@ import {
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
 import { SyncRun } from '../../sync/sync-run.entity';
+import { SyncRunsCoveredThrough1788800000000 } from '../../database/migrations/1788800000000-sync-runs-covered-through';
 import type { MappedOrderRecord } from './mapped-order-record';
 import { MarketplaceOrder } from './marketplace-order.entity';
 import { MarketplaceOrderItem } from './marketplace-order-item.entity';
 import {
+  InvalidCoveredThroughError,
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
 } from './marketplace-orders-persistence.service';
@@ -1072,6 +1074,483 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
           startedAt: new Date(),
         }),
       ).resolves.toEqual(expect.any(String));
+    });
+  });
+
+  describe('sync_runs.covered_through — coluna e CHECK (Checkpoint CP2K-5C-1)', () => {
+    it('the migration added the column: a plain UPDATE with a valid value succeeds', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await dataSource.query(
+        `UPDATE sync_runs SET covered_through = $2 WHERE id = $1`,
+        [runId, new Date('2026-08-10T00:00:00.000Z')],
+      );
+
+      const [row] = await dataSource.query<
+        Array<{ covered_through: Date | null }>
+      >('SELECT covered_through FROM sync_runs WHERE id = $1', [runId]);
+      expect(row.covered_through).toEqual(new Date('2026-08-10T00:00:00.000Z'));
+    });
+
+    it('NULL is always accepted (default state of every pre-existing row)', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      const [row] = await dataSource.query<
+        Array<{ covered_through: Date | null }>
+      >('SELECT covered_through FROM sync_runs WHERE id = $1', [runId]);
+      expect(row.covered_through).toBeNull();
+    });
+
+    it('the CHECK rejects covered_through BEFORE date_from', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await expect(
+        dataSource.query(
+          `UPDATE sync_runs SET covered_through = $2 WHERE id = $1`,
+          [runId, new Date('2026-07-31T23:59:59.000Z')],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+    });
+
+    it('the CHECK rejects covered_through AFTER date_to', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await expect(
+        dataSource.query(
+          `UPDATE sync_runs SET covered_through = $2 WHERE id = $1`,
+          [runId, new Date('2026-08-15T00:00:01.000Z')],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+    });
+
+    it('the CHECK rejects a filled covered_through when date_from/date_to are NULL (raw insert, bypassing beginSyncRun)', async () => {
+      await expect(
+        dataSource.query(
+          `INSERT INTO sync_runs
+              (marketplace_account_id, marketplace, type, status, started_at,
+               date_from, date_to, covered_through)
+            VALUES ($1, 'SHOPEE', 'MANUAL', 'PARTIAL', now(), NULL, NULL, $2)`,
+          [accountId, new Date('2026-08-10T00:00:00.000Z')],
+        ),
+      ).rejects.toMatchObject({ code: '23514' });
+    });
+
+    it('down() removes the constraint and then the column, cleanly reverting up()', async () => {
+      const migration = new SyncRunsCoveredThrough1788800000000();
+      const queryRunner = dataSource.createQueryRunner();
+      try {
+        await migration.down(queryRunner);
+        const columnsAfterDown = await dataSource.query<
+          Array<{ column_name: string }>
+        >(
+          `SELECT column_name FROM information_schema.columns
+             WHERE table_name = 'sync_runs' AND column_name = 'covered_through'`,
+        );
+        expect(columnsAfterDown).toHaveLength(0);
+
+        await migration.up(queryRunner);
+        const columnsAfterUp = await dataSource.query<
+          Array<{ column_name: string }>
+        >(
+          `SELECT column_name FROM information_schema.columns
+             WHERE table_name = 'sync_runs' AND column_name = 'covered_through'`,
+        );
+        expect(columnsAfterUp).toHaveLength(1);
+      } finally {
+        await queryRunner.release();
+      }
+    });
+  });
+
+  describe('finalizeSyncRunPartial (Checkpoint CP2K-5C-1)', () => {
+    it('writes status=PARTIAL, all 6 counters, error and covered_through in a single UPDATE', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await service.finalizeSyncRunPartial(
+        runId,
+        {
+          ordersFetched: 5200,
+          ordersCreated: 5000,
+          ordersUpdated: 200,
+          recordsFailed: 0,
+          pagesFetched: 53,
+          itemsPersisted: 9800,
+        },
+        new Date('2026-08-09T00:00:00.000Z'),
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const [row] = await dataSource.query<
+        Array<{
+          status: string;
+          covered_through: Date | null;
+          records_read: number;
+          records_created: number;
+          records_updated: number;
+          records_failed: number;
+          pages_fetched: number;
+          items_persisted: number;
+          error_code: string | null;
+          error_summary: string | null;
+        }>
+      >(
+        `SELECT status, covered_through, records_read, records_created,
+                records_updated, records_failed, pages_fetched, items_persisted,
+                error_code, error_summary
+           FROM sync_runs WHERE id = $1`,
+        [runId],
+      );
+
+      expect(row.status).toBe('PARTIAL');
+      expect(row.covered_through).toEqual(new Date('2026-08-09T00:00:00.000Z'));
+      expect(row.records_read).toBe(5200);
+      expect(row.records_created).toBe(5000);
+      expect(row.records_updated).toBe(200);
+      expect(row.records_failed).toBe(0);
+      expect(row.pages_fetched).toBe(53);
+      expect(row.items_persisted).toBe(9800);
+      expect(row.error_code).toBe('SHOPEE_SAFETY_CAP_REACHED');
+      expect(row.error_summary).toBe(
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+      );
+    });
+
+    it('accepts covered_through = null (cap before completing any block)', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await service.finalizeSyncRunPartial(
+        runId,
+        {
+          ordersFetched: 100,
+          ordersCreated: 100,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 1,
+          itemsPersisted: 180,
+        },
+        null,
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const [row] = await dataSource.query<
+        Array<{ status: string; covered_through: Date | null }>
+      >('SELECT status, covered_through FROM sync_runs WHERE id = $1', [runId]);
+      expect(row.status).toBe('PARTIAL');
+      expect(row.covered_through).toBeNull();
+    });
+
+    it('rejects (application layer) a covered_through outside [date_from, date_to] with InvalidCoveredThroughError, and writes nothing', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+
+      await expect(
+        service.finalizeSyncRunPartial(
+          runId,
+          {
+            ordersFetched: 1,
+            ordersCreated: 1,
+            ordersUpdated: 0,
+            recordsFailed: 0,
+            pagesFetched: 1,
+            itemsPersisted: 1,
+          },
+          new Date('2026-09-01T00:00:00.000Z'), // depois de date_to
+          'SHOPEE_SAFETY_CAP_REACHED',
+          'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+          new Date(),
+        ),
+      ).rejects.toBeInstanceOf(InvalidCoveredThroughError);
+
+      const [row] = await dataSource.query<Array<{ status: string }>>(
+        'SELECT status FROM sync_runs WHERE id = $1',
+        [runId],
+      );
+      // Continua RUNNING: nenhuma escrita foi feita.
+      expect(row.status).toBe('RUNNING');
+    });
+
+    it('the error never includes order/credential data — only the fixed domain code', () => {
+      expect(new InvalidCoveredThroughError().message).toBe(
+        'INVALID_COVERED_THROUGH',
+      );
+    });
+
+    it('the run leaves RUNNING (frees the active-run-per-account unique index)', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunPartial(
+        runId,
+        {
+          ordersFetched: 1,
+          ordersCreated: 1,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 1,
+          itemsPersisted: 1,
+        },
+        new Date('2026-08-05T00:00:00.000Z'),
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      await expect(
+        service.beginSyncRun({
+          marketplaceAccountId: accountId,
+          marketplace: Marketplace.SHOPEE,
+          periodFrom: new Date(),
+          periodTo: new Date(),
+          startedAt: new Date(),
+        }),
+      ).resolves.toEqual(expect.any(String));
+    });
+  });
+
+  describe('getAccountSyncCoverage — PARTIAL (Checkpoint CP2K-5C-1)', () => {
+    it('a PARTIAL run WITH covered_through contributes coverage only up to that boundary, never up to date_to', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunPartial(
+        runId,
+        {
+          ordersFetched: 5000,
+          ordersCreated: 5000,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 50,
+          itemsPersisted: 9000,
+        },
+        new Date('2026-08-09T00:00:00.000Z'),
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage.intervals).toEqual([
+        {
+          from: new Date('2026-08-01T00:00:00.000Z'),
+          to: new Date('2026-08-09T00:00:00.000Z'),
+        },
+      ]);
+      expect(coverage.oldestFrom).toEqual(new Date('2026-08-01T00:00:00.000Z'));
+    });
+
+    it('a PARTIAL run with covered_through=NULL never contributes coverage', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunPartial(
+        runId,
+        {
+          ordersFetched: 10,
+          ordersCreated: 10,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 1,
+          itemsPersisted: 15,
+        },
+        null,
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage.intervals).toEqual([]);
+      expect(coverage.oldestFrom).toBeNull();
+    });
+
+    it('oldestRunRecordsRead ignores PARTIAL even when its date_from is earlier than every SUCCESS run, including records_read=0', async () => {
+      const partialRunId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-01-01T00:00:00.000Z'),
+        periodTo: new Date('2026-01-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunPartial(
+        partialRunId,
+        {
+          ordersFetched: 0,
+          ordersCreated: 0,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 1,
+          itemsPersisted: 0,
+        },
+        new Date('2026-01-10T00:00:00.000Z'),
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const successRunId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-06-01T00:00:00.000Z'),
+        periodTo: new Date('2026-07-01T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunSuccess(
+        successRunId,
+        {
+          ordersFetched: 7,
+          ordersCreated: 7,
+          ordersUpdated: 0,
+          pagesFetched: 1,
+          itemsPersisted: 7,
+        },
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      // O PARTIAL (2026-01) é mais antigo, mas o SUCCESS (2026-06) é o único
+      // que pode legitimamente alimentar oldestRunRecordsRead.
+      expect(coverage.oldestFrom).toEqual(new Date('2026-01-01T00:00:00.000Z'));
+      expect(coverage.oldestRunRecordsRead).toBe(7);
+    });
+
+    it('mixes SUCCESS and PARTIAL runs into a single merged, gap-free interval when they connect', async () => {
+      const partialRunId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-20T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunPartial(
+        partialRunId,
+        {
+          ordersFetched: 5000,
+          ordersCreated: 5000,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 50,
+          itemsPersisted: 9000,
+        },
+        new Date('2026-08-10T00:00:00.000Z'),
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const successRunId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-09T00:00:00.000Z'), // sobrepõe o PARTIAL
+        periodTo: new Date('2026-08-21T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunSuccess(
+        successRunId,
+        {
+          ordersFetched: 50,
+          ordersCreated: 50,
+          ordersUpdated: 0,
+          pagesFetched: 1,
+          itemsPersisted: 50,
+        },
+        new Date(),
+      );
+
+      const coverage = await service.getAccountSyncCoverage(accountId);
+      expect(coverage.intervals).toEqual([
+        {
+          from: new Date('2026-08-01T00:00:00.000Z'),
+          to: new Date('2026-08-21T00:00:00.000Z'),
+        },
+      ]);
+    });
+
+    it('a PARTIAL run still never counts in the SUCCESS-only coverage query used elsewhere (dashboard/KPI legacy)', async () => {
+      const runId = await service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.SHOPEE,
+        periodFrom: new Date('2026-08-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-15T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+      await service.finalizeSyncRunPartial(
+        runId,
+        {
+          ordersFetched: 10,
+          ordersCreated: 10,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 1,
+          itemsPersisted: 15,
+        },
+        new Date('2026-08-05T00:00:00.000Z'),
+        'SHOPEE_SAFETY_CAP_REACHED',
+        'Sincronização interrompida por teto de segurança antes do fim natural da janela.',
+        new Date(),
+      );
+
+      const successRows = await dataSource.query<Array<{ id: string }>>(
+        `SELECT id FROM sync_runs WHERE marketplace_account_id = $1 AND status = 'SUCCESS'`,
+        [accountId],
+      );
+      expect(successRows.find((r) => r.id === runId)).toBeUndefined();
     });
   });
 });
