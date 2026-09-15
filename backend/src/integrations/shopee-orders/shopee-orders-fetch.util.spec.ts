@@ -58,6 +58,7 @@ describe('fetchShopeeOrderSns', () => {
       orderSns: ['A', 'B'],
       pagesFetched: 1,
       capped: false,
+      completedThroughSeconds: null,
     });
     expect(getOrderList).toHaveBeenCalledTimes(1);
     expect(getOrderList).toHaveBeenCalledWith(
@@ -94,6 +95,7 @@ describe('fetchShopeeOrderSns', () => {
       orderSns: ['A', 'B', 'C'],
       pagesFetched: 3,
       capped: false,
+      completedThroughSeconds: null,
     });
     expect(callArg(getOrderList, 1)).toMatchObject({ cursor: 'cur-1' });
     expect(callArg(getOrderList, 2)).toMatchObject({ cursor: 'cur-2' });
@@ -106,7 +108,12 @@ describe('fetchShopeeOrderSns', () => {
       credentials: CREDENTIALS,
       blocks: [BLOCK],
     });
-    expect(result).toEqual({ orderSns: [], pagesFetched: 1, capped: false });
+    expect(result).toEqual({
+      orderSns: [],
+      pagesFetched: 1,
+      capped: false,
+      completedThroughSeconds: null,
+    });
   });
 
   it('nenhum bloco: devolve lista vazia sem nenhuma chamada', async () => {
@@ -116,7 +123,12 @@ describe('fetchShopeeOrderSns', () => {
       credentials: CREDENTIALS,
       blocks: [],
     });
-    expect(result).toEqual({ orderSns: [], pagesFetched: 0, capped: false });
+    expect(result).toEqual({
+      orderSns: [],
+      pagesFetched: 0,
+      capped: false,
+      completedThroughSeconds: null,
+    });
     expect(getOrderList).not.toHaveBeenCalled();
   });
 
@@ -170,6 +182,7 @@ describe('fetchShopeeOrderSns', () => {
       blocks: [BLOCK],
     });
     expect(result.capped).toBe(true);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(getOrderList).toHaveBeenCalledTimes(2);
   });
 
@@ -186,6 +199,7 @@ describe('fetchShopeeOrderSns', () => {
       blocks: [BLOCK],
     });
     expect(result.capped).toBe(true);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(getOrderList).toHaveBeenCalledTimes(1);
   });
 
@@ -208,6 +222,7 @@ describe('fetchShopeeOrderSns', () => {
       blocks: [BLOCK],
     });
     expect(result.capped).toBe(true);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(getOrderList).toHaveBeenCalledTimes(MAX_PAGES_PER_BLOCK);
   });
 
@@ -231,6 +246,7 @@ describe('fetchShopeeOrderSns', () => {
       blocks: [BLOCK],
     });
     expect(result.capped).toBe(true);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(result.orderSns.length).toBeLessThanOrEqual(
       MAX_TOTAL_ORDERS_PER_SYNC,
     );
@@ -275,6 +291,7 @@ describe('fetchShopeeOrderSns', () => {
     });
 
     expect(result.capped).toBe(false);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
     expect(getOrderList).toHaveBeenCalledTimes(1);
   });
@@ -297,6 +314,7 @@ describe('fetchShopeeOrderSns', () => {
     });
 
     expect(result.capped).toBe(true);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
     expect(getOrderList).toHaveBeenCalledTimes(1);
   });
@@ -321,6 +339,7 @@ describe('fetchShopeeOrderSns', () => {
     });
 
     expect(result.capped).toBe(false);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(result.orderSns.length).toBe(MAX_TOTAL_ORDERS_PER_SYNC - 50 + 100);
     expect(getOrderList).toHaveBeenCalledTimes(2);
   });
@@ -347,8 +366,194 @@ describe('fetchShopeeOrderSns', () => {
     });
 
     expect(result.capped).toBe(true);
+    expect(result.completedThroughSeconds).toBeNull();
     expect(result.orderSns.length).toBe(MAX_TOTAL_ORDERS_PER_SYNC - 50 + 100);
     expect(getOrderList).toHaveBeenCalledTimes(2);
+  });
+
+  describe('completedThroughSeconds (Checkpoint CP2K-5C-2)', () => {
+    const BLOCK_1: ShopeeSyncBlock = {
+      timeFrom: 1_700_000_000,
+      timeTo: 1_700_100_000,
+    };
+    const BLOCK_2: ShopeeSyncBlock = {
+      timeFrom: 1_700_099_999,
+      timeTo: 1_700_200_000,
+    };
+    const BLOCK_3: ShopeeSyncBlock = {
+      timeFrom: 1_700_199_999,
+      timeTo: 1_700_300_000,
+    };
+    const BLOCK_4: ShopeeSyncBlock = {
+      timeFrom: 1_700_299_999,
+      timeTo: 1_700_400_000,
+    };
+    const BLOCK_5: ShopeeSyncBlock = {
+      timeFrom: 1_700_399_999,
+      timeTo: 1_700_500_000,
+    };
+
+    function fullPage(prefix: string, length: number) {
+      return Array.from({ length }, (_, i) => `${prefix}-${i}`);
+    }
+
+    it('bloco concluído naturalmente, existe bloco seguinte e total >= MAX: para ANTES do próximo bloco, capped=true, completedThroughSeconds=timeTo do bloco concluído', async () => {
+      const getOrderList = jest.fn().mockResolvedValueOnce(
+        listSuccess(fullPage('b1', MAX_TOTAL_ORDERS_PER_SYNC), {
+          more: false,
+        }),
+      );
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1, BLOCK_2],
+      });
+
+      expect(result.capped).toBe(true);
+      expect(result.completedThroughSeconds).toBe(BLOCK_1.timeTo);
+      expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
+      // Nenhuma chamada com timeFrom do bloco 2 — o teto parou ANTES dele.
+      expect(getOrderList).toHaveBeenCalledTimes(1);
+      expect(getOrderList).not.toHaveBeenCalledWith(
+        expect.objectContaining({ timeFrom: BLOCK_2.timeFrom }),
+      );
+    });
+
+    it('mesmo cenário (total >= MAX), mas o bloco concluído é o ÚLTIMO da janela: capped=false, completedThroughSeconds=null — janela inteira enumerada', async () => {
+      const getOrderList = jest.fn().mockResolvedValueOnce(
+        listSuccess(fullPage('b1', MAX_TOTAL_ORDERS_PER_SYNC), {
+          more: false,
+        }),
+      );
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1],
+      });
+
+      expect(result.capped).toBe(false);
+      expect(result.completedThroughSeconds).toBeNull();
+      expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
+      expect(getOrderList).toHaveBeenCalledTimes(1);
+    });
+
+    it('cap no bloco 3 de 5 (more=true + teto): completedThroughSeconds é o timeTo do bloco 2 (último concluído)', async () => {
+      const getOrderList = jest
+        .fn()
+        .mockResolvedValueOnce(listSuccess(fullPage('b1', 10), { more: false }))
+        .mockResolvedValueOnce(listSuccess(fullPage('b2', 10), { more: false }))
+        .mockResolvedValueOnce(
+          listSuccess(fullPage('b3', MAX_TOTAL_ORDERS_PER_SYNC - 20), {
+            more: true,
+            nextCursor: 'cur-b3',
+          }),
+        );
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1, BLOCK_2, BLOCK_3, BLOCK_4, BLOCK_5],
+      });
+
+      expect(result.capped).toBe(true);
+      expect(result.completedThroughSeconds).toBe(BLOCK_2.timeTo);
+      expect(result.orderSns).toHaveLength(MAX_TOTAL_ORDERS_PER_SYNC);
+      expect(getOrderList).toHaveBeenCalledTimes(3);
+    });
+
+    it('cap no primeiro bloco (more=true + teto): completedThroughSeconds=null — nenhum bloco foi concluído ainda', async () => {
+      const getOrderList = jest.fn().mockResolvedValueOnce(
+        listSuccess(fullPage('b1', MAX_TOTAL_ORDERS_PER_SYNC), {
+          more: true,
+          nextCursor: 'cur-b1',
+        }),
+      );
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1, BLOCK_2],
+      });
+
+      expect(result.capped).toBe(true);
+      expect(result.completedThroughSeconds).toBeNull();
+      expect(getOrderList).toHaveBeenCalledTimes(1);
+    });
+
+    it('cursor anômalo (cíclico) no bloco 2: capped=true, completedThroughSeconds preserva a fronteira do bloco 1 (já concluído)', async () => {
+      const getOrderList = jest
+        .fn()
+        .mockResolvedValueOnce(listSuccess(fullPage('b1', 5), { more: false }))
+        .mockResolvedValueOnce(
+          listSuccess(fullPage('b2-p0', 5), {
+            more: true,
+            nextCursor: 'cur-cycle',
+          }),
+        )
+        .mockResolvedValueOnce(
+          listSuccess(fullPage('b2-p1', 5), {
+            more: true,
+            nextCursor: 'cur-cycle', // repete o cursor já visto — ciclo
+          }),
+        );
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1, BLOCK_2, BLOCK_3],
+      });
+
+      expect(result.capped).toBe(true);
+      expect(result.completedThroughSeconds).toBe(BLOCK_1.timeTo);
+      expect(getOrderList).toHaveBeenCalledTimes(3);
+      // Nenhuma chamada chegou a tocar o bloco 3.
+      expect(getOrderList).not.toHaveBeenCalledWith(
+        expect.objectContaining({ timeFrom: BLOCK_3.timeFrom }),
+      );
+    });
+
+    it('cursor vazio (anômalo) no bloco 2 com more=true: capped=true, completedThroughSeconds preserva a fronteira do bloco 1', async () => {
+      const getOrderList = jest
+        .fn()
+        .mockResolvedValueOnce(listSuccess(fullPage('b1', 5), { more: false }))
+        .mockResolvedValueOnce(
+          listSuccess(fullPage('b2', 5), {
+            more: true,
+            nextCursor: '' as unknown as string,
+          }),
+        );
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1, BLOCK_2],
+      });
+
+      expect(result.capped).toBe(true);
+      expect(result.completedThroughSeconds).toBe(BLOCK_1.timeTo);
+      expect(getOrderList).toHaveBeenCalledTimes(2);
+    });
+
+    it('enumeração COMPLETA de múltiplos blocos, sem nunca atingir o teto: capped=false, completedThroughSeconds=null', async () => {
+      const getOrderList = jest
+        .fn()
+        .mockResolvedValueOnce(listSuccess(fullPage('b1', 3), { more: false }))
+        .mockResolvedValueOnce(listSuccess(fullPage('b2', 4), { more: false }))
+        .mockResolvedValueOnce(listSuccess(fullPage('b3', 2), { more: false }));
+
+      const result = await fetchShopeeOrderSns({
+        client: { getOrderList },
+        credentials: CREDENTIALS,
+        blocks: [BLOCK_1, BLOCK_2, BLOCK_3],
+      });
+
+      expect(result.capped).toBe(false);
+      expect(result.completedThroughSeconds).toBeNull();
+      expect(result.orderSns).toHaveLength(9);
+      expect(getOrderList).toHaveBeenCalledTimes(3);
+    });
   });
 });
 

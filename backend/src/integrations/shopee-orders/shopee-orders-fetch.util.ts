@@ -50,6 +50,17 @@ export interface ShopeeOrderSnFetchResult {
   pagesFetched: number;
   /** `true` quando um teto de segurança interrompeu a busca antes do fim natural da janela. */
   capped: boolean;
+  /**
+   * Checkpoint CP2K-5C-2: `timeTo` do último bloco INTEIRAMENTE enumerado
+   * antes de um cap — a fronteira até onde a janela foi PROVADA, nunca a
+   * janela requisitada inteira. Sempre `null` quando `capped: false` (a
+   * janela inteira foi enumerada, o conceito de "fronteira parcial" não se
+   * aplica) e também `null` quando o cap ocorreu antes de concluir o
+   * PRIMEIRO bloco (nenhum prefixo provado ainda). Consumido por
+   * `finalizeSyncRunPartial` (Checkpoint CP2K-5C-1) — nunca usado aqui, só
+   * calculado.
+   */
+  completedThroughSeconds: number | null;
 }
 
 /**
@@ -63,6 +74,16 @@ export interface ShopeeOrderSnFetchResult {
  * pedidos, cursor vazio/repetido) — devolve `capped: true` com o que já foi
  * coletado; só lança `ShopeeOrdersSyncError` para uma falha real do
  * provedor (outcome que não é `success`).
+ *
+ * Laço externo INDEXADO (Checkpoint CP2K-5C-2, antigo "CP2K-5E") — nunca
+ * `for...of` — porque o teto total agora também é avaliado NA FRONTEIRA
+ * entre blocos (não só no meio de um bloco, correção do commit 36956ef):
+ * um bloco que termina naturalmente (`more=false`) e já atinge o teto
+ * PARA antes do próximo bloco, exceto quando é o ÚLTIMO bloco da janela —
+ * nesse caso a janela inteira foi enumerada e não há cap de verdade,
+ * mesmo com o total acima do teto (mesma lógica de "só ultrapassar não
+ * basta, sem `more=true` restante não é cap" do CP2K-5B-R1, agora também
+ * entre blocos). Saber se existe PRÓXIMO bloco exige o índice.
  */
 export async function fetchShopeeOrderSns(input: {
   client: OrderListClient;
@@ -72,8 +93,15 @@ export async function fetchShopeeOrderSns(input: {
   const orderSnSet = new Set<string>();
   const orderSns: string[] = [];
   let pagesFetched = 0;
+  // `timeTo` do último bloco que terminou naturalmente (more=false) — nunca
+  // do bloco corrente ainda em andamento. `null` até o primeiro bloco
+  // concluir; é exatamente o valor devolvido quando um cap acontece DENTRO
+  // de um bloco (meio de página ou anomalia de cursor), nunca recalculado
+  // ali.
+  let lastCompletedBlockTimeTo: number | null = null;
 
-  for (const block of input.blocks) {
+  for (let blockIndex = 0; blockIndex < input.blocks.length; blockIndex += 1) {
+    const block = input.blocks[blockIndex];
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
 
@@ -114,9 +142,16 @@ export async function fetchShopeeOrderSns(input: {
       // exceda o teto (cai no `if (!outcome.result.more) break` abaixo,
       // nunca no `return` deste bloco). Só quando `more=true` (existe página
       // não enumerada) E o teto já foi atingido/ultrapassado é que a busca
-      // para com `capped: true`, sem buscar mais nenhuma página.
+      // para com `capped: true` — a fronteira provada é a do último bloco
+      // ANTERIOR concluído (`null` se isto aconteceu ainda no primeiro
+      // bloco), nunca o bloco corrente, que não terminou de ser enumerado.
       if (outcome.result.more && orderSnSet.size >= MAX_TOTAL_ORDERS_PER_SYNC) {
-        return { orderSns, pagesFetched, capped: true };
+        return {
+          orderSns,
+          pagesFetched,
+          capped: true,
+          completedThroughSeconds: lastCompletedBlockTimeTo,
+        };
       }
 
       if (!outcome.result.more) break;
@@ -126,7 +161,12 @@ export async function fetchShopeeOrderSns(input: {
         // Defesa em profundidade: o cliente (CP2K-1) já garante `nextCursor`
         // não vazio quando `more=true`, mas nunca confia duas vezes sem
         // reconferir — nunca segue paginando com um cursor inconsistente.
-        return { orderSns, pagesFetched, capped: true };
+        return {
+          orderSns,
+          pagesFetched,
+          capped: true,
+          completedThroughSeconds: lastCompletedBlockTimeTo,
+        };
       }
       if (
         seenCursors.has(nextCursor) ||
@@ -134,14 +174,44 @@ export async function fetchShopeeOrderSns(input: {
       ) {
         // Cursor repetido (ciclo) OU teto de páginas deste bloco atingido —
         // nunca reenvia a mesma chamada em loop.
-        return { orderSns, pagesFetched, capped: true };
+        return {
+          orderSns,
+          pagesFetched,
+          capped: true,
+          completedThroughSeconds: lastCompletedBlockTimeTo,
+        };
       }
       seenCursors.add(nextCursor);
       cursor = nextCursor;
     }
+
+    // Bloco corrente terminou NATURALMENTE (more=false na última página) —
+    // a fronteira provada avança até aqui.
+    lastCompletedBlockTimeTo = block.timeTo;
+
+    const isLastBlock = blockIndex === input.blocks.length - 1;
+    if (!isLastBlock && orderSnSet.size >= MAX_TOTAL_ORDERS_PER_SYNC) {
+      // Teto atingido NA FRONTEIRA entre blocos (Checkpoint CP2K-5C-2):
+      // este bloco fechou por inteiro, mas ainda existe pelo menos mais um
+      // bloco na janela — para aqui, ANTES de fazer qualquer chamada para
+      // o próximo bloco. Quando este é o ÚLTIMO bloco, cai fora deste `if`
+      // e o laço externo termina sozinho — a janela inteira foi enumerada,
+      // nunca um cap de verdade, mesmo com o total acima do teto.
+      return {
+        orderSns,
+        pagesFetched,
+        capped: true,
+        completedThroughSeconds: block.timeTo,
+      };
+    }
   }
 
-  return { orderSns, pagesFetched, capped: false };
+  return {
+    orderSns,
+    pagesFetched,
+    capped: false,
+    completedThroughSeconds: null,
+  };
 }
 
 interface OrderDetailClient {
