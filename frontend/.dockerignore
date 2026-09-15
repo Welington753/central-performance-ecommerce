@@ -1,0 +1,34 @@
+# Checkpoint CP2K-6B-2A — nunca deixa segredo/estado local entrar no contexto
+# de build da imagem frontend. Mais restritivo que o .gitignore (nunca altera
+# o .gitignore em si). NEXT_PUBLIC_API_URL entra só como build ARG explícito
+# (Dockerfile), nunca lido de um .env copiado para a imagem.
+
+# Segredos e configuração local — NUNCA no contexto de build.
+.env
+.env.*
+
+# Controle de versão.
+.git
+.gitignore
+
+# Artefatos gerados localmente — sempre reconstruídos dentro da imagem.
+node_modules
+.next
+out
+coverage
+
+# Logs.
+*.log
+npm-debug.log*
+
+# Editor / SO.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Sessão do Claude Code.
+.claude
+CLAUDE.local.md
+
+*.zip

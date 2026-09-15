@@ -1,0 +1,43 @@
+# Checkpoint CP2K-6B-2A — nunca deixa segredo/estado local entrar no contexto
+# de build da imagem backend. Mais restritivo que o .gitignore (nunca altera
+# o .gitignore em si).
+
+# Segredos e configuração local — NUNCA no contexto de build.
+.env
+.env.*
+!.env.example
+
+# Controle de versão — nunca necessário dentro da imagem (build-info.json
+# cai em "unknown" sem .git, de propósito).
+.git
+.gitignore
+
+# Artefatos gerados localmente — sempre reconstruídos dentro da imagem.
+node_modules
+dist
+coverage
+
+# Logs.
+*.log
+npm-debug.log*
+
+# Banco de dados / estado local (nenhum arquivo de banco deveria existir
+# aqui, mas nunca por acidente).
+*.sqlite
+*.sqlite3
+*.db
+
+# Editor / SO.
+.vscode
+.idea
+.DS_Store
+Thumbs.db
+
+# Sessão do Claude Code (nunca relevante para a imagem).
+.claude
+CLAUDE.local.md
+
+# Documentação/artefatos do repositório inteiro que nunca deveriam estar no
+# contexto (o contexto de build já é só "backend/", mas alguns podem
+# acabar copiados via docker-compose/CI futuro apontando para a raiz).
+*.zip
