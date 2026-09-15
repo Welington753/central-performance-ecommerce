@@ -55,8 +55,11 @@ const FAILURE_SUMMARIES: Record<ShopeeOrdersSyncErrorCode, string> = {
  * (páginas, total de pedidos ou cursor anômalo — `shopee-orders-fetch.util.ts`)
  * interrompe a busca (Checkpoint CP2K-3B) — nunca parte do vocabulário
  * público de erro HTTP (`ShopeeOrdersSyncErrorCode`): este caminho NUNCA
- * lança, sempre devolve `status: 'INCOMPLETE'` com 200, mesmo mecanismo de
- * `finalizeSyncRunIncomplete` já usado pela quarentena de pedidos da Amazon.
+ * lança, sempre devolve `status: 'INCOMPLETE'` com 200. Desde o Checkpoint
+ * CP2K-5C-3, grava `status: 'PARTIAL'` via `finalizeSyncRunPartial`
+ * (nunca mais `finalizeSyncRunIncomplete`/`FAILED` — essa função continua
+ * existindo só para a quarentena de pedidos da Amazon, sem relação com
+ * safety cap).
  */
 const INCOMPLETE_ERROR_CODE = 'SHOPEE_SAFETY_CAP_REACHED';
 const INCOMPLETE_SUMMARY =
@@ -136,11 +139,12 @@ export class ShopeeOrdersSyncService {
         await this.accessTokenService.ensureValidShopCredentials(accountId);
 
       const blocks = splitShopeeSyncWindowIntoBlocks(window);
-      const { orderSns, pagesFetched, capped } = await fetchShopeeOrderSns({
-        client: this.client,
-        credentials,
-        blocks,
-      });
+      const { orderSns, pagesFetched, capped, completedThroughSeconds } =
+        await fetchShopeeOrderSns({
+          client: this.client,
+          credentials,
+          blocks,
+        });
 
       const detailOrders = await fetchShopeeOrderDetails({
         client: this.client,
@@ -160,7 +164,16 @@ export class ShopeeOrdersSyncService {
       finalized = true;
 
       if (capped) {
-        await this.persistence.finalizeSyncRunIncomplete(
+        // Checkpoint CP2K-5C-3: `completedThroughSeconds` (segundos desde a
+        // época, `shopee-orders-fetch.util.ts`) vira `covered_through`
+        // (instante) só quando não nulo — `null` significa "nenhum bloco
+        // inteiro foi provado ainda", propagado como `null` sem conversão,
+        // nunca inferido de `window`/`block` locais.
+        const coveredThrough =
+          completedThroughSeconds !== null
+            ? new Date(completedThroughSeconds * 1000)
+            : null;
+        await this.persistence.finalizeSyncRunPartial(
           syncRunId,
           {
             ordersFetched: orderSns.length,
@@ -170,6 +183,7 @@ export class ShopeeOrdersSyncService {
             pagesFetched,
             itemsPersisted: persistResult.itemsPersisted,
           },
+          coveredThrough,
           INCOMPLETE_ERROR_CODE,
           INCOMPLETE_SUMMARY,
           finishedAt,

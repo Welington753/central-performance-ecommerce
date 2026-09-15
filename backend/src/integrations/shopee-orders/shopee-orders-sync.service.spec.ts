@@ -88,6 +88,7 @@ function buildService(
     finalizeSyncRunSuccess: jest.fn().mockResolvedValue(undefined),
     finalizeSyncRunFailure: jest.fn().mockResolvedValue(undefined),
     finalizeSyncRunIncomplete: jest.fn().mockResolvedValue(undefined),
+    finalizeSyncRunPartial: jest.fn().mockResolvedValue(undefined),
     markAccountSynced: jest.fn().mockResolvedValue(undefined),
     ...overrides.persistence,
   };
@@ -358,69 +359,8 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
     expect(persistence.markAccountSynced).toHaveBeenCalledTimes(1);
   });
 
-  it('teto de segurança atingido: status INCOMPLETE, nunca lança, markAccountSynced NÃO chamado', async () => {
-    const { service, persistence } = buildService({
-      client: {
-        getOrderList: jest.fn().mockResolvedValue({
-          kind: 'success',
-          result: {
-            orders: [{ orderSn: 'A' }],
-            more: true,
-            nextCursor: '',
-            requestId: 'r',
-          },
-        }),
-      },
-    });
-
-    const result = await service.syncOrders(ACCOUNT_ID);
-
-    expect(result.status).toBe('INCOMPLETE');
-    expect(persistence.finalizeSyncRunIncomplete).toHaveBeenCalledTimes(1);
-    expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
-    expect(persistence.markAccountSynced).not.toHaveBeenCalled();
-    expect(persistence.finalizeSyncRunFailure).not.toHaveBeenCalled();
-  });
-
-  it('persiste mesmo quando capped=true (o que foi coletado antes do teto), atomicamente', async () => {
-    const { service, persistence } = buildService({
-      client: {
-        getOrderList: jest.fn().mockResolvedValue({
-          kind: 'success',
-          result: {
-            orders: [{ orderSn: 'A' }],
-            more: true,
-            nextCursor: '',
-            requestId: 'r',
-          },
-        }),
-        getOrderDetail: jest
-          .fn()
-          .mockResolvedValue(detailSuccess([validDetailOrder('A')])),
-      },
-      persistence: {
-        persistOrders: jest.fn().mockResolvedValue({
-          ordersCreated: 1,
-          ordersUpdated: 0,
-          itemsPersisted: 0,
-        }),
-      },
-    });
-
-    const result = await service.syncOrders(ACCOUNT_ID);
-    expect(result.status).toBe('INCOMPLETE');
-    expect(result.ordersCreated).toBe(1);
-    expect(persistence.persistOrders).toHaveBeenCalledTimes(1);
-  });
-
-  it(
-    'RISCO (Checkpoint CP2K-3B-R1): após INCOMPLETE, a cobertura nunca avança — ' +
-      'a próxima execução recalcula a MESMA janela, porque finalizeSyncRunIncomplete ' +
-      'grava status FAILED e getAccountSyncCoverage só considera SUCCESS',
-    async () => {
-      // getAccountSyncCoverage sempre devolve vazio (nenhum run SUCCESS
-      // jamais existiu) — cenário real após qualquer número de execuções
-      // capadas: nenhuma delas grava uma linha SUCCESS.
+  describe('teto de segurança (Checkpoint CP2K-5C-3): PARTIAL via finalizeSyncRunPartial', () => {
+    it('cap SEM fronteira (dentro do primeiro bloco): status INCOMPLETE, PARTIAL com covered_through null, nunca finalizeSyncRunIncomplete, nunca markAccountSynced', async () => {
       const { service, persistence } = buildService({
         client: {
           getOrderList: jest.fn().mockResolvedValue({
@@ -435,24 +375,157 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
         },
       });
 
-      await service.syncOrders(ACCOUNT_ID);
-      await service.syncOrders(ACCOUNT_ID);
+      const result = await service.syncOrders(ACCOUNT_ID);
 
-      expect(persistence.getAccountSyncCoverage).toHaveBeenCalledTimes(2);
+      expect(result.status).toBe('INCOMPLETE');
+      expect(persistence.finalizeSyncRunPartial).toHaveBeenCalledTimes(1);
+      expect(persistence.finalizeSyncRunPartial).toHaveBeenCalledWith(
+        'run-1',
+        {
+          ordersFetched: 1,
+          ordersCreated: 0,
+          ordersUpdated: 0,
+          recordsFailed: 0,
+          pagesFetched: 1,
+          itemsPersisted: 0,
+        },
+        null,
+        'SHOPEE_SAFETY_CAP_REACHED',
+        expect.any(String),
+        expect.any(Date),
+      );
+      expect(persistence.finalizeSyncRunIncomplete).not.toHaveBeenCalled();
+      expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
       expect(persistence.markAccountSynced).not.toHaveBeenCalled();
-      const beginCalls = persistence.beginSyncRun.mock.calls as unknown[][];
-      const firstWindow = beginCalls[0][0] as { periodFrom: Date };
-      const secondWindow = beginCalls[1][0] as { periodFrom: Date };
-      // Sem nenhum run SUCCESS registrado, `computeIncrementalSyncWindow`
-      // cai sempre em `computeInitialSyncWindow` (60 dias terminando agora)
-      // — o `periodFrom` das duas tentativas é o MESMO instante (a menos de
-      // milissegundos de execução do teste), provando que a segunda
-      // tentativa NUNCA avança além do que a primeira já tentou.
-      expect(
-        Math.abs(
-          firstWindow.periodFrom.getTime() - secondWindow.periodFrom.getTime(),
-        ),
-      ).toBeLessThan(5000);
-    },
-  );
+      expect(persistence.finalizeSyncRunFailure).not.toHaveBeenCalled();
+    });
+
+    it('cap COM fronteira (bloco 1 completo naturalmente, bloco 2 capado): PARTIAL com covered_through = timeTo do bloco 1', async () => {
+      const blockCalls: number[] = [];
+      const { service, persistence } = buildService({
+        client: {
+          getOrderList: jest
+            .fn()
+            .mockImplementation((input: { timeTo: number }) => {
+              blockCalls.push(input.timeTo);
+              if (blockCalls.length === 1) {
+                return Promise.resolve(listSuccess(['A']));
+              }
+              return Promise.resolve({
+                kind: 'success',
+                result: {
+                  orders: [{ orderSn: 'B' }],
+                  more: true,
+                  nextCursor: '',
+                  requestId: 'r',
+                },
+              });
+            }),
+          getOrderDetail: jest
+            .fn()
+            .mockResolvedValue(
+              detailSuccess([validDetailOrder('A'), validDetailOrder('B')]),
+            ),
+        },
+        persistence: {
+          persistOrders: jest.fn().mockResolvedValue({
+            ordersCreated: 2,
+            ordersUpdated: 0,
+            itemsPersisted: 0,
+          }),
+        },
+      });
+
+      const result = await service.syncOrders(ACCOUNT_ID);
+
+      expect(result.status).toBe('INCOMPLETE');
+      expect(blockCalls.length).toBeGreaterThanOrEqual(2);
+      const firstBlockTimeTo = blockCalls[0];
+      expect(persistence.finalizeSyncRunPartial).toHaveBeenCalledTimes(1);
+      const call = persistence.finalizeSyncRunPartial.mock.calls[0] as [
+        string,
+        unknown,
+        Date | null,
+        string,
+        string,
+        Date,
+      ];
+      const coveredThrough = call[2];
+      expect(coveredThrough).not.toBeNull();
+      expect((coveredThrough as Date).getTime()).toBe(firstBlockTimeTo * 1000);
+      expect(persistence.finalizeSyncRunIncomplete).not.toHaveBeenCalled();
+      expect(persistence.markAccountSynced).not.toHaveBeenCalled();
+    });
+
+    it('persiste mesmo quando capped=true (o que foi coletado antes do teto), atomicamente, antes de finalizar', async () => {
+      const { service, persistence } = buildService({
+        client: {
+          getOrderList: jest.fn().mockResolvedValue({
+            kind: 'success',
+            result: {
+              orders: [{ orderSn: 'A' }],
+              more: true,
+              nextCursor: '',
+              requestId: 'r',
+            },
+          }),
+          getOrderDetail: jest
+            .fn()
+            .mockResolvedValue(detailSuccess([validDetailOrder('A')])),
+        },
+        persistence: {
+          persistOrders: jest.fn().mockResolvedValue({
+            ordersCreated: 1,
+            ordersUpdated: 0,
+            itemsPersisted: 0,
+          }),
+        },
+      });
+
+      const result = await service.syncOrders(ACCOUNT_ID);
+      expect(result.status).toBe('INCOMPLETE');
+      expect(result.ordersCreated).toBe(1);
+      expect(persistence.persistOrders).toHaveBeenCalledTimes(1);
+    });
+
+    it(
+      'cap SEM fronteira em duas execuções consecutivas (cobertura mockada sempre vazia): ' +
+        'periodFrom não avança, nenhuma cobertura falsa é criada',
+      async () => {
+        const { service, persistence } = buildService({
+          client: {
+            getOrderList: jest.fn().mockResolvedValue({
+              kind: 'success',
+              result: {
+                orders: [{ orderSn: 'A' }],
+                more: true,
+                nextCursor: '',
+                requestId: 'r',
+              },
+            }),
+          },
+        });
+
+        await service.syncOrders(ACCOUNT_ID);
+        await service.syncOrders(ACCOUNT_ID);
+
+        expect(persistence.getAccountSyncCoverage).toHaveBeenCalledTimes(2);
+        expect(persistence.markAccountSynced).not.toHaveBeenCalled();
+        expect(persistence.finalizeSyncRunPartial).toHaveBeenCalledTimes(2);
+        for (const call of persistence.finalizeSyncRunPartial.mock
+          .calls as unknown[][]) {
+          expect(call[2]).toBeNull();
+        }
+        const beginCalls = persistence.beginSyncRun.mock.calls as unknown[][];
+        const firstWindow = beginCalls[0][0] as { periodFrom: Date };
+        const secondWindow = beginCalls[1][0] as { periodFrom: Date };
+        expect(
+          Math.abs(
+            firstWindow.periodFrom.getTime() -
+              secondWindow.periodFrom.getTime(),
+          ),
+        ).toBeLessThan(5000);
+      },
+    );
+  });
 });
