@@ -93,11 +93,16 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
     dateCreated: Date;
     items: SeedOrderItemInput[];
     logisticsClassification?: string;
+    /** CP2K-8B: campos financeiros confirmados — `undefined`/omitido vira `NULL` (nunca 0). */
+    shippingCostAmount?: string | null;
+    couponAmount?: string | null;
+    refundedAmount?: string | null;
   }): Promise<void> {
     const [order] = await dataSource.query<Array<{ id: string }>>(
       `INSERT INTO marketplace_orders
-          (marketplace_account_id, external_order_id, status, currency_id, total_amount, date_created, logistics_classification)
-        VALUES ($1, $2, $3, 'BRL', $4, $5, $6)
+          (marketplace_account_id, external_order_id, status, currency_id, total_amount, date_created, logistics_classification,
+           buyer_shipping_cost_amount, coupon_amount, refunded_amount)
+        VALUES ($1, $2, $3, 'BRL', $4, $5, $6, $7, $8, $9)
         RETURNING id`,
       [
         input.accountId,
@@ -106,6 +111,9 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
         input.totalAmount,
         input.dateCreated,
         input.logisticsClassification ?? 'UNKNOWN',
+        input.shippingCostAmount ?? null,
+        input.couponAmount ?? null,
+        input.refundedAmount ?? null,
       ],
     );
 
@@ -2535,6 +2543,511 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(dto.summary?.cancelledOrders).toBe(1);
       expect(dto.summary?.partiallyRefundedOrders).toBe(1);
       expect(dto.summary?.partiallyRefundedGrossAmount).toBe('9999.99');
+    });
+  });
+
+  /**
+   * CP2K-8B: três agregados financeiros confirmados (CP2K-7C/8A) — frete
+   * cobrado do comprador, desconto em cupom e valor efetivamente
+   * reembolsado. Nunca somados ao faturamento existente (`grossRevenue`)
+   * neste checkpoint; nunca misturados com `marketplace_fee_amount`/
+   * `taxes_amount`/`sale_fee_amount` (não implementados). `shippingCost`/
+   * `couponAmount` usam o MESMO conjunto de pedidos de `grossRevenue`
+   * (`status = 'paid'`); `refundedAmount` usa `status = 'partially_refunded'`.
+   */
+  describe('agregados financeiros confirmados (CP2K-8B)', () => {
+    it('sums buyer_shipping_cost_amount across two paid orders', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '9.90',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: '2',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '5.10',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('15.00');
+    });
+
+    it('sums coupon_amount across paid orders', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        couponAmount: '10.00',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: '2',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        couponAmount: '4.95',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.couponAmount).toBe('14.95');
+    });
+
+    it('sums refunded_amount across partially_refunded orders', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'pr-1',
+        status: 'partially_refunded',
+        totalAmount: '107.98',
+        dateCreated: IN_CURRENT,
+        items: [],
+        refundedAmount: '53.99',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'pr-2',
+        status: 'partially_refunded',
+        totalAmount: '75.98',
+        dateCreated: IN_CURRENT,
+        items: [],
+        refundedAmount: '37.99',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.refundedAmount).toBe('91.98');
+    });
+
+    it('never lets an individual NULL contribute to the sum — a null order sits alongside a real value', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'with-value',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '9.90',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'without-value',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: null,
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('9.90');
+    });
+
+    it('preserves "0.00" as a real contribution, never confused with an absent value', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        couponAmount: '0.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.couponAmount).toBe('0.00');
+    });
+
+    it('never lets a cancelled order contribute to shippingCost/couponAmount', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'cancelled-1',
+        status: 'cancelled',
+        totalAmount: '999.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '999.00',
+        couponAmount: '999.00',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'paid-1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '1.00',
+        couponAmount: '2.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('1.00');
+      expect(dto.summary?.couponAmount).toBe('2.00');
+    });
+
+    it('never lets a paid order contribute to refundedAmount', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'paid-1',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        refundedAmount: '999.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.refundedAmount).toBe('0.00');
+    });
+
+    it('isolates Meli 1 from Meli 2 — each account only sees its own financial totals', async () => {
+      const meli1 = await seedAccount({ nickname: 'Meli 1' });
+      const meli2 = await seedAccount({ nickname: 'Meli 2' });
+      await seedOrder({
+        accountId: meli1,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '9.90',
+      });
+      await seedOrder({
+        accountId: meli2,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '200.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '19.90',
+      });
+
+      const dtoMeli1 = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: meli1 },
+          REFERENCE_NOW,
+        ),
+      );
+      const dtoMeli2 = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: meli2 },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(dtoMeli1.summary?.shippingCost).toBe('9.90');
+      expect(dtoMeli2.summary?.shippingCost).toBe('19.90');
+    });
+
+    it('filters by accountId — the accountId scope query only sees its own account', async () => {
+      const accountId = await seedAccount();
+      const otherAccount = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        couponAmount: '5.00',
+      });
+      await seedOrder({
+        accountId: otherAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        couponAmount: '50.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.couponAmount).toBe('5.00');
+    });
+
+    it('filters by marketplace — MERCADO_LIVRE never picks up an AMAZON order', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: amazonAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '999.00',
+      });
+      const mlAccount = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      await seedOrder({
+        accountId: mlAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '1.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { marketplace: 'MERCADO_LIVRE' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('1.00');
+    });
+
+    it('consolidated ALL sums every marketplace/account in scope', async () => {
+      const meli1 = await seedAccount();
+      const meli2 = await seedAccount();
+      await seedOrder({
+        accountId: meli1,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '9.90',
+      });
+      await seedOrder({
+        accountId: meli2,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '200.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '19.90',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('29.80');
+    });
+
+    it('respects an explicit from/to period — an order outside the window never contributes', async () => {
+      const accountId = await seedAccount();
+      const outsideWindow = new Date('2025-01-01T12:00:00.000Z');
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old',
+        status: 'paid',
+        totalAmount: '999.00',
+        dateCreated: outsideWindow,
+        items: [],
+        couponAmount: '999.00',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'current',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        couponAmount: '2.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { from: '2026-08-01', to: '2026-08-31' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.couponAmount).toBe('2.00');
+    });
+
+    it('allTime includes every order regardless of the default rolling window', async () => {
+      const accountId = await seedAccount();
+      const longAgo = new Date('2020-01-01T12:00:00.000Z');
+      await seedOrder({
+        accountId,
+        externalOrderId: 'old',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: longAgo,
+        items: [],
+        shippingCostAmount: '3.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId, allTime: true },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('3.00');
+    });
+
+    it('logisticsScope FULL restricts the sum to MARKETPLACE_FULFILLED orders', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+        shippingCostAmount: '9.90',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'seller-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [],
+        shippingCostAmount: '5.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId, marketplace: 'MERCADO_LIVRE', logisticsScope: 'FULL' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('9.90');
+    });
+
+    it('logisticsScope NON_FULL restricts the sum to non-Full orders', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: 'full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+        shippingCostAmount: '9.90',
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'seller-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [],
+        shippingCostAmount: '5.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId, marketplace: 'MERCADO_LIVRE', logisticsScope: 'NON_FULL' },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('5.00');
+    });
+
+    it('Amazon and Shopee orders never contribute to these three fields', async () => {
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: amazonAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      const shopeeAccount = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      await seedOrder({
+        accountId: shopeeAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('0.00');
+      expect(dto.summary?.couponAmount).toBe('0.00');
+      expect(dto.summary?.refundedAmount).toBe('0.00');
+    });
+
+    it('returns zero for all three fields when the scope has no orders at all', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'pending',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.shippingCost).toBe('0.00');
+      expect(dto.summary?.couponAmount).toBe('0.00');
+      expect(dto.summary?.refundedAmount).toBe('0.00');
+    });
+
+    it('never adds shippingCost/couponAmount/refundedAmount into grossRevenue', async () => {
+      const accountId = await seedAccount();
+      await seedOrder({
+        accountId,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+        shippingCostAmount: '9.90',
+        couponAmount: '5.00',
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      expect(dto.summary?.grossRevenue).toBe('100.00');
     });
   });
 

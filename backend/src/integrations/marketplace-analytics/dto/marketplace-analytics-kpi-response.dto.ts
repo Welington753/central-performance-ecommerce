@@ -44,6 +44,18 @@ export interface AnalyticsKpiSummary {
   partiallyRefundedGrossAmount: string;
   /** COMPLETE quando não há nenhum `partially_refunded` no escopo; PARTIAL quando há ao menos um (valor de estorno em si nunca disponível hoje). */
   refundCoverage: RefundCoverage;
+  /**
+   * Três agregados financeiros confirmados (CP2K-8B) — exibidos à parte,
+   * NUNCA somados/subtraídos de `grossRevenue` acima. `shippingCost`/
+   * `couponAmount` usam o mesmo conjunto de pedidos `paid` de `grossRevenue`;
+   * `refundedAmount` usa `partially_refunded` (distinto de
+   * `partiallyRefundedGrossAmount`, que é o `total_amount` bruto desses
+   * pedidos, não o valor estornado em si). Sempre presentes (nunca
+   * `undefined`) — `"0.00"` quando não há dado, nunca omitido.
+   */
+  shippingCost: string;
+  couponAmount: string;
+  refundedAmount: string;
 }
 
 export interface AnalyticsKpiComparison {

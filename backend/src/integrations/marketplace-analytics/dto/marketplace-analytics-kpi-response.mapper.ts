@@ -145,6 +145,9 @@ function toSummary(totals: AnalyticsPeriodTotals): AnalyticsKpiSummary {
       totals.partiallyRefundedGrossAmountCents,
     ),
     refundCoverage: computeRefundCoverage(totals.partiallyRefundedOrders),
+    shippingCost: centsToDecimalString(totals.shippingCostCents),
+    couponAmount: centsToDecimalString(totals.couponAmountCents),
+    refundedAmount: centsToDecimalString(totals.refundedAmountCents),
   };
 }
 

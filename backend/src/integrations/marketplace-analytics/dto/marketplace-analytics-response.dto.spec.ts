@@ -20,6 +20,9 @@ function totals(
     cancelledRevenueCents: 0n,
     partiallyRefundedOrders: 0,
     partiallyRefundedGrossAmountCents: 0n,
+    shippingCostCents: 0n,
+    couponAmountCents: 0n,
+    refundedAmountCents: 0n,
     ...overrides,
   };
 }

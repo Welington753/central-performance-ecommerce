@@ -110,6 +110,21 @@ export interface AnalyticsPeriodTotals {
    * `refund-coverage.util.ts`).
    */
   partiallyRefundedGrossAmountCents: bigint;
+  /**
+   * Três agregados financeiros confirmados (CP2K-7C/8A, persistidos desde
+   * CP2K-7D) — SEMPRE `null` para Amazon/Shopee (colunas nunca preenchidas
+   * fora do Mercado Livre) e para pedidos Mercado Livre anteriores ao
+   * CP2K-7D. `shippingCostCents`/`couponAmountCents` usam o MESMO
+   * conjunto de pedidos de `grossRevenueCents` (`status = 'paid'`, nunca
+   * `grossSales`/cancelados); `refundedAmountCents` usa
+   * `status = 'partially_refunded'`. Nenhum dos três é somado/subtraído de
+   * `grossRevenueCents` — cada um é um agregado independente, exibido à
+   * parte (CP2K-8B: comissão/taxas/receita líquida ficam de fora,
+   * deliberadamente, deste checkpoint).
+   */
+  shippingCostCents: bigint;
+  couponAmountCents: bigint;
+  refundedAmountCents: bigint;
 }
 
 export interface AnalyticsAccountTotals {
@@ -693,6 +708,9 @@ export class MarketplaceAnalyticsService {
         gross_sales_orders: string;
         partially_refunded_orders: string;
         partially_refunded_gross_amount: string;
+        buyer_shipping_cost: string;
+        coupon_amount: string;
+        refunded_amount: string;
       }>
     >(
       `SELECT
@@ -707,7 +725,10 @@ export class MarketplaceAnalyticsService {
             WHERE status = $3 OR (status = $4 AND total_amount > 0)
           )::text AS gross_sales_orders,
           COUNT(*) FILTER (WHERE status = $7)::text AS partially_refunded_orders,
-          COALESCE(SUM(total_amount) FILTER (WHERE status = $7), 0)::text AS partially_refunded_gross_amount
+          COALESCE(SUM(total_amount) FILTER (WHERE status = $7), 0)::text AS partially_refunded_gross_amount,
+          COALESCE(SUM(buyer_shipping_cost_amount) FILTER (WHERE status = $3), 0)::text AS buyer_shipping_cost,
+          COALESCE(SUM(coupon_amount) FILTER (WHERE status = $3), 0)::text AS coupon_amount,
+          COALESCE(SUM(refunded_amount) FILTER (WHERE status = $7), 0)::text AS refunded_amount
         FROM marketplace_orders
         WHERE marketplace_account_id = ANY($1)
           AND date_created >= $2::timestamptz
@@ -785,6 +806,9 @@ export class MarketplaceAnalyticsService {
       partiallyRefundedGrossAmountCents: decimalCurrencyToCents(
         orderRow.partially_refunded_gross_amount,
       ),
+      shippingCostCents: decimalCurrencyToCents(orderRow.buyer_shipping_cost),
+      couponAmountCents: decimalCurrencyToCents(orderRow.coupon_amount),
+      refundedAmountCents: decimalCurrencyToCents(orderRow.refunded_amount),
     };
   }
 
@@ -1511,6 +1535,9 @@ function zeroPeriodTotals(): AnalyticsPeriodTotals {
     cancelledRevenueCents: 0n,
     partiallyRefundedOrders: 0,
     partiallyRefundedGrossAmountCents: 0n,
+    shippingCostCents: 0n,
+    couponAmountCents: 0n,
+    refundedAmountCents: 0n,
   };
 }
 
