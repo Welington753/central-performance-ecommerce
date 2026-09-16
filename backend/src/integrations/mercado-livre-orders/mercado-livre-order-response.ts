@@ -8,6 +8,31 @@ export interface RawMercadoLivreOrderItem {
   quantity: number;
   unitPrice: string;
   currencyId: string;
+  /**
+   * `order_items[].sale_fee` (CP2K-7D, campo financeiro confirmado) —
+   * comissão do Mercado Livre por item, como string monetária determinística
+   * (mesma conversão de `unitPrice`). `null` quando ausente, `null` quando
+   * presente mas de tipo inválido (política de campo opcional — nunca
+   * rejeita o pedido inteiro por causa de um campo financeiro auxiliar).
+   */
+  saleFee: string | null;
+}
+
+/**
+ * `order.payments[]` (CP2K-7D, campos financeiros confirmados via sondagem
+ * real da API — ver CP2K-7C) — cada campo já convertido para string
+ * monetária determinística na fronteira de validação (nunca aritmética de
+ * ponto flutuante depois disso). `status` ausente/inválido vira `'unknown'`
+ * — nunca `'approved'` por padrão, para nunca contaminar silenciosamente a
+ * agregação do mapper (só payments `'approved'` são elegíveis).
+ */
+export interface RawMercadoLivrePayment {
+  status: string;
+  marketplaceFee: string | null;
+  shippingCost: string | null;
+  taxesAmount: string | null;
+  couponAmount: string | null;
+  transactionAmountRefunded: string | null;
 }
 
 export interface RawMercadoLivreOrder {
@@ -28,6 +53,13 @@ export interface RawMercadoLivreOrder {
    * combinado) — nunca inventado.
    */
   shippingId: string | null;
+  /**
+   * `payments[]` (CP2K-7D) — nunca faz a página/pedido ser rejeitado por
+   * causa de um payment malformado: entradas que não são objeto são
+   * silenciosamente ignoradas (mesma política de campo auxiliar/opcional das
+   * demais extensões financeiras); ausente vira array vazio.
+   */
+  payments: RawMercadoLivrePayment[];
   items: RawMercadoLivreOrderItem[];
 }
 
@@ -110,6 +142,38 @@ function validateItemEntry(value: unknown): RawMercadoLivreOrderItem | null {
     quantity,
     unitPrice,
     currencyId,
+    saleFee: moneyToDecimalString(raw.sale_fee),
+  };
+}
+
+/**
+ * Campo financeiro opcional/auxiliar de um payment: ausente, `null`
+ * explícito, ou tipo inválido — todos viram `null` (mesma política dos
+ * demais campos opcionais deste validador, ex.: `variation_id`/`seller_sku`
+ * acima) — nunca rejeita o payment nem o pedido.
+ */
+function paymentMoneyField(value: unknown): string | null {
+  return moneyToDecimalString(value);
+}
+
+/**
+ * Um payment que não é objeto é descartado silenciosamente (nunca rejeita o
+ * pedido — ver doc de `RawMercadoLivrePayment`). `status` ausente/inválido
+ * vira `'unknown'`, nunca `'approved'` — só isso já garante que o mapper
+ * nunca teria um payment sem status reconhecido contando como elegível.
+ */
+function validatePaymentEntry(value: unknown): RawMercadoLivrePayment | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  return {
+    status: isNonEmptyString(raw.status) ? raw.status : 'unknown',
+    marketplaceFee: paymentMoneyField(raw.marketplace_fee),
+    shippingCost: paymentMoneyField(raw.shipping_cost),
+    taxesAmount: paymentMoneyField(raw.taxes_amount),
+    couponAmount: paymentMoneyField(raw.coupon_amount),
+    transactionAmountRefunded: paymentMoneyField(
+      raw.transaction_amount_refunded,
+    ),
   };
 }
 
@@ -153,6 +217,15 @@ function validateOrderEntry(value: unknown): RawMercadoLivreOrder | null {
       ? (shipping as Record<string, unknown>).id
       : undefined;
 
+  const rawPayments = raw.payments;
+  const payments: RawMercadoLivrePayment[] = [];
+  if (Array.isArray(rawPayments)) {
+    for (const rawPayment of rawPayments) {
+      const payment = validatePaymentEntry(rawPayment);
+      if (payment) payments.push(payment);
+    }
+  }
+
   return {
     externalOrderId: String(externalOrderId),
     status,
@@ -166,6 +239,7 @@ function validateOrderEntry(value: unknown): RawMercadoLivreOrder | null {
       typeof shippingId === 'string' || typeof shippingId === 'number'
         ? String(shippingId)
         : null,
+    payments,
     items,
   };
 }

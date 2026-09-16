@@ -404,6 +404,20 @@ export class MarketplaceOrdersPersistenceService {
    * `UNKNOWN` e o já armazenado não é, o valor armazenado (classificação e
    * tipo bruto) é preservado; em qualquer outro caso, o valor recebido
    * prevalece normalmente.
+   *
+   * Proteção adicional para os 5 campos financeiros do pedido (CP2K-7E,
+   * auditoria pós-CP2K-7D): `COALESCE(EXCLUDED.campo, marketplace_orders.campo)`
+   * — nunca `SET campo = EXCLUDED.campo` puro. O fluxo real de
+   * sincronização (manual, auto-sync e backfill — todos via
+   * `MercadoLivreOrdersSyncService.syncOrders`) só chama `/orders/search`,
+   * nunca `/orders/{id}`; e o parser não distingue "a fonte confirmou que
+   * este campo não existe" de "esta resposta específica não o trouxe" — as
+   * duas colapsam no mesmo `null` (ver `mercado-livre-order-response.ts`).
+   * Sem o COALESCE, uma ressincronização cujo payload não tivesse nenhum
+   * payment `approved` com o campo apagaria silenciosamente um valor
+   * financeiro já conhecido. Um valor NOVO NÃO NULO (incluindo `"0.00"`,
+   * nunca confundido com ausência) sempre substitui o antigo normalmente —
+   * só um `null` recebido nunca sobrescreve um valor já persistido.
    */
   async persistOrders(
     orders: MappedOrderRecord[],
@@ -434,8 +448,11 @@ export class MarketplaceOrdersPersistenceService {
                total_amount, pack_id, date_created, date_closed,
                marketplace_last_updated, source_status, fulfillment_channel,
                external_marketplace_id, logistics_classification, logistics_type,
+               marketplace_fee_amount, buyer_shipping_cost_amount, taxes_amount,
+               coupon_amount, refunded_amount,
                updated_at)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, now())
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
+                     $15, $16, $17, $18, $19, now())
             ON CONFLICT (marketplace_account_id, external_order_id) DO UPDATE
               SET status = EXCLUDED.status,
                   currency_id = EXCLUDED.currency_id,
@@ -459,6 +476,11 @@ export class MarketplaceOrdersPersistenceService {
                     THEN marketplace_orders.logistics_type
                     ELSE EXCLUDED.logistics_type
                   END,
+                  marketplace_fee_amount = COALESCE(EXCLUDED.marketplace_fee_amount, marketplace_orders.marketplace_fee_amount),
+                  buyer_shipping_cost_amount = COALESCE(EXCLUDED.buyer_shipping_cost_amount, marketplace_orders.buyer_shipping_cost_amount),
+                  taxes_amount = COALESCE(EXCLUDED.taxes_amount, marketplace_orders.taxes_amount),
+                  coupon_amount = COALESCE(EXCLUDED.coupon_amount, marketplace_orders.coupon_amount),
+                  refunded_amount = COALESCE(EXCLUDED.refunded_amount, marketplace_orders.refunded_amount),
                   updated_at = now()
               WHERE marketplace_orders.marketplace_last_updated IS NULL
                  OR EXCLUDED.marketplace_last_updated IS NULL
@@ -479,6 +501,11 @@ export class MarketplaceOrdersPersistenceService {
             order.externalMarketplaceId ?? null,
             order.logisticsClassification ?? 'UNKNOWN',
             order.logisticsType ?? null,
+            order.marketplaceFeeAmount ?? null,
+            order.buyerShippingCostAmount ?? null,
+            order.taxesAmount ?? null,
+            order.couponAmount ?? null,
+            order.refundedAmount ?? null,
           ],
         )) as Array<{ id: string; inserted: boolean }>;
 
@@ -501,8 +528,8 @@ export class MarketplaceOrdersPersistenceService {
           await queryRunner.query(
             `INSERT INTO marketplace_order_items
                 (order_id, external_item_id, variation_id, seller_sku, title,
-                 quantity, unit_price, currency_id)
-              VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+                 quantity, unit_price, currency_id, sale_fee_amount)
+              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
             [
               orderId,
               item.externalItemId,
@@ -512,6 +539,7 @@ export class MarketplaceOrdersPersistenceService {
               item.quantity,
               item.unitPrice,
               item.currencyId,
+              item.saleFeeAmount ?? null,
             ],
           );
           itemsPersisted += 1;

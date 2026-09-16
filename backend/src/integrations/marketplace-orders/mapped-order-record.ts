@@ -28,6 +28,21 @@ export interface MappedOrderRecord {
   externalMarketplaceId?: string | null;
   logisticsClassification?: LogisticsClassification;
   logisticsType?: string | null;
+  /**
+   * Campos financeiros confirmados do Mercado Livre (CP2K-7D) — string
+   * monetária decimal (mesma convenção de `totalAmount`), nunca centavos.
+   * `buyerShippingCostAmount` é o frete COBRADO DO COMPRADOR
+   * (`payments[].shipping_cost`), nunca o custo do vendedor — esse conceito
+   * não é persistido neste checkpoint. Opcionais porque só o Mercado Livre
+   * os preenche hoje — o mapper da Amazon nunca os define, então ficam
+   * `null` no banco (mesma convenção dos três campos exclusivos da Amazon
+   * acima).
+   */
+  marketplaceFeeAmount?: string | null;
+  buyerShippingCostAmount?: string | null;
+  taxesAmount?: string | null;
+  couponAmount?: string | null;
+  refundedAmount?: string | null;
   items: MappedOrderItemRecord[];
 }
 
@@ -39,4 +54,6 @@ export interface MappedOrderItemRecord {
   quantity: number;
   unitPrice: string;
   currencyId: string;
+  /** Comissão do Mercado Livre por item (CP2K-7D) — `null` quando ausente/não aplicável. */
+  saleFeeAmount?: string | null;
 }

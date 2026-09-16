@@ -56,6 +56,7 @@ describe('validateOrdersSearchResponseBody', () => {
       dateClosed: '2026-08-15T10:05:00.000-04:00',
       lastUpdated: '2026-08-15T10:05:00.000-04:00',
       shippingId: null,
+      payments: [],
       items: [
         {
           itemId: 'MLB111',
@@ -65,6 +66,7 @@ describe('validateOrdersSearchResponseBody', () => {
           quantity: 2,
           unitPrice: '99.95',
           currencyId: 'BRL',
+          saleFee: null,
         },
       ],
     });
@@ -226,6 +228,175 @@ describe('validateOrdersSearchResponseBody', () => {
       );
       expect(result.valid).toBe(true);
       if (result.valid) expect(result.orders[0].shippingId).toBeNull();
+    });
+  });
+
+  describe('payments (CP2K-7D, campos financeiros confirmados)', () => {
+    function orderWithPayments(payments: unknown[]) {
+      return validOrder({ payments });
+    }
+
+    it('extracts every financial field of a payment as a money string', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([
+          orderWithPayments([
+            {
+              status: 'approved',
+              marketplace_fee: 12.5,
+              shipping_cost: 9.9,
+              taxes_amount: 1.23,
+              coupon_amount: 5,
+              transaction_amount_refunded: 0,
+            },
+          ]),
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments).toEqual([
+        {
+          status: 'approved',
+          marketplaceFee: '12.50',
+          shippingCost: '9.90',
+          taxesAmount: '1.23',
+          couponAmount: '5.00',
+          transactionAmountRefunded: '0.00',
+        },
+      ]);
+    });
+
+    it('defaults payments to an empty array when the order has none', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder()]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].payments).toEqual([]);
+    });
+
+    it('maps an absent financial field on a payment to null, never rejecting the order', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([orderWithPayments([{ status: 'approved' }])]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments).toEqual([
+        {
+          status: 'approved',
+          marketplaceFee: null,
+          shippingCost: null,
+          taxesAmount: null,
+          couponAmount: null,
+          transactionAmountRefunded: null,
+        },
+      ]);
+    });
+
+    it('maps an explicit null financial field on a payment to null, same as absent', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([
+          orderWithPayments([{ status: 'approved', taxes_amount: null }]),
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments[0].taxesAmount).toBeNull();
+    });
+
+    it('preserves zero as a distinct money string, never null', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([
+          orderWithPayments([{ status: 'approved', coupon_amount: 0 }]),
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments[0].couponAmount).toBe('0.00');
+    });
+
+    it('maps a wrong-typed financial field to null, never rejecting the order (optional-field policy)', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([
+          orderWithPayments([
+            { status: 'approved', shipping_cost: 'not-a-number' },
+          ]),
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments[0].shippingCost).toBeNull();
+    });
+
+    it('keeps every payment when there are multiple', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([
+          orderWithPayments([
+            { status: 'approved', shipping_cost: 10 },
+            { status: 'cancelled', shipping_cost: 20 },
+          ]),
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments).toHaveLength(2);
+      expect(result.orders[0].payments.map((p) => p.status)).toEqual([
+        'approved',
+        'cancelled',
+      ]);
+    });
+
+    it('skips a malformed payment entry silently, without rejecting the order', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([
+          orderWithPayments(['not-an-object', { status: 'approved' }]),
+        ]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments).toHaveLength(1);
+    });
+
+    it('defaults status to "unknown" when a payment entry has no valid status, never treated as approved', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([orderWithPayments([{ shipping_cost: 10 }])]),
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.orders[0].payments[0].status).toBe('unknown');
+    });
+  });
+
+  describe('order_items[].sale_fee', () => {
+    it('extracts a present sale_fee as a money string', () => {
+      const order = validOrder();
+      (order.order_items[0] as Record<string, unknown>).sale_fee = 3.45;
+      const result = validateOrdersSearchResponseBody(validBody([order]));
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].items[0].saleFee).toBe('3.45');
+    });
+
+    it('defaults saleFee to null when absent', () => {
+      const result = validateOrdersSearchResponseBody(
+        validBody([validOrder()]),
+      );
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].items[0].saleFee).toBeNull();
+    });
+
+    it('preserves zero sale_fee as a distinct money string, never null', () => {
+      const order = validOrder();
+      (order.order_items[0] as Record<string, unknown>).sale_fee = 0;
+      const result = validateOrdersSearchResponseBody(validBody([order]));
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].items[0].saleFee).toBe('0.00');
+    });
+
+    it('maps a wrong-typed sale_fee to null, never rejecting the order', () => {
+      const order = validOrder();
+      (order.order_items[0] as Record<string, unknown>).sale_fee =
+        'not-a-number';
+      const result = validateOrdersSearchResponseBody(validBody([order]));
+      expect(result.valid).toBe(true);
+      if (result.valid) expect(result.orders[0].items[0].saleFee).toBeNull();
     });
   });
 });

@@ -42,6 +42,10 @@ export class MarketplaceOrderItem {
   @Column({ type: 'varchar', length: 3 })
   currencyId!: string;
 
+  /** Comissão do Mercado Livre por item (CP2K-7D) — nullable, sem default. */
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  saleFeeAmount!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

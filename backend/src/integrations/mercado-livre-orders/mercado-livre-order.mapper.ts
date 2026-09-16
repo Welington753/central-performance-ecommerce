@@ -2,12 +2,53 @@ import type {
   MappedOrderItemRecord,
   MappedOrderRecord,
 } from '../marketplace-orders/mapped-order-record';
+import {
+  centsToDecimalString,
+  decimalStringToCents,
+} from '../marketplace-orders/money.util';
 import type {
   RawMercadoLivreOrder,
   RawMercadoLivreOrderItem,
+  RawMercadoLivrePayment,
 } from './mercado-livre-order-response';
 
 export type { MappedOrderItemRecord, MappedOrderRecord };
+
+/**
+ * Único status de payment elegível para o agregado financeiro do pedido
+ * (CP2K-7D, regra confirmada por sondagem real — ver preflight CP2K-7D):
+ * `approved` é o único estado documentado do Mercado Livre que representa um
+ * pagamento efetivamente concluído. Qualquer outro status (`cancelled`,
+ * `rejected`, `in_process`, `refunded`, `charged_back`, `unknown`...) nunca
+ * contribui para a soma — evita contar dinheiro de um pagamento que nunca se
+ * efetivou (ou já foi desfeito) como se fosse receita/custo real do pedido.
+ */
+const ELIGIBLE_PAYMENT_STATUS = 'approved';
+
+/**
+ * Soma um campo monetário só entre os payments elegíveis — em centavos
+ * (`bigint`), nunca em `float` (mesma convenção de `money.util.ts`).
+ * `null` quando NENHUM payment elegível tem o campo presente (nem sequer um
+ * `null` explícito vira contribuição) — distinto de zero, que é preservado
+ * quando pelo menos um payment elegível tem exatamente esse valor.
+ */
+function sumEligiblePaymentField(
+  payments: readonly RawMercadoLivrePayment[],
+  field: keyof Omit<RawMercadoLivrePayment, 'status'>,
+): string | null {
+  const values = payments
+    .filter((payment) => payment.status === ELIGIBLE_PAYMENT_STATUS)
+    .map((payment) => payment[field])
+    .filter((value): value is string => value !== null);
+
+  if (values.length === 0) return null;
+
+  const totalCents = values.reduce(
+    (sum, value) => sum + decimalStringToCents(value),
+    0n,
+  );
+  return centsToDecimalString(totalCents);
+}
 
 // A allowlist real acontece em `mercado-livre-order-response.ts`; este
 // mapper só converte tipos, nunca usa spread do objeto bruto recebido da
@@ -50,6 +91,20 @@ export function mapMercadoLivreOrder(
     dateCreated,
     dateClosed: toDateOrNull(raw.dateClosed),
     marketplaceLastUpdated: toDateOrNull(raw.lastUpdated),
+    marketplaceFeeAmount: sumEligiblePaymentField(
+      raw.payments,
+      'marketplaceFee',
+    ),
+    buyerShippingCostAmount: sumEligiblePaymentField(
+      raw.payments,
+      'shippingCost',
+    ),
+    taxesAmount: sumEligiblePaymentField(raw.payments, 'taxesAmount'),
+    couponAmount: sumEligiblePaymentField(raw.payments, 'couponAmount'),
+    refundedAmount: sumEligiblePaymentField(
+      raw.payments,
+      'transactionAmountRefunded',
+    ),
     items: raw.items.map(mapMercadoLivreOrderItem),
   };
 }
@@ -65,5 +120,6 @@ function mapMercadoLivreOrderItem(
     quantity: raw.quantity,
     unitPrice: raw.unitPrice,
     currencyId: raw.currencyId,
+    saleFeeAmount: raw.saleFee,
   };
 }

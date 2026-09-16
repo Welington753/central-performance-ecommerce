@@ -124,6 +124,30 @@ export class MarketplaceOrder {
   @Column({ type: 'varchar', nullable: true })
   logisticsType!: string | null;
 
+  /**
+   * Campos financeiros confirmados do Mercado Livre (CP2K-7D) — mesma
+   * convenção decimal de `totalAmount` (`numeric(14,2)`, string decimal,
+   * nunca centavos nesta camada). Todos nullable, sem default: ausência
+   * nunca significa zero, e nenhum pedido existente antes desta migration
+   * precisou ser atualizado (ficam `NULL`, igual a qualquer pedido
+   * Amazon/Shopee, que nunca preenche estas colunas). `buyerShippingCost`
+   * é o frete COBRADO DO COMPRADOR — nunca o custo do vendedor.
+   */
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  marketplaceFeeAmount!: string | null;
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  buyerShippingCostAmount!: string | null;
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  taxesAmount!: string | null;
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  couponAmount!: string | null;
+
+  @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
+  refundedAmount!: string | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 

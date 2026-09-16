@@ -8,6 +8,7 @@ import {
 } from '../marketplace-accounts/marketplace-account.entity';
 import { SyncRun } from '../../sync/sync-run.entity';
 import { SyncRunsCoveredThrough1788800000000 } from '../../database/migrations/1788800000000-sync-runs-covered-through';
+import { MarketplaceOrdersFinancialFields1788900000000 } from '../../database/migrations/1788900000000-marketplace-orders-financial-fields';
 import type { MappedOrderRecord } from './mapped-order-record';
 import { MarketplaceOrder } from './marketplace-order.entity';
 import { MarketplaceOrderItem } from './marketplace-order-item.entity';
@@ -35,6 +36,11 @@ interface MarketplaceOrderRow {
   logistics_type: string | null;
   marketplace_last_updated: Date | null;
   updated_at: Date;
+  marketplace_fee_amount: string | null;
+  buyer_shipping_cost_amount: string | null;
+  taxes_amount: string | null;
+  coupon_amount: string | null;
+  refunded_amount: string | null;
 }
 
 interface MarketplaceOrderItemRow {
@@ -42,6 +48,7 @@ interface MarketplaceOrderItemRow {
   external_item_id: string;
   seller_sku: string | null;
   quantity: number;
+  sale_fee_amount: string | null;
 }
 
 function orderRecord(
@@ -639,6 +646,240 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
       expect(ml.source_status).toBeNull();
       expect(ml.fulfillment_channel).toBeNull();
       expect(ml.external_marketplace_id).toBeNull();
+    });
+
+    describe('campos financeiros (CP2K-7D)', () => {
+      it('insert grava os cinco campos financeiros do pedido e a comissão por item', async () => {
+        await service.persistOrders([
+          orderRecord({
+            marketplaceAccountId: accountId,
+            marketplaceFeeAmount: '12.50',
+            buyerShippingCostAmount: '9.90',
+            taxesAmount: '1.23',
+            couponAmount: '5.00',
+            refundedAmount: '0.00',
+            items: [
+              {
+                externalItemId: 'MLB1',
+                variationId: null,
+                sellerSku: 'SKU-1',
+                title: 'Produto 1',
+                quantity: 2,
+                unitPrice: '99.95',
+                currencyId: 'BRL',
+                saleFeeAmount: '4.99',
+              },
+            ],
+          }),
+        ]);
+
+        const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+          'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+          [accountId],
+        );
+        expect(order.marketplace_fee_amount).toBe('12.50');
+        expect(order.buyer_shipping_cost_amount).toBe('9.90');
+        expect(order.taxes_amount).toBe('1.23');
+        expect(order.coupon_amount).toBe('5.00');
+        expect(order.refunded_amount).toBe('0.00');
+
+        const [item] = await dataSource.query<MarketplaceOrderItemRow[]>(
+          'SELECT * FROM marketplace_order_items WHERE order_id = $1',
+          [order.id],
+        );
+        expect(item.sale_fee_amount).toBe('4.99');
+      });
+
+      it('registros sem os campos financeiros (Shopee/Amazon, ou Mercado Livre antigo) permanecem null — nunca zero', async () => {
+        await service.persistOrders([
+          orderRecord({ marketplaceAccountId: accountId }),
+        ]);
+
+        const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+          'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+          [accountId],
+        );
+        expect(order.marketplace_fee_amount).toBeNull();
+        expect(order.buyer_shipping_cost_amount).toBeNull();
+        expect(order.taxes_amount).toBeNull();
+        expect(order.coupon_amount).toBeNull();
+        expect(order.refunded_amount).toBeNull();
+
+        const [item] = await dataSource.query<MarketplaceOrderItemRow[]>(
+          'SELECT * FROM marketplace_order_items WHERE order_id = $1',
+          [order.id],
+        );
+        expect(item.sale_fee_amount).toBeNull();
+      });
+
+      it('upsert atualiza os campos financeiros em uma ressincronização', async () => {
+        await service.persistOrders([
+          orderRecord({
+            marketplaceAccountId: accountId,
+            buyerShippingCostAmount: '9.90',
+          }),
+        ]);
+
+        await service.persistOrders([
+          orderRecord({
+            marketplaceAccountId: accountId,
+            buyerShippingCostAmount: '19.90',
+          }),
+        ]);
+
+        const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+          'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+          [accountId],
+        );
+        expect(order.buyer_shipping_cost_amount).toBe('19.90');
+      });
+
+      // CP2K-7E (auditoria): o fluxo real de sincronização (manual, auto-sync
+      // e backfill — todos via `MercadoLivreOrdersSyncService.syncOrders`)
+      // NUNCA chama `/orders/{id}` (detalhe), só `/orders/search`. O
+      // validador/mapper não têm como distinguir "a fonte confirmou que este
+      // campo não existe" de "esta resposta específica não trouxe o campo"
+      // — as duas situações colapsam no mesmo `null` (ver
+      // `mercado-livre-order-response.ts`). Por isso um UPSERT de full
+      // overwrite incondicional (como o CP2K-7D implementou originalmente)
+      // arrisca apagar um valor financeiro já conhecido só porque uma
+      // ressincronização posterior recebeu um payload menos completo (ex.:
+      // nenhum payment `approved` nesta resposta específica) — nunca porque
+      // o Mercado Livre confirmou que o valor deixou de existir. A correção:
+      // `COALESCE(EXCLUDED.campo, marketplace_orders.campo)` — um novo valor
+      // não-nulo (incluindo "0.00", nunca confundido com ausência) sempre
+      // substitui; um novo `null` NUNCA apaga um valor não-nulo já
+      // persistido.
+      describe('preservação em re-sync com payload incompleto (CP2K-7E)', () => {
+        it('uma ressincronização sem um campo financeiro anteriormente conhecido preserva o valor antigo — nunca apaga silenciosamente (payload incompleto não é a fonte confirmando ausência)', async () => {
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              marketplaceFeeAmount: '12.50',
+              buyerShippingCostAmount: '9.90',
+              taxesAmount: '1.23',
+              couponAmount: '5.00',
+              refundedAmount: '3.00',
+              marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+            }),
+          ]);
+
+          // Ressincronização MAIS NOVA (marketplaceLastUpdated avança, então
+          // o UPSERT é aplicado normalmente) cujo payload desta vez não tem
+          // nenhum payment elegível com estes campos.
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              marketplaceFeeAmount: null,
+              buyerShippingCostAmount: null,
+              taxesAmount: null,
+              couponAmount: null,
+              refundedAmount: null,
+              marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+            }),
+          ]);
+
+          const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+            'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+            [accountId],
+          );
+          expect(order.marketplace_fee_amount).toBe('12.50');
+          expect(order.buyer_shipping_cost_amount).toBe('9.90');
+          expect(order.taxes_amount).toBe('1.23');
+          expect(order.coupon_amount).toBe('5.00');
+          expect(order.refunded_amount).toBe('3.00');
+        });
+
+        it('uma ressincronização com um NOVO valor não-nulo continua substituindo o antigo normalmente', async () => {
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              buyerShippingCostAmount: '9.90',
+              marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+            }),
+          ]);
+
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              buyerShippingCostAmount: '19.90',
+              marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+            }),
+          ]);
+
+          const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+            'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+            [accountId],
+          );
+          expect(order.buyer_shipping_cost_amount).toBe('19.90');
+        });
+
+        it('"0.00" é um valor válido e sobrescreve o antigo normalmente — nunca confundido com ausência/COALESCE', async () => {
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              couponAmount: '9.90',
+              marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+            }),
+          ]);
+
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              couponAmount: '0.00',
+              marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+            }),
+          ]);
+
+          const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+            'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+            [accountId],
+          );
+          expect(order.coupon_amount).toBe('0.00');
+        });
+
+        it('um pedido que nunca teve o campo continua null após uma ressincronização também sem o campo (COALESCE(null, null) = null, nunca erro)', async () => {
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+            }),
+          ]);
+
+          await service.persistOrders([
+            orderRecord({
+              marketplaceAccountId: accountId,
+              marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+            }),
+          ]);
+
+          const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+            'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+            [accountId],
+          );
+          expect(order.buyer_shipping_cost_amount).toBeNull();
+        });
+      });
+
+      it('persistOrders continua sendo chamado uma única vez por execução — vários pedidos financeiros em um único lote', async () => {
+        const result = await service.persistOrders([
+          orderRecord({
+            marketplaceAccountId: accountId,
+            externalOrderId: 'a',
+            buyerShippingCostAmount: '1.00',
+          }),
+          orderRecord({
+            marketplaceAccountId: accountId,
+            externalOrderId: 'b',
+            buyerShippingCostAmount: '2.00',
+          }),
+        ]);
+        expect(result).toEqual({
+          ordersCreated: 2,
+          ordersUpdated: 0,
+          itemsPersisted: 2,
+        });
+      });
     });
 
     it('never lets an older marketplaceLastUpdated overwrite a newer one already stored (stale event ignored)', async () => {
@@ -1551,6 +1792,117 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
         [accountId],
       );
       expect(successRows.find((r) => r.id === runId)).toBeUndefined();
+    });
+  });
+
+  describe('marketplace_orders financial fields migration (CP2K-7D)', () => {
+    it('columns are nullable, correctly typed numeric(14,2), and down() cleanly reverts up()', async () => {
+      const migration = new MarketplaceOrdersFinancialFields1788900000000();
+      const queryRunner = dataSource.createQueryRunner();
+      try {
+        const expectedOrderColumns = [
+          'marketplace_fee_amount',
+          'buyer_shipping_cost_amount',
+          'taxes_amount',
+          'coupon_amount',
+          'refunded_amount',
+        ];
+
+        const beforeDown = await dataSource.query<
+          Array<{
+            column_name: string;
+            is_nullable: string;
+            numeric_precision: number;
+            numeric_scale: number;
+            column_default: string | null;
+          }>
+        >(
+          `SELECT column_name, is_nullable, numeric_precision, numeric_scale, column_default
+             FROM information_schema.columns
+            WHERE table_name = 'marketplace_orders'
+              AND column_name = ANY($1)`,
+          [expectedOrderColumns],
+        );
+        expect(beforeDown).toHaveLength(5);
+        for (const column of beforeDown) {
+          expect(column.is_nullable).toBe('YES');
+          expect(column.numeric_precision).toBe(14);
+          expect(column.numeric_scale).toBe(2);
+          // Sem default — ausência de dado nunca vira zero silenciosamente.
+          expect(column.column_default).toBeNull();
+        }
+
+        const itemColumnBeforeDown = await dataSource.query<
+          Array<{ column_name: string; is_nullable: string }>
+        >(
+          `SELECT column_name, is_nullable FROM information_schema.columns
+            WHERE table_name = 'marketplace_order_items'
+              AND column_name = 'sale_fee_amount'`,
+        );
+        expect(itemColumnBeforeDown).toHaveLength(1);
+        expect(itemColumnBeforeDown[0].is_nullable).toBe('YES');
+
+        await migration.down(queryRunner);
+
+        const afterDown = await dataSource.query<
+          Array<{ column_name: string }>
+        >(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'marketplace_orders' AND column_name = ANY($1)`,
+          [expectedOrderColumns],
+        );
+        expect(afterDown).toHaveLength(0);
+
+        const itemColumnAfterDown = await dataSource.query<
+          Array<{ column_name: string }>
+        >(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'marketplace_order_items' AND column_name = 'sale_fee_amount'`,
+        );
+        expect(itemColumnAfterDown).toHaveLength(0);
+
+        await migration.up(queryRunner);
+
+        const afterUp = await dataSource.query<Array<{ column_name: string }>>(
+          `SELECT column_name FROM information_schema.columns
+            WHERE table_name = 'marketplace_orders' AND column_name = ANY($1)`,
+          [expectedOrderColumns],
+        );
+        expect(afterUp).toHaveLength(5);
+      } finally {
+        await queryRunner.release();
+      }
+    });
+
+    it('adding the columns never updates any pre-existing row (no mass UPDATE) — an order inserted before up() reruns stays untouched and null', async () => {
+      // Este pedido já existe ANTES do down()/up() abaixo — se a migration
+      // fizesse qualquer UPDATE em massa, este teste capturaria a regressão.
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          externalOrderId: 'pre-existing',
+          buyerShippingCostAmount: '9.90',
+        }),
+      ]);
+
+      const migration = new MarketplaceOrdersFinancialFields1788900000000();
+      const queryRunner = dataSource.createQueryRunner();
+      try {
+        await migration.down(queryRunner);
+        await migration.up(queryRunner);
+      } finally {
+        await queryRunner.release();
+      }
+
+      // down() removeu a coluna (dado antigo perdido, como esperado de um
+      // DROP COLUMN) e up() a recriou vazia — o pedido pré-existente
+      // continua válido, com o campo agora NULL (nunca 0, nunca erro).
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        `SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1 AND external_order_id = 'pre-existing'`,
+        [accountId],
+      );
+      expect(order).toBeDefined();
+      expect(order.buyer_shipping_cost_amount).toBeNull();
     });
   });
 });
