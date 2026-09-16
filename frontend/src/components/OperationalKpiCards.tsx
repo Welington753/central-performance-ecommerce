@@ -32,7 +32,7 @@ export function OperationalKpiCards({
   const cards: CardSpec[] = [
     {
       key: "paid-revenue",
-      label: "Faturamento de pedidos pagos",
+      label: "Faturamento bruto de pedidos pagos",
       value: formatBRL(summary.grossRevenue),
       comparisonPct: comparison.grossRevenuePct,
     },
@@ -53,7 +53,8 @@ export function OperationalKpiCards({
   return (
     <div className="flex flex-col gap-2">
       <p className="text-xs font-medium text-foreground/50">
-        Operacional — antes de tarifas, frete, impostos e Ads.
+        Operacional — valor bruto dos produtos, antes de cupons, reembolsos,
+        comissões, taxas, impostos, frete e Ads.
       </p>
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
         {cards.map((card) => {

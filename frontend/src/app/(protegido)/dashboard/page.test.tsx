@@ -5,6 +5,7 @@ import DashboardPage from "./page";
 import { ApiFetchError } from "@/lib/api";
 import type {
   AccountBreakdownEntry,
+  AnalyticsSummary,
   MarketplaceAnalyticsKpisDto,
   MarketplaceBreakdownEntry,
 } from "@/types/marketplace-analytics";
@@ -86,6 +87,34 @@ function kpisDto(
     },
     lastSync: null,
     full: null,
+    ...overrides,
+  };
+}
+
+function financialSummary(overrides: Partial<AnalyticsSummary> = {}): AnalyticsSummary {
+  return {
+    grossRevenue: "100.00",
+    orders: 1,
+    units: 1,
+    averageTicket: "100.00",
+    cancelledOrders: 0,
+    cancellationRate: 0,
+    distinctProducts: 1,
+    unitsPerOrder: 1,
+    avgUnitPrice: "100.00",
+    grossSalesRevenue: "100.00",
+    grossSalesOrders: 1,
+    grossSalesUnits: 1,
+    grossSalesAverageTicket: "100.00",
+    grossSalesAvgUnitPrice: "100.00",
+    cancelledUnits: 0,
+    cancelledRevenue: "0.00",
+    partiallyRefundedOrders: 0,
+    partiallyRefundedGrossAmount: "0.00",
+    refundCoverage: "COMPLETE",
+    shippingCost: "15.00",
+    couponAmount: "5.00",
+    refundedAmount: "8.00",
     ...overrides,
   };
 }
@@ -392,6 +421,9 @@ describe("DashboardPage — Todo o período (Fase 4)", () => {
           partiallyRefundedOrders: 0,
           partiallyRefundedGrossAmount: "0.00",
           refundCoverage: "COMPLETE",
+          shippingCost: "0.00",
+          couponAmount: "0.00",
+          refundedAmount: "0.00",
         },
         comparison: null,
       }),
@@ -422,5 +454,128 @@ describe("DashboardPage — Todo o período (Fase 4)", () => {
       routerReplace.mock.calls.length - 1
     ] as [string];
     expect(calledUrl).not.toMatch(/period=all/);
+  });
+});
+
+describe("DashboardPage — cartões financeiros (CP2K-8D)", () => {
+  it("MERCADO_LIVRE: mostra os três cartões, sem o aviso 'somente Mercado Livre', usando o fetch já existente (sem chamada nova)", async () => {
+    mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+      }),
+    );
+
+    expect(screen.getByText("Frete pago pelo comprador")).toBeInTheDocument();
+    expect(screen.getByText("Descontos em cupons")).toBeInTheDocument();
+    expect(screen.getByText("Valor reembolsado")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/disponíveis somente para Mercado Livre/i),
+    ).not.toBeInTheDocument();
+    expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(1);
+  });
+
+  it("ALL (consolidado): mostra os três cartões e o aviso 'somente Mercado Livre'", async () => {
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+      }),
+    );
+
+    expect(screen.getByText("Frete pago pelo comprador")).toBeInTheDocument();
+    expect(
+      screen.getByText("Dados financeiros disponíveis somente para Mercado Livre."),
+    ).toBeInTheDocument();
+  });
+
+  it("conta Mercado Livre selecionada dentro de ALL: mostra os três cartões (sem o aviso 'somente Mercado Livre')", async () => {
+    mockSearchParams({ accountId: "acc-1" });
+    api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(
+      kpisDto({
+        scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        breakdownByAccount: [account({ accountId: "acc-1", marketplace: "MERCADO_LIVRE" })],
+      }),
+    );
+    render(<DashboardPage />);
+
+    await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
+    expect(await screen.findByText("Frete pago pelo comprador")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/disponíveis somente para Mercado Livre/i),
+    ).not.toBeInTheDocument();
+  });
+
+  it("AMAZON: não mostra valores financeiros falsos (R$ 0,00) — mostra só a mensagem discreta", async () => {
+    mockSearchParams({ marketplace: "AMAZON" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "AMAZON", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+      }),
+    );
+
+    expect(screen.queryByText("Frete pago pelo comprador")).not.toBeInTheDocument();
+    expect(screen.queryByText("Descontos em cupons")).not.toBeInTheDocument();
+    expect(screen.queryByText("Valor reembolsado")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Indicadores financeiros detalhados ainda não disponíveis para este marketplace.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("SHOPEE: não mostra valores financeiros falsos (R$ 0,00) — mostra só a mensagem discreta", async () => {
+    mockSearchParams({ marketplace: "SHOPEE" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "SHOPEE", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+      }),
+    );
+
+    expect(screen.queryByText("Frete pago pelo comprador")).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Indicadores financeiros detalhados ainda não disponíveis para este marketplace.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("conta Amazon selecionada dentro de ALL: não mostra os cartões como R$ 0,00 — mostra só a mensagem discreta", async () => {
+    mockSearchParams({ accountId: "acc-amz" });
+    api.fetchMarketplaceAnalyticsKpis.mockResolvedValue(
+      kpisDto({
+        scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        breakdownByAccount: [account({ accountId: "acc-amz", marketplace: "AMAZON" })],
+      }),
+    );
+    render(<DashboardPage />);
+
+    await waitFor(() => expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledTimes(2));
+    await screen.findByText(/Última sincronização/);
+    expect(screen.queryByText("Frete pago pelo comprador")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("financial-kpi-card-shipping-cost"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Indicadores financeiros detalhados ainda não disponíveis para este marketplace.",
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("Faturamento bruto: mostra o rótulo atualizado do card de faturamento de pedidos pagos", async () => {
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+      }),
+    );
+
+    expect(screen.getByText("Faturamento bruto de pedidos pagos")).toBeInTheDocument();
   });
 });

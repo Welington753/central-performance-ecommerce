@@ -19,13 +19,15 @@ describe("OperationalKpiCards", () => {
     render(<OperationalKpiCards {...BASE_PROPS} />);
 
     expect(
-      screen.getByText("Operacional — antes de tarifas, frete, impostos e Ads."),
+      screen.getByText(
+        "Operacional — valor bruto dos produtos, antes de cupons, reembolsos, comissões, taxas, impostos, frete e Ads.",
+      ),
     ).toBeInTheDocument();
     expect(screen.queryByText(/líquido/i)).not.toBeInTheDocument();
 
     const revenue = screen.getByTestId("kpi-card-paid-revenue");
     expect(
-      within(revenue).getByText("Faturamento de pedidos pagos"),
+      within(revenue).getByText("Faturamento bruto de pedidos pagos"),
     ).toBeInTheDocument();
     expect(within(revenue).getByText(/R\$\s?6\.632,79/)).toBeInTheDocument();
 

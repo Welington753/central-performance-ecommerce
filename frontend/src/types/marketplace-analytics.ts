@@ -45,6 +45,14 @@ export interface AnalyticsSummary {
   /** Valor BRUTO (total_amount) anterior/independente do estorno — nunca receita líquida. */
   partiallyRefundedGrossAmount: string;
   refundCoverage: "COMPLETE" | "PARTIAL" | "UNAVAILABLE";
+  /**
+   * Três agregados financeiros confirmados (CP2K-8B/CP2K-8D) — exibidos à
+   * parte, nunca somados/subtraídos de `grossRevenue`. Só têm dado real para
+   * Mercado Livre hoje; strings decimais sempre presentes (nunca `undefined`).
+   */
+  shippingCost: string;
+  couponAmount: string;
+  refundedAmount: string;
 }
 
 export interface AnalyticsComparison {

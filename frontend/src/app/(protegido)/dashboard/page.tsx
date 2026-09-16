@@ -9,6 +9,7 @@ import { DailyRevenueChart } from "@/components/DailyRevenueChart";
 import { DataCoverageBanner } from "@/components/DataCoverageBanner";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
+import { FinancialKpiCards } from "@/components/FinancialKpiCards";
 import { FullPerformanceSection } from "@/components/FullPerformanceSection";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
 import { LogisticsScopeFilter } from "@/components/LogisticsScopeFilter";
@@ -222,6 +223,23 @@ function scopeTitle(marketplace: MarketplaceFilter): string {
     case "SHOPEE":
       return "Desempenho da Shopee";
   }
+}
+
+/**
+ * Marketplace efetivo dos três cartões financeiros (CP2K-8D, item 6): com
+ * `marketplace` = ALL e uma conta selecionada, é o marketplace DESSA conta
+ * (não "ALL") — nunca finge que uma conta Amazon/Shopee tem dado financeiro
+ * só porque o filtro geral está em "Todos".
+ */
+function resolveEffectiveMarketplace(
+  marketplace: MarketplaceFilter,
+  accountId: string | null,
+  accounts: AccountBreakdownEntry[],
+): MarketplaceFilter {
+  if (marketplace !== "ALL") return marketplace;
+  if (!accountId) return "ALL";
+  const selected = accounts.find((a) => a.accountId === accountId);
+  return selected ? selected.marketplace : "ALL";
 }
 
 function accountDisplayLabel(account: AccountBreakdownEntry): string {
@@ -778,6 +796,11 @@ function DashboardContent() {
   const historicalAccounts = scopedAccounts.filter(
     (a) => a.availability === "HISTORICAL_ONLY",
   );
+  const effectiveFinancialMarketplace = resolveEffectiveMarketplace(
+    marketplace,
+    accountId,
+    scopedAccounts,
+  );
 
   const lastSyncLabel = displayData
     ? (formatDateTimeSaoPaulo(displayData.lastSync) ?? "Nunca sincronizado")
@@ -944,6 +967,11 @@ function DashboardContent() {
                   <OperationalKpiCards
                     summary={displayData.summary}
                     comparison={displayData.comparison ?? EMPTY_COMPARISON}
+                  />
+
+                  <FinancialKpiCards
+                    summary={displayData.summary}
+                    effectiveMarketplace={effectiveFinancialMarketplace}
                   />
 
                   <AdditionalKpiCards

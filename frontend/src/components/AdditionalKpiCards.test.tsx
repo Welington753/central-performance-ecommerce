@@ -22,6 +22,9 @@ const baseSummary: AnalyticsSummary = {
   partiallyRefundedOrders: 0,
   partiallyRefundedGrossAmount: "0.00",
   refundCoverage: "COMPLETE",
+  shippingCost: "0.00",
+  couponAmount: "0.00",
+  refundedAmount: "0.00",
 };
 
 const baseComparison: AnalyticsComparison = {
