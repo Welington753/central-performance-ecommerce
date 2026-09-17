@@ -221,6 +221,19 @@ export async function connectShopee(
   return (await response.json()) as { authorizationUrl: string };
 }
 
+export async function disconnectMarketplaceAccount(
+  accountId: string,
+): Promise<MarketplaceAccountDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/disconnect`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError("Não foi possível desconectar esta conta.");
+  }
+  return (await response.json()) as MarketplaceAccountDto;
+}
+
 export class InvalidKpiPeriodApiError extends ApiFetchError {}
 
 export async function fetchMercadoLivreKpis(

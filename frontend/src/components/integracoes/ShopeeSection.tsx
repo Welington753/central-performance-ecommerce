@@ -6,6 +6,7 @@ import { MarketplaceCard } from "@/components/MarketplaceCard";
 import {
   connectShopee,
   createMarketplaceAccount,
+  disconnectMarketplaceAccount,
   redirectTo,
 } from "@/lib/api";
 import { isAllowedShopeeAuthorizationUrl } from "@/lib/shopee-authorization-url.validator";
@@ -69,6 +70,10 @@ export function ShopeeSection({
   const connectingRef = useRef<Set<string>>(new Set());
   const creatingRef = useRef(false);
   const callbackHandledRef = useRef(false);
+  const [disconnectingAccountIds, setDisconnectingAccountIds] = useState<
+    Set<string>
+  >(new Set());
+  const disconnectingRef = useRef<Set<string>>(new Set());
   // CP2E-R1: guarda o `id` de uma conta recém-criada cujo `connect` (ou a
   // validação da `authorizationUrl`) ainda não foi confirmado como
   // bem-sucedido — enquanto isso, uma nova tentativa REUTILIZA este id em
@@ -188,6 +193,37 @@ export function ShopeeSection({
     }
   }
 
+  // Desconexão segura (endpoint já existente, `POST .../disconnect`): nunca
+  // exclui a conta nem o `externalSellerId` — só remove tokens e volta o
+  // status para DISCONNECTED. Confirmação explícita antes de qualquer
+  // chamada; nunca inicia OAuth automaticamente depois.
+  async function handleDisconnect(accountId: string) {
+    if (disconnectingRef.current.has(accountId)) return;
+    const confirmed = window.confirm(
+      "Desconectar esta conta da Shopee? Os tokens de acesso serão removidos e a sincronização automática será interrompida até uma nova conexão.",
+    );
+    if (!confirmed) return;
+
+    disconnectingRef.current.add(accountId);
+    setActionError(null);
+    setDisconnectingAccountIds((prev) => new Set(prev).add(accountId));
+    try {
+      await disconnectMarketplaceAccount(accountId);
+      await onRefresh();
+    } catch {
+      setActionError(
+        "Não foi possível desconectar esta conta. Tente novamente.",
+      );
+    } finally {
+      disconnectingRef.current.delete(accountId);
+      setDisconnectingAccountIds((prev) => {
+        const next = new Set(prev);
+        next.delete(accountId);
+        return next;
+      });
+    }
+  }
+
   const loading = accounts === null && !loadError;
   const shopeeAccounts = accounts?.filter((a) => a.marketplace === "SHOPEE") ?? [];
 
@@ -275,6 +311,16 @@ export function ShopeeSection({
                     disabled: connectingAccountIds.has(account.id),
                     onClick: () => void handleConnect(account.id),
                   },
+                  secondaryCta:
+                    account.status === "CONNECTED"
+                      ? {
+                          label: disconnectingAccountIds.has(account.id)
+                            ? "Desconectando..."
+                            : "Desconectar",
+                          disabled: disconnectingAccountIds.has(account.id),
+                          onClick: () => void handleDisconnect(account.id),
+                        }
+                      : undefined,
                 }}
               />
             ))
