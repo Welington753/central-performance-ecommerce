@@ -652,4 +652,162 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
 
     expect(due.map((a) => a.id)).toEqual([earliest, middle, latest]);
   });
+
+  it('disconnect transitions a CONNECTED account to DISCONNECTED, clears tokens/expiry, bumps token_version, and preserves externalSellerId/nickname', async () => {
+    const id = await seedAccount({
+      status: 'CONNECTED',
+      externalSellerId: 'shop-live-123',
+      tokenVersion: 2,
+    });
+    await dataSource.query(
+      `UPDATE marketplace_accounts
+          SET encrypted_access_token = 'iv:tag:access',
+              encrypted_refresh_token = 'iv:tag:refresh',
+              token_expires_at = now() + interval '1 hour',
+              nickname = 'Loja Live',
+              error_summary = 'algo antigo',
+              failure_code = 'ALGO_ANTIGO'
+        WHERE id = $1`,
+      [id],
+    );
+
+    const result = await service.disconnect(id);
+
+    expect(result.status).toBe(MarketplaceAccountStatus.DISCONNECTED);
+
+    const rows: Array<{
+      status: string;
+      token_version: number;
+      external_seller_id: string | null;
+      nickname: string | null;
+      encrypted_access_token: string | null;
+      encrypted_refresh_token: string | null;
+      token_expires_at: Date | null;
+      error_summary: string | null;
+      failure_code: string | null;
+    }> = await dataSource.query(
+      `SELECT status, token_version, external_seller_id, nickname,
+              encrypted_access_token, encrypted_refresh_token, token_expires_at,
+              error_summary, failure_code
+         FROM marketplace_accounts WHERE id = $1`,
+      [id],
+    );
+    expect(rows[0].status).toBe('DISCONNECTED');
+    expect(rows[0].token_version).toBe(3);
+    expect(rows[0].external_seller_id).toBe('shop-live-123');
+    expect(rows[0].nickname).toBe('Loja Live');
+    expect(rows[0].encrypted_access_token).toBeNull();
+    expect(rows[0].encrypted_refresh_token).toBeNull();
+    expect(rows[0].token_expires_at).toBeNull();
+    expect(rows[0].error_summary).toBeNull();
+    expect(rows[0].failure_code).toBeNull();
+  });
+
+  it('disconnect is idempotent: calling it twice on an already-DISCONNECTED account does not error and does not bump token_version again', async () => {
+    const id = await seedAccount({ status: 'DISCONNECTED', tokenVersion: 1 });
+
+    const first = await service.disconnect(id);
+    const second = await service.disconnect(id);
+
+    expect(first.status).toBe(MarketplaceAccountStatus.DISCONNECTED);
+    expect(second.status).toBe(MarketplaceAccountStatus.DISCONNECTED);
+
+    const rows: Array<{ token_version: number }> = await dataSource.query(
+      'SELECT token_version FROM marketplace_accounts WHERE id = $1',
+      [id],
+    );
+    expect(rows[0].token_version).toBe(1);
+  });
+
+  it('disconnect never touches sync_runs or marketplace_orders rows belonging to the account', async () => {
+    const id = await seedAccount({ status: 'CONNECTED' });
+    const runId = await dataSource.query(
+      `INSERT INTO sync_runs (marketplace_account_id, marketplace, type, status, started_at, date_from, date_to)
+         VALUES ($1, 'SHOPEE', 'MANUAL', 'SUCCESS', now(), now(), now())
+       RETURNING id`,
+      [id],
+    );
+    const orderRows = await dataSource.query(
+      `INSERT INTO marketplace_orders
+         (marketplace_account_id, external_order_id, status, currency_id, total_amount,
+          date_created, marketplace_last_updated, updated_at)
+       VALUES ($1, 'order-sn-1', 'paid', 'BRL', '100.00', now(), now(), now())
+       RETURNING id`,
+      [id],
+    );
+
+    await service.disconnect(id);
+
+    const runsAfter: Array<{ count: string }> = await dataSource.query(
+      'SELECT count(*) FROM sync_runs WHERE id = $1',
+      [runId[0].id],
+    );
+    const ordersAfter: Array<{ count: string }> = await dataSource.query(
+      'SELECT count(*) FROM marketplace_orders WHERE id = $1',
+      [orderRows[0].id],
+    );
+    expect(Number(runsAfter[0].count)).toBe(1);
+    expect(Number(ordersAfter[0].count)).toBe(1);
+  });
+
+  it('disconnect fails PENDING oauth_authorization_requests for the account, never touches PROCESSING ones, never touches another account\'s PENDING request', async () => {
+    const id = await seedAccount({ status: 'CONNECTED' });
+    const otherId = await seedAccount({ status: 'CONNECTED' });
+
+    const pendingId = 'pending-1';
+    const processingId = 'processing-1';
+    const otherPendingId = 'other-pending-1';
+    await dataSource.query(
+      `INSERT INTO oauth_authorization_requests
+         (id, marketplace_account_id, initiated_by_user_id, marketplace, state_hash, status, expires_at)
+       VALUES
+         ($1, $4, $5, 'SHOPEE', 'hash-pending', 'PENDING', now() + interval '10 minutes'),
+         ($2, $4, $5, 'SHOPEE', 'hash-processing', 'PROCESSING', now() + interval '10 minutes'),
+         ($3, $6, $5, 'SHOPEE', 'hash-other', 'PENDING', now() + interval '10 minutes')`,
+      [pendingId, processingId, otherPendingId, id, userId, otherId],
+    );
+
+    await service.disconnect(id);
+
+    const rows: Array<{ id: string; status: string; failure_code: string | null }> =
+      await dataSource.query(
+        `SELECT id, status, failure_code FROM oauth_authorization_requests
+          WHERE id IN ($1, $2, $3) ORDER BY id`,
+        [pendingId, processingId, otherPendingId],
+      );
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
+    expect(byId[pendingId].status).toBe('FAILED');
+    expect(byId[pendingId].failure_code).toBe('ACCOUNT_DISCONNECTED');
+    expect(byId[processingId].status).toBe('PROCESSING');
+    expect(byId[otherPendingId].status).toBe('PENDING');
+  });
+
+  it('disconnect throws NotFoundException for a non-existent account id', async () => {
+    await expect(service.disconnect('00000000-0000-4000-8000-000000000000')).rejects.toThrow(
+      /não encontrada/i,
+    );
+  });
+
+  it('disconnect loses a concurrency race gracefully: a stale in-memory read never overwrites a newer concurrent write', async () => {
+    const id = await seedAccount({ status: 'CONNECTED', tokenVersion: 0 });
+
+    // Simula uma escrita concorrente que já avançou token_version (ex.: uma
+    // renovação de token) ANTES que `disconnect` releia a conta.
+    const originalFindByIdOrFail = service.findByIdOrFail.bind(service);
+    jest.spyOn(service, 'findByIdOrFail').mockImplementationOnce(async (accId: string) => {
+      const account = await originalFindByIdOrFail(accId);
+      await dataSource.query(
+        `UPDATE marketplace_accounts SET token_version = token_version + 1, updated_at = now() WHERE id = $1`,
+        [accId],
+      );
+      return account;
+    });
+
+    // Não deve lançar: a implementação releva o CAS perdido e devolve o
+    // estado atual em vez de propagar um erro genérico.
+    const result = await service.disconnect(id);
+    expect(result.id).toBe(id);
+
+    jest.restoreAllMocks();
+  });
 });

@@ -132,6 +132,80 @@ export class MarketplaceAccountsService {
   }
 
   /**
+   * Desconecta uma conta com segurança (Checkpoint Shopee Live E2E) — nunca
+   * um `UPDATE` manual: CAS por `token_version`, self-contained (mesmo
+   * padrão de `applySuccessfulConnection` sem `QueryRunner` externo), numa
+   * única transação que também invalida qualquer solicitação
+   * `oauth_authorization_requests` ainda PENDING dessa conta (escrita direta
+   * via SQL, não por injeção de `OAuthAuthorizationRequestsService` — isso
+   * criaria import circular entre `MarketplaceAccountsModule` e
+   * `mercado-livre-oauth.module.ts`, que já importa o primeiro; mesma
+   * técnica já usada por `ShopeeOAuthService.applyConnectionAndFinalizeAtomically`
+   * para cruzar essa mesma fronteira).
+   *
+   * Idempotente: numa conta já DISCONNECTED, devolve a conta sem escrever
+   * nada (nunca re-incrementa `token_version`, nunca é tratado como erro).
+   * Preserva integralmente `external_seller_id`/`nickname`/histórico de
+   * `sync_runs`/`marketplace_orders`/`marketplace_order_items` — nenhum
+   * deles é tocado por este método.
+   *
+   * Perde uma corrida de concorrência (`token_version` mudou entre a
+   * releitura e o CAS) de forma NÃO destrutiva: relê e devolve o estado
+   * atual em vez de lançar — a conta pode já ter sido desconectada ou
+   * reconectada por outra operação concorrente, e nenhuma dessas
+   * possibilidades justifica um erro aqui.
+   */
+  async disconnect(id: string): Promise<MarketplaceAccount> {
+    const account = await this.findByIdOrFail(id);
+
+    if (account.status === MarketplaceAccountStatus.DISCONNECTED) {
+      return account;
+    }
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    try {
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
+
+      const [rows] = (await queryRunner.query(
+        `UPDATE marketplace_accounts
+            SET status = 'DISCONNECTED',
+                encrypted_access_token = NULL,
+                encrypted_refresh_token = NULL,
+                token_expires_at = NULL,
+                error_summary = NULL,
+                failure_code = NULL,
+                token_version = token_version + 1,
+                updated_at = now()
+          WHERE id = $1 AND token_version = $2
+          RETURNING id`,
+        [account.id, account.tokenVersion],
+      )) as [Array<{ id: string }>, number];
+
+      if (rows.length > 0) {
+        await queryRunner.query(
+          `UPDATE oauth_authorization_requests
+              SET status = 'FAILED', completed_at = now(), failure_code = 'ACCOUNT_DISCONNECTED',
+                  encrypted_code_verifier = NULL
+            WHERE marketplace_account_id = $1 AND status = 'PENDING'`,
+          [account.id],
+        );
+      }
+
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      if (queryRunner.isTransactionActive) {
+        await queryRunner.rollbackTransaction();
+      }
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+
+    return this.findByIdOrFail(id);
+  }
+
+  /**
    * CAS da conta para CONNECTED. Aceita opcionalmente um `QueryRunner` já
    * aberto por um chamador que precisa combinar esta escrita, na MESMA
    * transação, com outra tabela (Task 19's callback: esta escrita +
