@@ -18,6 +18,8 @@ import { AmazonOrdersSyncError } from '../amazon-orders/amazon-orders-sync.servi
 import { AmazonOrdersSyncService } from '../amazon-orders/amazon-orders-sync.service';
 import { SyncOrdersError } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
 import { MercadoLivreOrdersSyncService } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
+import { ShopeeOrdersSyncError } from '../shopee-orders/shopee-orders-sync-error';
+import { ShopeeOrdersSyncService } from '../shopee-orders/shopee-orders-sync.service';
 
 // Chave fixa e bem conhecida do lock de CICLO (distinto dos locks por conta
 // já usados por `ensureValidAccessToken`/sincronização manual): impede que
@@ -60,6 +62,7 @@ export class MarketplaceAutoSyncService
     private readonly mlSyncService: MercadoLivreOrdersSyncService,
     private readonly amazonSyncService: AmazonOrdersSyncService,
     private readonly advisoryLockService: AdvisoryLockService,
+    private readonly shopeeSyncService: ShopeeOrdersSyncService,
   ) {}
 
   onModuleInit(): void {
@@ -140,8 +143,14 @@ export class MarketplaceAutoSyncService
         );
         return;
       }
-      // Nenhum conector ainda para este marketplace (ex.: Shopee) — ignorado,
-      // nunca tratado como falha.
+      if (account.marketplace === Marketplace.SHOPEE) {
+        await this.shopeeSyncService.syncOrders(account.id, {
+          type: SyncRunType.INCREMENTAL,
+        });
+        return;
+      }
+      // Nenhum conector ainda para este marketplace — ignorado, nunca
+      // tratado como falha.
       this.logger.log('marketplace_auto_sync_account_skipped', {
         accountId: account.id,
         marketplace: account.marketplace,
@@ -149,11 +158,13 @@ export class MarketplaceAutoSyncService
       });
     } catch (error) {
       // Nunca loga o erro bruto (poderia conter contexto sensível) — só o
-      // código fechado já sanitizado de `SyncOrdersError`/`AmazonOrdersSyncError`,
+      // código fechado já sanitizado de
+      // `SyncOrdersError`/`AmazonOrdersSyncError`/`ShopeeOrdersSyncError`,
       // ou o fallback genérico para qualquer outra exceção.
       const code =
         error instanceof SyncOrdersError ||
-        error instanceof AmazonOrdersSyncError
+        error instanceof AmazonOrdersSyncError ||
+        error instanceof ShopeeOrdersSyncError
           ? error.code
           : 'SYNC_FAILED';
       this.logger.warn('marketplace_auto_sync_account_failed', {

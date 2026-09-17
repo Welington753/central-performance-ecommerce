@@ -5,6 +5,7 @@ import {
   MarketplaceAccountStatus,
 } from '../marketplace-accounts/marketplace-account.entity';
 import { SyncOrdersError } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
+import { ShopeeOrdersSyncError } from '../shopee-orders/shopee-orders-sync-error';
 import { MarketplaceAutoSyncService } from './marketplace-auto-sync.service';
 
 function account(
@@ -49,6 +50,7 @@ function buildOrchestrator(
     persistence?: Record<string, jest.Mock>;
     mlSyncService?: Record<string, jest.Mock>;
     amazonSyncService?: Record<string, jest.Mock>;
+    shopeeSyncService?: Record<string, jest.Mock>;
     advisoryLockService?: Record<string, jest.Mock>;
   } = {},
 ) {
@@ -68,6 +70,10 @@ function buildOrchestrator(
     syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 0 }),
     ...overrides.amazonSyncService,
   };
+  const shopeeSyncService = {
+    syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 0 }),
+    ...overrides.shopeeSyncService,
+  };
   const advisoryLockService = {
     tryAcquire: jest
       .fn()
@@ -83,6 +89,7 @@ function buildOrchestrator(
     mlSyncService as never,
     amazonSyncService as never,
     advisoryLockService as never,
+    shopeeSyncService as never,
   );
 
   return {
@@ -91,6 +98,7 @@ function buildOrchestrator(
     persistence,
     mlSyncService,
     amazonSyncService,
+    shopeeSyncService,
     advisoryLockService,
   };
 }
@@ -315,8 +323,8 @@ describe('MarketplaceAutoSyncService', () => {
       );
     });
 
-    it('never throws for a marketplace without a connector yet (e.g. Shopee) — skips it', async () => {
-      const { service, mlSyncService, amazonSyncService } = buildOrchestrator({
+    it('dispatches a CONNECTED Shopee account to ShopeeOrdersSyncService.syncOrders with type INCREMENTAL', async () => {
+      const { service, shopeeSyncService } = buildOrchestrator({
         marketplaceAccountsService: {
           findAll: jest
             .fn()
@@ -325,8 +333,52 @@ describe('MarketplaceAutoSyncService', () => {
       });
 
       await expect(service.runCycle()).resolves.toBeUndefined();
-      expect(mlSyncService.syncOrders).not.toHaveBeenCalled();
-      expect(amazonSyncService.syncOrders).not.toHaveBeenCalled();
+      expect(shopeeSyncService.syncOrders).toHaveBeenCalledWith('acc-1', {
+        type: 'INCREMENTAL',
+      });
+    });
+
+    it('a Shopee sync failure is sanitized (ShopeeOrdersSyncError code extracted) and never stops other accounts', async () => {
+      const { service, mlSyncService } = buildOrchestrator({
+        marketplaceAccountsService: {
+          findAll: jest.fn().mockResolvedValue([
+            account({
+              id: 'shopee-fails',
+              marketplace: Marketplace.SHOPEE,
+            }),
+            account({ id: 'ml-ok', marketplace: Marketplace.MERCADO_LIVRE }),
+          ]),
+        },
+        shopeeSyncService: {
+          syncOrders: jest
+            .fn()
+            .mockRejectedValue(
+              new ShopeeOrdersSyncError('TEMPORARILY_UNAVAILABLE'),
+            ),
+        },
+      });
+
+      await expect(service.runCycle()).resolves.toBeUndefined();
+      expect(mlSyncService.syncOrders).toHaveBeenCalledWith('ml-ok', {
+        type: 'INCREMENTAL',
+      });
+    });
+
+    it('a DISCONNECTED Shopee account is never dispatched to ShopeeOrdersSyncService', async () => {
+      const { service, shopeeSyncService } = buildOrchestrator({
+        marketplaceAccountsService: {
+          findAll: jest.fn().mockResolvedValue([
+            account({
+              marketplace: Marketplace.SHOPEE,
+              status: MarketplaceAccountStatus.DISCONNECTED,
+            }),
+          ]),
+        },
+      });
+
+      await service.runCycle();
+
+      expect(shopeeSyncService.syncOrders).not.toHaveBeenCalled();
     });
   });
 });

@@ -4,6 +4,7 @@ import { AmazonOrdersModule } from '../amazon-orders/amazon-orders.module';
 import { MarketplaceAccountsModule } from '../marketplace-accounts/marketplace-accounts.module';
 import { MarketplaceOrdersModule } from '../marketplace-orders/marketplace-orders.module';
 import { MercadoLivreOrdersModule } from '../mercado-livre-orders/mercado-livre-orders.module';
+import { ShopeeOrdersModule } from '../shopee-orders/shopee-orders.module';
 import { AdvisoryLockService } from '../shared/advisory-lock.service';
 import { SyncModule } from '../../sync/sync.module';
 import { MarketplaceAutoSyncService } from './marketplace-auto-sync.service';
@@ -25,6 +26,7 @@ import { MarketplaceBackfillWorkerService } from './marketplace-backfill-worker.
     MarketplaceOrdersModule,
     MercadoLivreOrdersModule,
     AmazonOrdersModule,
+    ShopeeOrdersModule,
     AuthModule,
     SyncModule,
   ],
