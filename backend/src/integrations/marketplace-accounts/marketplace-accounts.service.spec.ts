@@ -753,18 +753,19 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
   it('disconnect fails PENDING oauth_authorization_requests for the account, never touches PROCESSING ones, never touches another account\'s PENDING request', async () => {
     const id = await seedAccount({ status: 'CONNECTED' });
     const otherId = await seedAccount({ status: 'CONNECTED' });
+    const processingAccountId = await seedAccount({ status: 'CONNECTED' });
 
-    const pendingId = 'pending-1';
-    const processingId = 'processing-1';
-    const otherPendingId = 'other-pending-1';
+    const pendingId = randomUUID();
+    const processingId = randomUUID();
+    const otherPendingId = randomUUID();
     await dataSource.query(
       `INSERT INTO oauth_authorization_requests
-         (id, marketplace_account_id, initiated_by_user_id, marketplace, state_hash, status, expires_at)
+         (id, marketplace_account_id, initiated_by_user_id, marketplace, state_hash, status, expires_at, processing_started_at)
        VALUES
-         ($1, $4, $5, 'SHOPEE', 'hash-pending', 'PENDING', now() + interval '10 minutes'),
-         ($2, $4, $5, 'SHOPEE', 'hash-processing', 'PROCESSING', now() + interval '10 minutes'),
-         ($3, $6, $5, 'SHOPEE', 'hash-other', 'PENDING', now() + interval '10 minutes')`,
-      [pendingId, processingId, otherPendingId, id, userId, otherId],
+         ($1, $4, $5, 'SHOPEE', $7, 'PENDING', now() + interval '10 minutes', NULL),
+         ($2, $8, $5, 'SHOPEE', $9, 'PROCESSING', now() + interval '10 minutes', now()),
+         ($3, $6, $5, 'SHOPEE', $10, 'PENDING', now() + interval '10 minutes', NULL)`,
+      [pendingId, processingId, otherPendingId, id, userId, otherId, randomUUID(), processingAccountId, randomUUID(), randomUUID()],
     );
 
     await service.disconnect(id);

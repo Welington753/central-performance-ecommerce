@@ -3,6 +3,8 @@ import {
   ConflictException,
   Controller,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
   ParseUUIDPipe,
   Patch,
@@ -74,6 +76,7 @@ export class MarketplaceAccountsController {
   }
 
   @Post(':id/disconnect')
+  @HttpCode(HttpStatus.OK)
   async disconnect(
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<MarketplaceAccountResponseDto> {
