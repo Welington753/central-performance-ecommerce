@@ -126,7 +126,7 @@ export class ShopeeOrdersSyncService {
         periodFrom: window.from,
         periodTo: window.to,
         startedAt,
-        ...(options.type !== undefined ? { type: options.type } : {}),
+        type: options.type,
       });
     } catch (error) {
       if (error instanceof SyncAlreadyRunningError) {

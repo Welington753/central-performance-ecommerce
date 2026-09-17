@@ -783,32 +783,110 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
     expect(byId[otherPendingId].status).toBe('PENDING');
   });
 
+  it('disconnect never touches a PROCESSING oauth_authorization_request when the SAME account has no PENDING request at all (disconnect arriving mid-OAuth-callback)', async () => {
+    const id = await seedAccount({ status: 'CONNECTED' });
+
+    const processingId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO oauth_authorization_requests
+         (id, marketplace_account_id, initiated_by_user_id, marketplace, state_hash, status, expires_at, processing_started_at)
+       VALUES ($1, $2, $3, 'SHOPEE', $4, 'PROCESSING', now() + interval '10 minutes', now())`,
+      [processingId, id, userId, randomUUID()],
+    );
+
+    await service.disconnect(id);
+
+    const rows: Array<{ status: string; failure_code: string | null }> =
+      await dataSource.query(
+        `SELECT status, failure_code FROM oauth_authorization_requests WHERE id = $1`,
+        [processingId],
+      );
+    expect(rows[0].status).toBe('PROCESSING');
+    expect(rows[0].failure_code).toBeNull();
+  });
+
   it('disconnect throws NotFoundException for a non-existent account id', async () => {
     await expect(service.disconnect('00000000-0000-4000-8000-000000000000')).rejects.toThrow(
       /não encontrada/i,
     );
   });
 
-  it('disconnect loses a concurrency race gracefully: a stale in-memory read never overwrites a newer concurrent write', async () => {
-    const id = await seedAccount({ status: 'CONNECTED', tokenVersion: 0 });
-
-    // Simula uma escrita concorrente que já avançou token_version (ex.: uma
-    // renovação de token) ANTES que `disconnect` releia a conta.
-    const originalFindByIdOrFail = service.findByIdOrFail.bind(service);
-    jest.spyOn(service, 'findByIdOrFail').mockImplementationOnce(async (accId: string) => {
-      const account = await originalFindByIdOrFail(accId);
-      await dataSource.query(
-        `UPDATE marketplace_accounts SET token_version = token_version + 1, updated_at = now() WHERE id = $1`,
-        [accId],
-      );
-      return account;
+  describe('disconnect retry sob corrida de concorrência', () => {
+    afterEach(() => {
+      jest.restoreAllMocks();
     });
 
-    // Não deve lançar: a implementação releva o CAS perdido e devolve o
-    // estado atual em vez de propagar um erro genérico.
-    const result = await service.disconnect(id);
-    expect(result.id).toBe(id);
+    it('perde exatamente UMA corrida de CAS e se recupera na releitura seguinte: não lança, termina DISCONNECTED com tokens limpos', async () => {
+      const id = await seedAccount({ status: 'CONNECTED', tokenVersion: 0 });
 
-    jest.restoreAllMocks();
+      // Simula uma única escrita concorrente que avança token_version (ex.:
+      // uma renovação de token) entre a leitura inicial de `disconnect` e a
+      // sua primeira tentativa de CAS — só na PRIMEIRA chamada a
+      // `findByIdOrFail` (mockImplementationOnce): a releitura de retry que
+      // `disconnect` faz em seguida já usa a implementação real, sem mais
+      // interferência.
+      const originalFindByIdOrFail = service.findByIdOrFail.bind(service);
+      jest
+        .spyOn(service, 'findByIdOrFail')
+        .mockImplementationOnce(async (accId: string) => {
+          const account = await originalFindByIdOrFail(accId);
+          await dataSource.query(
+            `UPDATE marketplace_accounts SET token_version = token_version + 1, updated_at = now() WHERE id = $1`,
+            [accId],
+          );
+          return account;
+        });
+
+      const result = await service.disconnect(id);
+
+      expect(result.status).toBe(MarketplaceAccountStatus.DISCONNECTED);
+
+      const rows: Array<{
+        status: string;
+        encrypted_access_token: string | null;
+        encrypted_refresh_token: string | null;
+      }> = await dataSource.query(
+        'SELECT status, encrypted_access_token, encrypted_refresh_token FROM marketplace_accounts WHERE id = $1',
+        [id],
+      );
+      expect(rows[0].status).toBe('DISCONNECTED');
+      expect(rows[0].encrypted_access_token).toBeNull();
+      expect(rows[0].encrypted_refresh_token).toBeNull();
+    });
+
+    it('perde 3 corridas de CAS consecutivas: lança em vez de devolver uma conta ainda CONNECTED, e nunca escreve nada no banco', async () => {
+      const id = await seedAccount({ status: 'CONNECTED', tokenVersion: 0 });
+
+      // Simula uma escrita concorrente ANTES de cada releitura de
+      // `disconnect` (inicial + as duas releituras do retry) — o CAS de
+      // cada tentativa sempre usa uma `token_version` já defasada quando
+      // chega no `UPDATE ... WHERE token_version = $2`.
+      const originalFindByIdOrFail = service.findByIdOrFail.bind(service);
+      jest
+        .spyOn(service, 'findByIdOrFail')
+        .mockImplementation(async (accId: string) => {
+          const account = await originalFindByIdOrFail(accId);
+          await dataSource.query(
+            `UPDATE marketplace_accounts SET token_version = token_version + 1, updated_at = now() WHERE id = $1`,
+            [accId],
+          );
+          return account;
+        });
+
+      await expect(service.disconnect(id)).rejects.toThrow(
+        /conflito de concorrência/i,
+      );
+
+      const rows: Array<{ status: string; token_version: number }> =
+        await dataSource.query(
+          'SELECT status, token_version FROM marketplace_accounts WHERE id = $1',
+          [id],
+        );
+      // `disconnect` nunca aplicou seu próprio CAS: a conta continua
+      // CONNECTED, e `token_version` só reflete os 3 avanços concorrentes
+      // simulados acima (0 -> 3), nunca um incremento do próprio método.
+      expect(rows[0].status).toBe('CONNECTED');
+      expect(rows[0].token_version).toBe(3);
+    });
   });
 });

@@ -16,9 +16,11 @@ import { MarketplaceBackfillWorkerService } from './marketplace-backfill-worker.
 /**
  * Módulo genérico de orquestração de sincronização multi-marketplace (Fase
  * 4, "Sincronização prática de múltiplas contas e histórico completo").
- * Importa `MercadoLivreOrdersModule`/`AmazonOrdersModule` só para reaproveitar
- * seus `*SyncService` já exportados — nenhuma dependência de negócio nova
- * entre os dois marketplaces, nenhuma cópia de fetch/persistência.
+ * Importa `MercadoLivreOrdersModule`/`AmazonOrdersModule`/`ShopeeOrdersModule`
+ * só para reaproveitar seus `*SyncService` (`MercadoLivreOrdersSyncService`/
+ * `AmazonOrdersSyncService`/`ShopeeOrdersSyncService`) já exportados —
+ * nenhuma dependência de negócio nova entre os marketplaces, nenhuma cópia
+ * de fetch/persistência.
  */
 @Module({
   imports: [

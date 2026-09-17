@@ -136,32 +136,71 @@ export class MarketplaceAccountsService {
    * um `UPDATE` manual: CAS por `token_version`, self-contained (mesmo
    * padrão de `applySuccessfulConnection` sem `QueryRunner` externo), numa
    * única transação que também invalida qualquer solicitação
-   * `oauth_authorization_requests` ainda PENDING dessa conta (escrita direta
-   * via SQL, não por injeção de `OAuthAuthorizationRequestsService` — isso
-   * criaria import circular entre `MarketplaceAccountsModule` e
-   * `mercado-livre-oauth.module.ts`, que já importa o primeiro; mesma
-   * técnica já usada por `ShopeeOAuthService.applyConnectionAndFinalizeAtomically`
-   * para cruzar essa mesma fronteira).
+   * `oauth_authorization_requests` ainda PENDING dessa conta. Escrita direta
+   * via SQL, não por injeção de `OAuthAuthorizationRequestsService`: (a) esse
+   * serviço só expõe operações por `id` de uma tentativa específica — não há
+   * método para falhar todas as PENDING de uma conta de uma vez; (b) ele não
+   * aceita um `QueryRunner` externo, então não daria para participar da
+   * MESMA transação atômica do CAS abaixo sem estendê-lo antes; e (c)
+   * injetar aqui um serviço que mora em `mercado-livre-oauth/` (diretório
+   * específico de um marketplace) dentro de um módulo do núcleo seria um
+   * cheiro de camadas, mesmo sem criar nenhum import circular de fato (o
+   * mesmo serviço já é redeclarado como provider avulso em outros dois
+   * módulos independentes — `ShopeeOAuthService.applyConnectionAndFinalizeAtomically`
+   * usa a mesma técnica de SQL cru para cruzar essa fronteira).
    *
-   * Idempotente: numa conta já DISCONNECTED, devolve a conta sem escrever
-   * nada (nunca re-incrementa `token_version`, nunca é tratado como erro).
-   * Preserva integralmente `external_seller_id`/`nickname`/histórico de
+   * Retry limitado (até 3 tentativas): se `token_version` mudou entre a
+   * releitura e o CAS (corrida de concorrência), relê a conta e tenta
+   * novamente — nunca perde a corrida em silêncio devolvendo um estado
+   * ainda CONNECTED. Se as 3 tentativas se esgotam sem que o CAS aplique e a
+   * conta ainda não está DISCONNECTED, lança um erro (caso extremo de
+   * concorrência persistente).
+   *
+   * Idempotente: se a conta já está DISCONNECTED (na leitura inicial ou em
+   * qualquer releitura do retry), devolve a conta sem escrever nada (nunca
+   * re-incrementa `token_version`, nunca é tratado como erro). Preserva
+   * integralmente `external_seller_id`/`nickname`/histórico de
    * `sync_runs`/`marketplace_orders`/`marketplace_order_items` — nenhum
    * deles é tocado por este método.
-   *
-   * Perde uma corrida de concorrência (`token_version` mudou entre a
-   * releitura e o CAS) de forma NÃO destrutiva: relê e devolve o estado
-   * atual em vez de lançar — a conta pode já ter sido desconectada ou
-   * reconectada por outra operação concorrente, e nenhuma dessas
-   * possibilidades justifica um erro aqui.
    */
   async disconnect(id: string): Promise<MarketplaceAccount> {
-    const account = await this.findByIdOrFail(id);
+    const MAX_ATTEMPTS = 3;
+    let account = await this.findByIdOrFail(id);
 
-    if (account.status === MarketplaceAccountStatus.DISCONNECTED) {
-      return account;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      if (account.status === MarketplaceAccountStatus.DISCONNECTED) {
+        return account;
+      }
+
+      const applied = await this.tryDisconnectCas(
+        account.id,
+        account.tokenVersion,
+      );
+      if (applied) {
+        return this.findByIdOrFail(id);
+      }
+
+      if (attempt < MAX_ATTEMPTS) {
+        account = await this.findByIdOrFail(id);
+      }
     }
 
+    throw new Error(
+      'Falha ao desconectar a conta: conflito de concorrência persistente.',
+    );
+  }
+
+  /**
+   * Uma tentativa de CAS de `disconnect`: `UPDATE ... WHERE token_version =`
+   * + invalidação das `oauth_authorization_requests` PENDING, na mesma
+   * transação. Devolve `true` quando o CAS aplicou (0 linhas afetadas nunca
+   * é tratado como erro aqui — o chamador decide se releitura/retry ou
+   * lançamento fazem sentido).
+   */
+  private async tryDisconnectCas(
+    id: string,
+    expectedTokenVersion: number,
+  ): Promise<boolean> {
     const queryRunner = this.dataSource.createQueryRunner();
     try {
       await queryRunner.connect();
@@ -172,6 +211,7 @@ export class MarketplaceAccountsService {
             SET status = 'DISCONNECTED',
                 encrypted_access_token = NULL,
                 encrypted_refresh_token = NULL,
+                encrypted_credential_metadata = NULL,
                 token_expires_at = NULL,
                 error_summary = NULL,
                 failure_code = NULL,
@@ -179,7 +219,7 @@ export class MarketplaceAccountsService {
                 updated_at = now()
           WHERE id = $1 AND token_version = $2
           RETURNING id`,
-        [account.id, account.tokenVersion],
+        [id, expectedTokenVersion],
       )) as [Array<{ id: string }>, number];
 
       if (rows.length > 0) {
@@ -188,21 +228,33 @@ export class MarketplaceAccountsService {
               SET status = 'FAILED', completed_at = now(), failure_code = 'ACCOUNT_DISCONNECTED',
                   encrypted_code_verifier = NULL
             WHERE marketplace_account_id = $1 AND status = 'PENDING'`,
-          [account.id],
+          [id],
         );
       }
 
       await queryRunner.commitTransaction();
+      return rows.length > 0;
     } catch (error) {
+      // Só faz rollback se uma transação de fato chegou a ficar ativa — uma
+      // falha em `connect()` ou `startTransaction()` nunca abre transação,
+      // então não há o que reverter. Uma falha no próprio rollback não pode
+      // mascarar o erro original que causou a falha da transação.
       if (queryRunner.isTransactionActive) {
-        await queryRunner.rollbackTransaction();
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch {
+          // Idem: nunca suprime o erro original em propagação.
+        }
       }
       throw error;
     } finally {
-      await queryRunner.release();
+      try {
+        await queryRunner.release();
+      } catch {
+        // Falha na liberação não pode mascarar o erro/resultado já em
+        // propagação.
+      }
     }
-
-    return this.findByIdOrFail(id);
   }
 
   /**

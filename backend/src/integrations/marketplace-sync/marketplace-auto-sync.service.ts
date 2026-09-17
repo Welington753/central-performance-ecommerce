@@ -36,12 +36,13 @@ const STALE_RUN_THRESHOLD_MS = 30 * 60 * 1000;
 /**
  * Orquestrador de sincronização automática (Fase 4, "Sincronização
  * automática") — genérico, sem NENHUMA dependência de negócio entre
- * Mercado Livre e Amazon: cada conta elegível é despachada para o
+ * Mercado Livre, Amazon e Shopee: cada conta elegível é despachada para o
  * `*SyncService` do seu próprio marketplace, uma de cada vez (nunca em
  * paralelo, para reduzir rate limit), e uma falha em uma conta nunca
- * interrompe as demais. Amazon não configurada e qualquer marketplace sem
- * conector (ex.: Shopee) são ignorados com um motivo sanitizado no log —
- * nunca tratados como erro real.
+ * interrompe as demais. Amazon não configurada é ignorada com um motivo
+ * sanitizado no log — nunca tratada como erro real; um eventual marketplace
+ * futuro ainda sem conector cairia no mesmo caminho de "ignorado com
+ * motivo", não em erro.
  *
  * Desligado por padrão (`MARKETPLACE_AUTO_SYNC_ENABLED`) e SEMPRE desligado
  * quando `NODE_ENV=test` — mesmo que alguém habilite a flag por engano em

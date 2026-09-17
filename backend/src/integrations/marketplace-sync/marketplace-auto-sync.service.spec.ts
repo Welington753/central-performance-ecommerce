@@ -1,4 +1,5 @@
 import { ConfigService } from '@nestjs/config';
+import { Logger } from '@nestjs/common';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
   MarketplaceAccount,
@@ -339,29 +340,43 @@ describe('MarketplaceAutoSyncService', () => {
     });
 
     it('a Shopee sync failure is sanitized (ShopeeOrdersSyncError code extracted) and never stops other accounts', async () => {
-      const { service, mlSyncService } = buildOrchestrator({
-        marketplaceAccountsService: {
-          findAll: jest.fn().mockResolvedValue([
-            account({
-              id: 'shopee-fails',
-              marketplace: Marketplace.SHOPEE,
-            }),
-            account({ id: 'ml-ok', marketplace: Marketplace.MERCADO_LIVRE }),
-          ]),
-        },
-        shopeeSyncService: {
-          syncOrders: jest
-            .fn()
-            .mockRejectedValue(
-              new ShopeeOrdersSyncError('TEMPORARILY_UNAVAILABLE'),
-            ),
-        },
-      });
+      const warnSpy = jest
+        .spyOn(Logger.prototype, 'warn')
+        .mockImplementation(() => undefined);
+      try {
+        const { service, mlSyncService } = buildOrchestrator({
+          marketplaceAccountsService: {
+            findAll: jest.fn().mockResolvedValue([
+              account({
+                id: 'shopee-fails',
+                marketplace: Marketplace.SHOPEE,
+              }),
+              account({ id: 'ml-ok', marketplace: Marketplace.MERCADO_LIVRE }),
+            ]),
+          },
+          shopeeSyncService: {
+            syncOrders: jest
+              .fn()
+              .mockRejectedValue(
+                new ShopeeOrdersSyncError('TEMPORARILY_UNAVAILABLE'),
+              ),
+          },
+        });
 
-      await expect(service.runCycle()).resolves.toBeUndefined();
-      expect(mlSyncService.syncOrders).toHaveBeenCalledWith('ml-ok', {
-        type: 'INCREMENTAL',
-      });
+        await expect(service.runCycle()).resolves.toBeUndefined();
+        expect(mlSyncService.syncOrders).toHaveBeenCalledWith('ml-ok', {
+          type: 'INCREMENTAL',
+        });
+        expect(warnSpy).toHaveBeenCalledWith(
+          'marketplace_auto_sync_account_failed',
+          expect.objectContaining({
+            accountId: 'shopee-fails',
+            code: 'TEMPORARILY_UNAVAILABLE',
+          }),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it('a DISCONNECTED Shopee account is never dispatched to ShopeeOrdersSyncService', async () => {

@@ -1,4 +1,5 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import { SyncRunType } from '../../sync/sync-run.entity';
 import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { SyncAlreadyRunningError } from '../marketplace-orders/marketplace-orders-persistence.service';
@@ -328,23 +329,24 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
     expect(persistence.finalizeSyncRunFailure).not.toHaveBeenCalled();
   });
 
-  it('passes options.type through to beginSyncRun when provided, and omits it (default MANUAL) when not provided', async () => {
+  it('passes options.type through to beginSyncRun when provided', async () => {
     const { service, persistence } = buildService();
 
-    await service.syncOrders(ACCOUNT_ID, { type: 'INCREMENTAL' as never });
+    await service.syncOrders(ACCOUNT_ID, { type: SyncRunType.INCREMENTAL });
 
     expect(persistence.beginSyncRun).toHaveBeenCalledWith(
-      expect.objectContaining({ type: 'INCREMENTAL' }),
+      expect.objectContaining({ type: SyncRunType.INCREMENTAL }),
     );
   });
 
-  it('omits type from beginSyncRun input when syncOrders is called without options (manual sync, unchanged behavior)', async () => {
+  it('calls beginSyncRun with type: undefined when syncOrders is called without options — relies on beginSyncRun defaulting to MANUAL itself, never overrides it (manual sync, unchanged behavior)', async () => {
     const { service, persistence } = buildService();
 
     await service.syncOrders(ACCOUNT_ID);
 
-    const call = persistence.beginSyncRun.mock.calls[0][0] as Record<string, unknown>;
-    expect('type' in call).toBe(false);
+    expect(persistence.beginSyncRun).toHaveBeenCalledWith(
+      expect.objectContaining({ type: undefined }),
+    );
   });
 
   it('sucesso com VÁRIOS pedidos: mapeia, persiste e finaliza SUCCESS', async () => {

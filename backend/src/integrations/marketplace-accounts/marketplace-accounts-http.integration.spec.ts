@@ -246,4 +246,53 @@ describe('POST /marketplace-accounts — fronteira HTTP real (Postgres real, Che
 
     expect(response.status).toBe(404);
   });
+
+  it('returns 400 when disconnecting with a non-UUID id (ParseUUIDPipe)', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/marketplace-accounts/not-a-uuid/disconnect')
+      .set('Cookie', accessTokenCookie());
+
+    expect(response.status).toBe(400);
+  });
+
+  it('disconnecting twice in a row is idempotent at the HTTP boundary: 200 both times, DISCONNECTED after the first call and unchanged after the second', async () => {
+    const createResponse = await request(app.getHttpServer())
+      .post('/marketplace-accounts')
+      .set('Cookie', accessTokenCookie())
+      .send({ marketplace: 'SHOPEE' });
+    const id = (createResponse.body as { id: string }).id;
+
+    await dataSource.query(
+      `UPDATE marketplace_accounts
+          SET status = 'CONNECTED', external_seller_id = 'shop-999',
+              encrypted_access_token = 'iv:tag:a', encrypted_refresh_token = 'iv:tag:r',
+              token_expires_at = now() + interval '1 hour'
+        WHERE id = $1`,
+      [id],
+    );
+
+    const firstResponse = await request(app.getHttpServer())
+      .post(`/marketplace-accounts/${id}/disconnect`)
+      .set('Cookie', accessTokenCookie());
+    expect(firstResponse.status).toBe(200);
+    expect((firstResponse.body as { status: string }).status).toBe(
+      'DISCONNECTED',
+    );
+
+    const rowAfterFirst = await selectPersistedRow(id);
+    expect(rowAfterFirst.status).toBe('DISCONNECTED');
+    const tokenVersionAfterFirst = rowAfterFirst.token_version;
+
+    const secondResponse = await request(app.getHttpServer())
+      .post(`/marketplace-accounts/${id}/disconnect`)
+      .set('Cookie', accessTokenCookie());
+    expect(secondResponse.status).toBe(200);
+    expect((secondResponse.body as { status: string }).status).toBe(
+      'DISCONNECTED',
+    );
+
+    const rowAfterSecond = await selectPersistedRow(id);
+    expect(rowAfterSecond.status).toBe('DISCONNECTED');
+    expect(rowAfterSecond.token_version).toBe(tokenVersionAfterFirst);
+  });
 });
