@@ -200,22 +200,31 @@ Shopee.
 
 ## Fluxo operacional (execução real, após plano aprovado)
 
-`MARKETPLACE_AUTO_SYNC_ENABLED` fica **`false`** do início até o passo 12 — nunca ligado antes
-disso, mesmo que já estivesse `true` em uso anterior.
+Não haverá publicação temporária em Sandbox — a integração vai direto para a loja oficial
+Shopee Live. `render.yaml` já sobe com `SHOPEE_ENVIRONMENT=PRODUCTION`; não existe etapa
+intermediária de deploy em `SANDBOX` para depois trocar.
 
-1. Backend antigo encerrado (confirmação visual + porta livre).
-2. Implementar e testar TODAS as mudanças de código (seção "Componentes tocados" +
-   `disconnect`) — TDD, testes direcionados. Nenhuma credencial real envolvida ainda.
-3. `SELECT` read-only de todas as contas Shopee existentes (sanitizado, sem seller
-   id/token) — identificar a conta Sandbox `CONNECTED`.
-4. Chamar `POST /marketplace-accounts/:id/disconnect` na conta Sandbox. Confirmar por SELECT
-   que ela ficou `DISCONNECTED`, com tokens nulos, histórico de pedidos intacto, **e que existem
-   zero contas `SHOPEE` `CONNECTED`** neste ponto (checkpoint obrigatório antes de seguir).
-5. **Pausa humana**: cadastrar/confirmar a redirect URI exata no Partner Console (ver seção
-   acima), depois inserir `SHOPEE_PARTNER_ID=2044705`, `SHOPEE_PARTNER_KEY` (a chave em si),
-   `SHOPEE_ENVIRONMENT=PRODUCTION`, `SHOPEE_REDIRECT_URI` (mesmo valor cadastrado) em
-   `backend/.env`. Verificação sanitizada de presença das variáveis (nunca valor).
-6. Subir o backend local.
+`MARKETPLACE_AUTO_SYNC_ENABLED` fica **`false`** do início até o passo 12 — nunca ligado antes
+disso, mesmo que já estivesse `true` em uso anterior. O deploy Render (`render.yaml`) já sobe
+com essa flag `false`; nenhum passo anterior ao 12 pode alterá-la.
+
+**Sequência operacional correta (ordem obrigatória):**
+
+1. Deploy do backend/frontend no Render com `SHOPEE_ENVIRONMENT=PRODUCTION` e
+   `MARKETPLACE_AUTO_SYNC_ENABLED=false` (ver `render.yaml`) — implementação e testes de TODAS
+   as mudanças de código (seção "Componentes tocados" + `disconnect`) já concluídos antes disso,
+   via TDD local, sem nenhuma credencial real envolvida.
+2. Não executar nenhuma sincronização ainda.
+3. `SELECT` read-only de todas as contas Shopee existentes (sanitizado, sem seller id/token) —
+   identificar a conta Sandbox `CONNECTED`.
+4. Chamar `POST /marketplace-accounts/:id/disconnect` na conta Sandbox (endpoint novo). Confirmar
+   por SELECT que ela ficou `DISCONNECTED`, com tokens nulos, histórico de pedidos intacto.
+5. Confirmar por SELECT read-only: **zero** contas `SHOPEE` `CONNECTED` neste ponto (checkpoint
+   obrigatório antes de seguir).
+6. **Pausa humana**: cadastrar/confirmar a redirect URI exata no Partner Console (ver seção
+   acima), depois inserir `SHOPEE_PARTNER_ID=2044705`, `SHOPEE_PARTNER_KEY` (a chave em si) nas
+   env vars do serviço backend no painel Render (`sync: false` em `render.yaml` — nunca no
+   código, nunca no YAML). Verificação sanitizada de presença das variáveis (nunca valor).
 7. Criar a conta Shopee Live nova (`POST /marketplace-accounts`) e chamar
    `POST /marketplace-accounts/:id/shopee/connect` para obter `authorizationUrl`.
 8. **Pausa humana**: usuário abre `authorizationUrl`, faz login da conta PRINCIPAL da loja Ezie
@@ -225,11 +234,12 @@ disso, mesmo que já estivesse `true` em uso anterior.
 10. Confirmar por SELECT read-only: **exatamente uma** conta `SHOPEE` `CONNECTED` (a Live nova,
     e nenhuma outra) — pré-condição obrigatória antes de qualquer sincronização, e reconfirmada
     de novo antes do passo 12 (autosync).
-11. Baseline sanitizado (contagens) → `POST /marketplace-accounts/:id/shopee/sync-orders`
-    (1ª execução real, janela de 60 dias, só leitura na Shopee) → conferir
-    `sync_runs`/contadores → 2ª chamada manual ao mesmo endpoint → provar idempotência
-    (`ordersCreated == 0` na 2ª, `ordersUpdated` reflete o pedido existente, zero duplicata).
-    Ver "Divergência de payload" abaixo se o formato real não bater com os mocks.
+11. Só agora sincronizar pedidos: baseline sanitizado (contagens) →
+    `POST /marketplace-accounts/:id/shopee/sync-orders` (1ª execução real, janela de 60 dias, só
+    leitura na Shopee) → conferir `sync_runs`/contadores → 2ª chamada manual ao mesmo endpoint →
+    provar idempotência (`ordersCreated == 0` na 2ª, `ordersUpdated` reflete o pedido existente,
+    zero duplicata). Ver "Divergência de payload" abaixo se o formato real não bater com os
+    mocks.
 12. Só agora: habilitar `MARKETPLACE_AUTO_SYNC_ENABLED=true`, rodar **um único ciclo controlado**
     (`runCycle()` uma vez, não o timer solto), confirmar: exatamente um dispatch (a conta Live),
     a conta Sandbox (`DISCONNECTED`) não aparece nos logs de dispatch, nenhuma sobreposição com
@@ -239,12 +249,11 @@ disso, mesmo que já estivesse `true` em uso anterior.
     propósito). Depois desse ciclo único, desligar de novo (`MARKETPLACE_AUTO_SYNC_ENABLED=false`)
     ou deixar como o usuário decidir no relatório final — mas nunca com o timer rodando
     indefinidamente enquanto eu ainda estou validando outra coisa.
-13. Validar "Sincronizar todas as lojas" no frontend via agent-browser da Vercel — só a nossa
-    própria UI, nunca a tela de login/consentimento da Shopee, nunca digita senha/2FA/Partner
-    Key.
+13. Validar "Sincronizar todas as lojas" no frontend do deploy Render — só a nossa própria UI,
+    nunca a tela de login/consentimento da Shopee, nunca digita senha/2FA/Partner Key.
 14. Testes, lint, build (backend + frontend). Commits locais pequenos e coerentes, sem push.
-15. Encerrar o backend (nenhum processo local em segundo plano ao final). Relatório final
-    sanitizado, incluindo o estado final exato de `MARKETPLACE_AUTO_SYNC_ENABLED`.
+15. Relatório final sanitizado, incluindo o estado final exato de
+    `MARKETPLACE_AUTO_SYNC_ENABLED` e se o deploy Render segue ativo ou deve ser encerrado.
 
 ## Divergência de payload real × mocks
 
