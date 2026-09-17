@@ -24,47 +24,58 @@ Ambiente Sandbox não será usado neste lote. Toda credencial Live fica só em
 - Conta Shopee Live: linha NOVA em `marketplace_accounts` (nunca reconectar a linha usada no
   Sandbox).
 
-### Redirect URI exata (derivada do código, `.env` real não lido)
+### Redirect URI exata (confirmada no Partner Console — captura real do usuário)
 
 `validateShopeeRedirectUri` (`shopee-redirect-uri.validator.ts:14,31-39`) exige: pathname
 EXATAMENTE `/integrations/shopee/callback` (mesmo valor do `@Get('integrations/shopee/callback')`
 em `shopee-oauth.controller.ts:61` — `main.ts` não define `setGlobalPrefix`, então não há
-prefixo extra); sem query/fragmento/userinfo; host `localhost` ou `127.0.0.1` (só aceitos
-quando `NODE_ENV==='development'`); `http` ou `https` aceitos em development.
+prefixo extra); sem query/fragmento/userinfo; fora de `NODE_ENV==='development'` exige HTTPS e
+rejeita `localhost`/`127.0.0.1`.
 
-`backend/.env.example:6` documenta `PORT=3000` como exemplo; o comentário da linha 8-11 confirma
-que, sem `APP_HOST` definido, o backend liga em `127.0.0.1` fora de produção — esse é o host
-que efetivamente aceita conexões nesse cenário.
+O Partner Console (captura real) já tem, tanto em "Test Redirect URL Domain" quanto em "Live
+Redirect URL Domain", o mesmo valor: `https://cpe-avaliacao-shopee-frontend.onrender.com`. Não
+é o domínio do backend — é o do frontend, e funciona porque `frontend/next.config.ts:50-52`
+reescreve `/integrations/:path*` para `BACKEND_PROXY_URL` (same-origin, necessário para cookies
+`SameSite=Lax` entre subdomínios `onrender.com`, ver comentário do próprio arquivo).
 
-**URL exata, a partir desses defaults documentados**:
+**URL exata, já aprovada**:
 ```
-http://127.0.0.1:3000/integrations/shopee/callback
+https://cpe-avaliacao-shopee-frontend.onrender.com/integrations/shopee/callback
 ```
-Se o `PORT`/`APP_HOST` real do seu `backend/.env` for diferente do exemplo, ajuste porta/host
-nessa URL antes de cadastrar no Partner Console — não vou ler o `.env` para confirmar isso; é
-você quem sabe o valor real.
 
-**Diferença backend × frontend**: essa URL é do BACKEND — é ela que vai no Partner Console da
-Shopee, porque é para onde a Shopee redireciona depois do consentimento
-(`shopee-oauth.controller.ts:61-72`, rota pública). O backend, depois de processar o callback,
-redireciona o navegador DE NOVO, agora para `FRONTEND_URL` + `/integracoes` (`?shopee=success`
-ou `?shopee=error&reason=...`) — `shopee-callback-redirect-url.ts:14-26`, usando a variável
-`FRONTEND_URL` (`http://localhost:3001` no `.env.example`), nunca a URL de callback do backend.
-Nunca cadastrar a URL do frontend (`:3001/integracoes`) no Partner Console — a Shopee precisa
-da rota do backend.
+**Diferença backend × frontend**: essa URL é a que vai no Partner Console — é para onde a
+Shopee redireciona depois do consentimento — mas fisicamente ela bate primeiro no Next.js do
+frontend (domínio público registrado), que reescreve a requisição, no servidor, para o
+controller real do backend (`shopee-oauth.controller.ts:61-72`, rota pública). O backend, depois
+de processar o callback, redireciona o navegador DE NOVO para `FRONTEND_URL` + `/integracoes`
+(`?shopee=success` ou `?shopee=error&reason=...`) — `shopee-callback-redirect-url.ts:14-26`.
+
+**Consequência para o fluxo operacional**: como o domínio aprovado é o do deploy Render, o
+OAuth Live real só pode ser executado contra esse deploy (backend + frontend publicados),
+nunca contra `localhost`/`127.0.0.1` — a spec anterior assumia OAuth local; corrigido abaixo em
+"OAuth Live via deploy Render".
 
 **Pausa humana obrigatória (antes de qualquer OAuth)** — valor mantido fixo, nunca substituído
 automaticamente:
-1. Usuário cadastra/confirma no Partner Console da Shopee, para o app Live, exatamente
-   `http://127.0.0.1:3000/integrations/shopee/callback`.
-2. Usuário confirma que o Partner Console aceitou e salvou esse valor.
-3. Só depois disso o mesmo valor, byte a byte, entra em `SHOPEE_REDIRECT_URI` no
-   `backend/.env` (junto da Partner Key, mesma pausa humana).
+1. Confirmado: Partner Console já tem cadastrado, para Test e para Live,
+   `https://cpe-avaliacao-shopee-frontend.onrender.com/integrations/shopee/callback` (captura
+   real do usuário).
+2. `SHOPEE_REDIRECT_URI`, byte a byte igual ao valor acima, entra na env do serviço backend
+   real usado para o OAuth Live (Render ou equivalente) — junto da Partner Key, mesma pausa
+   humana.
 
-**Se o Partner Console recusar `127.0.0.1`** (ex.: exige `localhost`, domínio público, ou
-qualquer outro formato): **hard stop**. Nunca substituo automaticamente por `localhost` ou
-outra URL — reporto a recusa exata informada pelo usuário e aguardo decisão explícita sobre
-qual valor usar (isso muda `SHOPEE_REDIRECT_URI` e potencialmente exige reabrir esta spec).
+**Se o valor aprovado no Partner Console mudar** em relação ao confirmado acima: **hard stop**.
+Nunca substituo automaticamente por outro domínio — reporto a divergência exata informada pelo
+usuário e aguardo decisão explícita sobre qual valor usar (isso muda `SHOPEE_REDIRECT_URI` e
+potencialmente exige reabrir esta spec).
+
+### OAuth Live via deploy Render (não local)
+
+Como o Partner Console só aceita o domínio público `onrender.com`, o fluxo operacional completo
+(autorização OAuth, `get_shop_info`, primeira/segunda sincronização) roda exclusivamente contra
+o deploy Render (backend + frontend publicados), usando o rewrite same-origin do frontend para
+o backend já descrito acima — nunca contra um backend local (`localhost`/`127.0.0.1`), que não
+tem domínio aprovado no Partner Console. Ver `render.yaml` para os serviços e branches usados.
 
 ## Conta Sandbox antiga — preservar e tornar inelegível
 

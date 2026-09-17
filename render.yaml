@@ -23,7 +23,7 @@ services:
     runtime: docker
     plan: free
     region: virginia
-    branch: feat/shopee-oauth
+    branch: feat/shopee-live-e2e
     dockerContext: ./backend
     dockerfilePath: ./backend/Dockerfile
     autoDeployTrigger: off
@@ -112,7 +112,7 @@ services:
     runtime: docker
     plan: free
     region: virginia
-    branch: feat/shopee-oauth
+    branch: feat/shopee-live-e2e
     dockerContext: ./frontend
     dockerfilePath: ./frontend/Dockerfile
     autoDeployTrigger: off
