@@ -192,4 +192,58 @@ describe('POST /marketplace-accounts — fronteira HTTP real (Postgres real, Che
     expect(response.status).toBe(401);
     expect(await countAllAccounts()).toBe(before);
   });
+
+  it('disconnects a CONNECTED account: 200, DISCONNECTED, tokens nulled, externalSellerId preserved', async () => {
+    const createResponse = await request(app.getHttpServer())
+      .post('/marketplace-accounts')
+      .set('Cookie', accessTokenCookie())
+      .send({ marketplace: 'SHOPEE' });
+    const id = (createResponse.body as { id: string }).id;
+
+    await dataSource.query(
+      `UPDATE marketplace_accounts
+          SET status = 'CONNECTED', external_seller_id = 'shop-999',
+              encrypted_access_token = 'iv:tag:a', encrypted_refresh_token = 'iv:tag:r',
+              token_expires_at = now() + interval '1 hour'
+        WHERE id = $1`,
+      [id],
+    );
+
+    const response = await request(app.getHttpServer())
+      .post(`/marketplace-accounts/${id}/disconnect`)
+      .set('Cookie', accessTokenCookie());
+
+    expect(response.status).toBe(200);
+    const body = response.body as { id: string; status: string };
+    expect(body.status).toBe('DISCONNECTED');
+
+    const row = await selectPersistedRow(id);
+    expect(row.status).toBe('DISCONNECTED');
+    expect(row.encrypted_access_token).toBeNull();
+    expect(row.encrypted_refresh_token).toBeNull();
+    expect(row.token_expires_at).toBeNull();
+    expect(row.external_seller_id).toBe('shop-999');
+  });
+
+  it('rejects disconnect with 401 when no session cookie is sent', async () => {
+    const createResponse = await request(app.getHttpServer())
+      .post('/marketplace-accounts')
+      .set('Cookie', accessTokenCookie())
+      .send({ marketplace: 'SHOPEE' });
+    const id = (createResponse.body as { id: string }).id;
+
+    const response = await request(app.getHttpServer()).post(
+      `/marketplace-accounts/${id}/disconnect`,
+    );
+
+    expect(response.status).toBe(401);
+  });
+
+  it('returns 404 when disconnecting a non-existent account id', async () => {
+    const response = await request(app.getHttpServer())
+      .post('/marketplace-accounts/00000000-0000-4000-8000-000000000000/disconnect')
+      .set('Cookie', accessTokenCookie());
+
+    expect(response.status).toBe(404);
+  });
 });

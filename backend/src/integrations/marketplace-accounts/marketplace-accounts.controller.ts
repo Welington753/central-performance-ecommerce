@@ -72,4 +72,12 @@ export class MarketplaceAccountsController {
       throw error;
     }
   }
+
+  @Post(':id/disconnect')
+  async disconnect(
+    @Param('id', ParseUUIDPipe) id: string,
+  ): Promise<MarketplaceAccountResponseDto> {
+    const account = await this.marketplaceAccountsService.disconnect(id);
+    return toMarketplaceAccountResponse(account);
+  }
 }
