@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
@@ -12,6 +13,7 @@ import { OAuthAuthorizationRequestsService } from '../mercado-livre-oauth/oauth-
 import type { ShopeeCredentialsService } from './shopee-credentials.service';
 import type { ShopeeTokenOutcome } from './shopee-http.client';
 import { ShopeeHttpClient } from './shopee-http.client';
+import { mapShopeeCallbackOutcomeToPublicReason } from './shopee-callback-reason.mapper';
 import { ShopeeOAuthService } from './shopee-oauth.service';
 
 function fakeConfigService(
@@ -343,7 +345,7 @@ describe('ShopeeOAuthService — callback transacional (Postgres real)', () => {
   describe('outcomes do ShopeeHttpClient (16-19) — nunca retry, sempre finaliza a tentativa', () => {
     it.each`
       label                    | exchangeOutcome                                                               | expectedFailureCode
-      ${'provider_rejected'}   | ${{ kind: 'provider_rejected' }}                                              | ${'TOKEN_EXCHANGE_REJECTED'}
+      ${'provider_rejected'}   | ${{ kind: 'provider_rejected', providerErrorCode: 'error_auth' }}             | ${'TOKEN_EXCHANGE_REJECTED'}
       ${'rate_limited'}        | ${{ kind: 'rate_limited', retryAfterMs: 30000 }}                              | ${'TOKEN_EXCHANGE_RATE_LIMITED'}
       ${'invalid_response'}    | ${{ kind: 'invalid_response' }}                                               | ${'TOKEN_EXCHANGE_INVALID_RESPONSE'}
       ${'unknown_result'}      | ${{ kind: 'unknown_result' }}                                                 | ${'TOKEN_EXCHANGE_RESULT_UNKNOWN'}
@@ -374,6 +376,110 @@ describe('ShopeeOAuthService — callback transacional (Postgres real)', () => {
         expect(account.encrypted_access_token).toBeNull();
       },
     );
+  });
+
+  describe('instrumentação segura de provider_rejected (diagnóstico Live)', () => {
+    it('registra um log WARN só com o vocabulário seguro autorizado quando a Shopee rejeita a troca', async () => {
+      const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      try {
+        const pending = await createShopeePending();
+        const exchange = jest.fn().mockResolvedValue({
+          kind: 'provider_rejected',
+          providerErrorCode: 'error_auth',
+        });
+        const service = buildService(exchange);
+
+        const outcome = await service.handleAuthorizationCallback({
+          state: pending.state,
+          code: 'super-secret-code',
+          shopId: '1',
+        });
+
+        expect(outcome).toEqual({ kind: 'connection_failed' });
+        expect(warnSpy).toHaveBeenCalledWith(
+          'SHOPEE_TOKEN_EXCHANGE_REJECTED',
+          expect.objectContaining({
+            failureCode: 'TOKEN_EXCHANGE_REJECTED',
+            providerErrorCode: 'error_auth',
+            marketplaceAccountId: accountId,
+            authorizationRequestId: pending.id,
+          }),
+        );
+
+        const loggedPayload = JSON.stringify(warnSpy.mock.calls);
+        expect(loggedPayload).not.toContain('super-secret-code');
+        expect(loggedPayload).not.toContain(pending.state);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('nunca registra o providerErrorCode bruto rejeitado pela sanitização (permanece responsabilidade do ShopeeHttpClient)', async () => {
+      const warnSpy = jest.spyOn(Logger.prototype, 'warn').mockImplementation();
+      try {
+        const pending = await createShopeePending();
+        const exchange = jest.fn().mockResolvedValue({
+          kind: 'provider_rejected',
+          providerErrorCode: 'UNCLASSIFIED_PROVIDER_ERROR',
+        });
+        const service = buildService(exchange);
+
+        await service.handleAuthorizationCallback({
+          state: pending.state,
+          code: 'c',
+          shopId: '1',
+        });
+
+        expect(warnSpy).toHaveBeenCalledWith(
+          'SHOPEE_TOKEN_EXCHANGE_REJECTED',
+          expect.objectContaining({
+            providerErrorCode: 'UNCLASSIFIED_PROVIDER_ERROR',
+          }),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it.each`
+      label                    | exchangeOutcome
+      ${'rate_limited'}        | ${{ kind: 'rate_limited', retryAfterMs: 30000 }}
+      ${'invalid_response'}    | ${{ kind: 'invalid_response' }}
+      ${'unknown_result'}      | ${{ kind: 'unknown_result' }}
+      ${'configuration_error'} | ${{ kind: 'configuration_error', failureCode: 'SHOPEE_NOT_CONFIGURED' }}
+      ${'invalid_request'}     | ${{ kind: 'invalid_request', failureCode: 'INVALID_AUTHORIZATION_RESPONSE' }}
+    `(
+      'nunca registra o log WARN de instrumentação para $label (só provider_rejected)',
+      async ({ exchangeOutcome }) => {
+        const warnSpy = jest
+          .spyOn(Logger.prototype, 'warn')
+          .mockImplementation();
+        try {
+          const pending = await createShopeePending();
+          const exchange = jest.fn().mockResolvedValue(exchangeOutcome);
+          const service = buildService(exchange);
+
+          await service.handleAuthorizationCallback({
+            state: pending.state,
+            code: 'c',
+            shopId: '1',
+          });
+
+          expect(warnSpy).not.toHaveBeenCalledWith(
+            'SHOPEE_TOKEN_EXCHANGE_REJECTED',
+            expect.anything(),
+          );
+        } finally {
+          warnSpy.mockRestore();
+        }
+      },
+    );
+
+    it('o motivo público continua exatamente CONNECTION_FAILED para provider_rejected', () => {
+      expect(mapShopeeCallbackOutcomeToPublicReason('connection_failed')).toBe(
+        'CONNECTION_FAILED',
+      );
+    });
   });
 
   describe('falha de criptografia (20)', () => {

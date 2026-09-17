@@ -281,6 +281,22 @@ export class ShopeeOAuthService {
         });
 
         if (exchange.kind !== 'success') {
+          // Instrumentação segura da rejeição (Checkpoint de diagnóstico
+          // Live): só `provider_rejected` carrega um `providerErrorCode`
+          // (já sanitizado contra vocabulário fechado em
+          // `sanitizeShopeeProviderErrorCode`) — nunca `code`/`state`/
+          // `shopId`/tokens/Partner Key, que não fazem parte deste objeto.
+          // `failure_code` gravado em `oauth_authorization_requests`
+          // continua o mesmo `TOKEN_EXCHANGE_REJECTED` fechado de sempre;
+          // `providerErrorCode` fica só no log, nunca persistido.
+          if (exchange.kind === 'provider_rejected') {
+            this.logger.warn('SHOPEE_TOKEN_EXCHANGE_REJECTED', {
+              failureCode: 'TOKEN_EXCHANGE_REJECTED',
+              providerErrorCode: exchange.providerErrorCode,
+              marketplaceAccountId: account.id,
+              authorizationRequestId: claimed.id,
+            });
+          }
           await this.authorizationRequestsService.finalizeFailure(
             claimed.id,
             mapExchangeOutcomeToFailureCode(exchange),

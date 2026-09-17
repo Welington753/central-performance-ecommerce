@@ -322,7 +322,7 @@ describe('ShopeeHttpClient', () => {
       });
     });
 
-    it('returns provider_rejected when error is non-empty, never a raw provider message', async () => {
+    it('returns provider_rejected with the sanitized providerErrorCode, never a raw provider message', async () => {
       const fetchImpl = jest.fn().mockResolvedValue(
         jsonResponse(200, {
           error: 'error_auth',
@@ -335,10 +335,76 @@ describe('ShopeeHttpClient', () => {
         fixedClock,
       );
 
+      const outcome = await client.exchangeAuthorizationCode({
+        code: 'c',
+        shopId: '1',
+      });
+
+      expect(outcome).toEqual({
+        kind: 'provider_rejected',
+        providerErrorCode: 'error_auth',
+      });
+      expect(JSON.stringify(outcome)).not.toContain(
+        'sensitive provider detail',
+      );
+    });
+
+    it('replaces a providerErrorCode longer than 64 characters with UNCLASSIFIED_PROVIDER_ERROR', async () => {
+      const fetchImpl = jest
+        .fn()
+        .mockResolvedValue(jsonResponse(200, { error: 'a'.repeat(65) }));
+      const client = new ShopeeHttpClient(
+        makeCredentialsService(),
+        fetchImpl,
+        fixedClock,
+      );
+
       expect(
         await client.exchangeAuthorizationCode({ code: 'c', shopId: '1' }),
       ).toEqual({
         kind: 'provider_rejected',
+        providerErrorCode: 'UNCLASSIFIED_PROVIDER_ERROR',
+      });
+    });
+
+    it.each(['error auth', 'error\nauth', 'error/auth', 'error;drop table'])(
+      'replaces a providerErrorCode with disallowed characters ("%s") with UNCLASSIFIED_PROVIDER_ERROR',
+      async (rawError) => {
+        const fetchImpl = jest
+          .fn()
+          .mockResolvedValue(jsonResponse(200, { error: rawError }));
+        const client = new ShopeeHttpClient(
+          makeCredentialsService(),
+          fetchImpl,
+          fixedClock,
+        );
+
+        expect(
+          await client.exchangeAuthorizationCode({ code: 'c', shopId: '1' }),
+        ).toEqual({
+          kind: 'provider_rejected',
+          providerErrorCode: 'UNCLASSIFIED_PROVIDER_ERROR',
+        });
+      },
+    );
+
+    it('accepts a providerErrorCode with letters, numbers, underscore, hyphen, dot and colon', async () => {
+      const fetchImpl = jest
+        .fn()
+        .mockResolvedValue(
+          jsonResponse(200, { error: 'error.auth-invalid_sign:v2' }),
+        );
+      const client = new ShopeeHttpClient(
+        makeCredentialsService(),
+        fetchImpl,
+        fixedClock,
+      );
+
+      expect(
+        await client.exchangeAuthorizationCode({ code: 'c', shopId: '1' }),
+      ).toEqual({
+        kind: 'provider_rejected',
+        providerErrorCode: 'error.auth-invalid_sign:v2',
       });
     });
 

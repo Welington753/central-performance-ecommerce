@@ -15,10 +15,28 @@ export type ShopeeTokenOutcome =
   | { kind: 'success'; token: ShopeeTokenResult }
   | { kind: 'configuration_error'; failureCode: 'SHOPEE_NOT_CONFIGURED' }
   | { kind: 'invalid_request'; failureCode: 'INVALID_AUTHORIZATION_RESPONSE' }
-  | { kind: 'provider_rejected' }
+  | { kind: 'provider_rejected'; providerErrorCode: string }
   | { kind: 'rate_limited'; retryAfterMs: number | null }
   | { kind: 'invalid_response' }
   | { kind: 'unknown_result' };
+
+/**
+ * Vocabulário de diagnóstico seguro para `raw.error` (Checkpoint de
+ * instrumentação da rejeição Live) — `raw.error` é entrada NÃO confiável
+ * vinda do provedor: só um código curto (letras/dígitos/`_`/`-`/`.`/`:`,
+ * até 64 caracteres) é aceito como `providerErrorCode`; qualquer outra
+ * coisa (espaço, quebra de linha, símbolo fora da allowlist, ou tamanho
+ * maior) vira o valor fixo abaixo — o valor original rejeitado NUNCA é
+ * gravado nem logado em lugar nenhum, nem mesmo aqui.
+ */
+const PROVIDER_ERROR_CODE_PATTERN = /^[A-Za-z0-9_.:-]{1,64}$/;
+export const UNCLASSIFIED_PROVIDER_ERROR = 'UNCLASSIFIED_PROVIDER_ERROR';
+
+export function sanitizeShopeeProviderErrorCode(rawError: string): string {
+  return PROVIDER_ERROR_CODE_PATTERN.test(rawError)
+    ? rawError
+    : UNCLASSIFIED_PROVIDER_ERROR;
+}
 
 /**
  * Token de injeção explícito para `fetch` — mesmo motivo de `ML_FETCH`
@@ -225,7 +243,10 @@ export class ShopeeHttpClient {
       }
       const raw = json as Record<string, unknown>;
       if (typeof raw.error === 'string' && raw.error.length > 0) {
-        return { kind: 'provider_rejected' };
+        return {
+          kind: 'provider_rejected',
+          providerErrorCode: sanitizeShopeeProviderErrorCode(raw.error),
+        };
       }
 
       const validation = validateShopeeTokenResponseBody(json);
