@@ -328,6 +328,25 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
     expect(persistence.finalizeSyncRunFailure).not.toHaveBeenCalled();
   });
 
+  it('passes options.type through to beginSyncRun when provided, and omits it (default MANUAL) when not provided', async () => {
+    const { service, persistence } = buildService();
+
+    await service.syncOrders(ACCOUNT_ID, { type: 'INCREMENTAL' as never });
+
+    expect(persistence.beginSyncRun).toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'INCREMENTAL' }),
+    );
+  });
+
+  it('omits type from beginSyncRun input when syncOrders is called without options (manual sync, unchanged behavior)', async () => {
+    const { service, persistence } = buildService();
+
+    await service.syncOrders(ACCOUNT_ID);
+
+    const call = persistence.beginSyncRun.mock.calls[0][0] as Record<string, unknown>;
+    expect('type' in call).toBe(false);
+  });
+
   it('sucesso com VÁRIOS pedidos: mapeia, persiste e finaliza SUCCESS', async () => {
     const { service, persistence } = buildService({
       client: {

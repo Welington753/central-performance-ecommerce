@@ -13,6 +13,7 @@ import {
   SyncAlreadyRunningError,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
 import { computeIncrementalSyncWindow } from '../marketplace-orders/period.util';
+import { SyncRunType } from '../../sync/sync-run.entity';
 import {
   fetchShopeeOrderDetails,
   fetchShopeeOrderSns,
@@ -96,7 +97,10 @@ export class ShopeeOrdersSyncService {
     private readonly persistence: MarketplaceOrdersPersistenceService,
   ) {}
 
-  async syncOrders(accountId: string): Promise<ShopeeOrdersSyncSummary> {
+  async syncOrders(
+    accountId: string,
+    options: { type?: SyncRunType } = {},
+  ): Promise<ShopeeOrdersSyncSummary> {
     const account =
       await this.marketplaceAccountsService.findByIdOrFail(accountId);
 
@@ -122,6 +126,7 @@ export class ShopeeOrdersSyncService {
         periodFrom: window.from,
         periodTo: window.to,
         startedAt,
+        ...(options.type !== undefined ? { type: options.type } : {}),
       });
     } catch (error) {
       if (error instanceof SyncAlreadyRunningError) {
