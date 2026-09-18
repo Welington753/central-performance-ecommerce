@@ -212,7 +212,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - status desconhecido e integrida
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
     expect(JSON.stringify(outcome)).not.toContain('SOME_FUTURE_STATUS');
   });
 
@@ -235,7 +235,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - status desconhecido e integrida
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response when a requested orderSn is missing from the response (no partial success)', async () => {
@@ -256,7 +256,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - status desconhecido e integrida
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response for a duplicated orderSn in the response', async () => {
@@ -277,7 +277,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - status desconhecido e integrida
       shopId: SHOP_ID,
       orderSnList: ['AAA', 'BBB'],
     });
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
   });
 });
 
@@ -301,7 +301,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rejeicao do provedor e status H
         shopId: SHOP_ID,
         orderSnList: VALID_ORDER_SN_LIST,
       }),
-    ).toEqual({ kind: 'provider_rejected' });
+    ).toMatchObject({ kind: 'provider_rejected' });
   });
 
   it('returns rate_limited with a valid Retry-After parsed to milliseconds on 429', async () => {
@@ -320,7 +320,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rejeicao do provedor e status H
         shopId: SHOP_ID,
         orderSnList: VALID_ORDER_SN_LIST,
       }),
-    ).toEqual({ kind: 'rate_limited', retryAfterMs: 30000 });
+    ).toMatchObject({ kind: 'rate_limited', retryAfterMs: 30000 });
   });
 
   it.each([500, 503])(
@@ -339,7 +339,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rejeicao do provedor e status H
           shopId: SHOP_ID,
           orderSnList: VALID_ORDER_SN_LIST,
         }),
-      ).toEqual({ kind: 'temporary_failure' });
+      ).toMatchObject({ kind: 'temporary_failure' });
     },
   );
 });
@@ -359,7 +359,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rede, timeout, JSON e resposta 
         shopId: SHOP_ID,
         orderSnList: VALID_ORDER_SN_LIST,
       }),
-    ).toEqual({ kind: 'unknown_result' });
+    ).toMatchObject({ kind: 'unknown_result' });
   });
 
   it('returns invalid_response for a non-JSON body', async () => {
@@ -378,7 +378,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rede, timeout, JSON e resposta 
         shopId: SHOP_ID,
         orderSnList: VALID_ORDER_SN_LIST,
       }),
-    ).toEqual({ kind: 'invalid_response' });
+    ).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response for a genuinely empty response body', async () => {
@@ -395,7 +395,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rede, timeout, JSON e resposta 
         shopId: SHOP_ID,
         orderSnList: VALID_ORDER_SN_LIST,
       }),
-    ).toEqual({ kind: 'invalid_response' });
+    ).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response for a response body above the size limit, without parsing it', async () => {
@@ -424,7 +424,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rede, timeout, JSON e resposta 
       orderSnList,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -450,7 +450,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - rede, timeout, JSON e resposta 
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
     expect(textSpy).not.toHaveBeenCalled();
   });
 });

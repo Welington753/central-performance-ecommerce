@@ -114,7 +114,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - nenhuma informacao sensivel em 
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toEqual({ kind: 'unknown_result' });
+    expect(outcome).toMatchObject({ kind: 'unknown_result' });
     expect(consoleLog).not.toHaveBeenCalled();
     expect(consoleWarn).not.toHaveBeenCalled();
     expect(consoleError).not.toHaveBeenCalled();
@@ -147,7 +147,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - nenhuma informacao sensivel em 
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toEqual({ kind: 'provider_rejected' });
+    expect(outcome).toMatchObject({ kind: 'provider_rejected' });
     expect(consoleLog).not.toHaveBeenCalled();
     expect(consoleWarn).not.toHaveBeenCalled();
     expect(consoleError).not.toHaveBeenCalled();

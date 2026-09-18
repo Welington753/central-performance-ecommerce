@@ -1,6 +1,7 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   NotFoundException,
 } from '@nestjs/common';
 import { Marketplace } from '../contracts/marketplace.enum';
@@ -26,6 +27,7 @@ import {
   type ShopeeOrdersSyncErrorCode,
 } from './shopee-orders-sync-error';
 import { splitShopeeSyncWindowIntoBlocks } from './shopee-orders-sync-window.util';
+import { buildShopeeOrderSyncFailureLogPayload } from './shopee-order-sync-diagnostics';
 
 export interface ShopeeOrdersSyncSummary {
   syncRunId: string;
@@ -90,6 +92,8 @@ function resolveSyncErrorCode(error: unknown): ShopeeOrdersSyncErrorCode {
  */
 @Injectable()
 export class ShopeeOrdersSyncService {
+  private readonly logger = new Logger(ShopeeOrdersSyncService.name);
+
   constructor(
     private readonly marketplaceAccountsService: MarketplaceAccountsService,
     private readonly accessTokenService: ShopeeAccessTokenService,
@@ -160,9 +164,23 @@ export class ShopeeOrdersSyncService {
       // Mapeamento inválido (ex.: `totalAmount` ausente, timestamp inválido,
       // status desconhecido) lança e aborta ANTES de qualquer persistência —
       // nenhum pedido parcial é gravado (exigência explícita CP2K-3B).
-      const mappedOrders: MappedOrderRecord[] = detailOrders.map((raw) =>
-        mapShopeeOrder(accountId, raw),
-      );
+      // Convertido aqui para `ShopeeOrdersSyncError` com `stage: 'MAPPING'`
+      // (instrumentação de diagnóstico) — nunca o `ShopeeOrderMappingError`
+      // cru escapa desta função, mesma garantia de antes.
+      let mappedOrders: MappedOrderRecord[];
+      try {
+        mappedOrders = detailOrders.map((raw) =>
+          mapShopeeOrder(accountId, raw),
+        );
+      } catch (error) {
+        if (error instanceof ShopeeOrderMappingError) {
+          throw new ShopeeOrdersSyncError('DATA_UNAVAILABLE', {
+            stage: 'MAPPING',
+            mappingReason: error.reason,
+          });
+        }
+        throw error;
+      }
 
       const persistResult = await this.persistence.persistOrders(mappedOrders);
       const finishedAt = new Date();
@@ -227,6 +245,25 @@ export class ShopeeOrdersSyncService {
           code,
           FAILURE_SUMMARIES[code],
           new Date(),
+        );
+      }
+      // Único ponto de log de `SHOPEE_ORDER_SYNC_FAILED` (nível de
+      // sincronização) — só quando há diagnóstico de `stage` anexado
+      // (`ORDER_LIST`/`ORDER_DETAIL`/`MAPPING`, vindo de
+      // `ShopeeOrdersApiClient`/`shopee-orders-fetch.util.ts`/mapeamento
+      // acima); falhas de conta/credenciais (`NOT_CONNECTED`,
+      // `CONNECTION_BUSY`, etc.) nunca têm `stage` e nunca geram este log —
+      // nenhuma outra camada deste módulo loga, para nunca duplicar o
+      // evento.
+      if (error instanceof ShopeeOrdersSyncError && error.diagnostics) {
+        this.logger.error(
+          'SHOPEE_ORDER_SYNC_FAILED',
+          buildShopeeOrderSyncFailureLogPayload({
+            failureCode: code,
+            marketplaceAccountId: accountId,
+            syncRunId,
+            diagnostics: error.diagnostics,
+          }),
         );
       }
       throw error instanceof ShopeeOrdersSyncError

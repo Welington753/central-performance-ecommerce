@@ -128,7 +128,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rejeicao do provedor (error nao v
       ...VALID_ORDER_LIST_INPUT,
     });
 
-    expect(outcome).toEqual({ kind: 'provider_rejected' });
+    expect(outcome).toMatchObject({ kind: 'provider_rejected' });
   });
 
   it('returns provider_rejected for order.order_list_invalid_time', async () => {
@@ -150,7 +150,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rejeicao do provedor (error nao v
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'provider_rejected' });
+    ).toMatchObject({ kind: 'provider_rejected' });
   });
 
   it('returns provider_rejected for error_shop', async () => {
@@ -172,7 +172,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rejeicao do provedor (error nao v
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'provider_rejected' });
+    ).toMatchObject({ kind: 'provider_rejected' });
   });
 });
 
@@ -195,7 +195,7 @@ describe('ShopeeOrdersApiClient.getOrderList - status HTTP (4xx/429/5xx)', () =>
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'provider_rejected' });
+    ).toMatchObject({ kind: 'provider_rejected' });
   });
 
   it('returns rate_limited with a valid Retry-After parsed to milliseconds on 429', async () => {
@@ -214,7 +214,7 @@ describe('ShopeeOrdersApiClient.getOrderList - status HTTP (4xx/429/5xx)', () =>
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'rate_limited', retryAfterMs: 30000 });
+    ).toMatchObject({ kind: 'rate_limited', retryAfterMs: 30000 });
   });
 
   it('returns rate_limited with retryAfterMs: null for an invalid Retry-After header', async () => {
@@ -235,7 +235,7 @@ describe('ShopeeOrdersApiClient.getOrderList - status HTTP (4xx/429/5xx)', () =>
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'rate_limited', retryAfterMs: null });
+    ).toMatchObject({ kind: 'rate_limited', retryAfterMs: null });
   });
 
   it.each([
@@ -263,7 +263,7 @@ describe('ShopeeOrdersApiClient.getOrderList - status HTTP (4xx/429/5xx)', () =>
           shopId: SHOP_ID,
           ...VALID_ORDER_LIST_INPUT,
         }),
-      ).toEqual({ kind: 'rate_limited', retryAfterMs: null });
+      ).toMatchObject({ kind: 'rate_limited', retryAfterMs: null });
     },
   );
 
@@ -281,7 +281,7 @@ describe('ShopeeOrdersApiClient.getOrderList - status HTTP (4xx/429/5xx)', () =>
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'rate_limited', retryAfterMs: null });
+    ).toMatchObject({ kind: 'rate_limited', retryAfterMs: null });
   });
 
   it.each([500, 503])(
@@ -300,7 +300,7 @@ describe('ShopeeOrdersApiClient.getOrderList - status HTTP (4xx/429/5xx)', () =>
           shopId: SHOP_ID,
           ...VALID_ORDER_LIST_INPUT,
         }),
-      ).toEqual({ kind: 'temporary_failure' });
+      ).toMatchObject({ kind: 'temporary_failure' });
     },
   );
 });
@@ -320,7 +320,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'unknown_result' });
+    ).toMatchObject({ kind: 'unknown_result' });
   });
 
   it('returns unknown_result on a timeout (our own AbortController firing / AbortError)', async () => {
@@ -354,7 +354,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'unknown_result' });
+    ).toMatchObject({ kind: 'unknown_result' });
   });
 
   it('returns invalid_response for a non-JSON body', async () => {
@@ -373,7 +373,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'invalid_response' });
+    ).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response for a genuinely empty (zero-byte) response body, never crashing', async () => {
@@ -390,7 +390,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'invalid_response' });
+    ).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response for a genuinely empty body even with Content-Length: 0 declared', async () => {
@@ -409,7 +409,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'invalid_response' });
+    ).toMatchObject({ kind: 'invalid_response' });
   });
 
   it('returns invalid_response for a response body above the size limit, without parsing it', async () => {
@@ -439,7 +439,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
       ...VALID_ORDER_LIST_INPUT,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
     expect(fetchImpl).toHaveBeenCalledTimes(1);
   });
 
@@ -465,7 +465,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
       ...VALID_ORDER_LIST_INPUT,
     });
 
-    expect(outcome).toEqual({ kind: 'invalid_response' });
+    expect(outcome).toMatchObject({ kind: 'invalid_response' });
     expect(textSpy).not.toHaveBeenCalled();
   });
 
@@ -485,7 +485,7 @@ describe('ShopeeOrdersApiClient.getOrderList - rede, timeout, JSON e resposta gr
         shopId: SHOP_ID,
         ...VALID_ORDER_LIST_INPUT,
       }),
-    ).toEqual({ kind: 'invalid_response' });
+    ).toMatchObject({ kind: 'invalid_response' });
   });
 });
 

@@ -87,7 +87,7 @@ describe('ShopeeOrdersApiClient - nenhuma informacao sensivel em logs/excecoes',
       ...VALID_ORDER_LIST_INPUT,
     });
 
-    expect(outcome).toEqual({ kind: 'unknown_result' });
+    expect(outcome).toMatchObject({ kind: 'unknown_result' });
     expect(JSON.stringify(outcome)).not.toContain('super-secret-access-token');
     expect(JSON.stringify(outcome)).not.toContain(PARTNER_KEY);
     expect(consoleLog).not.toHaveBeenCalled();
@@ -123,7 +123,7 @@ describe('ShopeeOrdersApiClient - nenhuma informacao sensivel em logs/excecoes',
       ...VALID_ORDER_LIST_INPUT,
     });
 
-    expect(outcome).toEqual({ kind: 'provider_rejected' });
+    expect(outcome).toMatchObject({ kind: 'provider_rejected' });
     expect(JSON.stringify(outcome)).not.toContain('<script>');
     expect(consoleLog).not.toHaveBeenCalled();
     expect(consoleWarn).not.toHaveBeenCalled();

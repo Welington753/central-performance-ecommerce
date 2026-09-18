@@ -1,3 +1,5 @@
+import type { ShopeeOrderSyncFailureDiagnostics } from './shopee-order-sync-diagnostics';
+
 /**
  * Vocabulário público fechado da sincronização de pedidos Shopee (Checkpoint
  * CP2K-3B) — estruturalmente paralelo a `ShopeeShopErrorCode`
@@ -21,9 +23,17 @@ export type ShopeeOrdersSyncErrorCode =
 /**
  * A mensagem da exceção É o código — nunca inclui corpo de resposta, URL com
  * query string, token, `sign` ou qualquer payload bruto da Shopee.
+ * `diagnostics` (instrumentação de diagnóstico de `DATA_UNAVAILABLE`/
+ * `TEMPORARILY_UNAVAILABLE`) segue a MESMA regra — já sanitizado na origem
+ * (`ShopeeOrdersApiClient`/`shopee-orders-fetch.util.ts`), nunca lido diretamente
+ * pelo controller/vocabulário público, só consumido por
+ * `ShopeeOrdersSyncService` para o log único `SHOPEE_ORDER_SYNC_FAILED`.
  */
 export class ShopeeOrdersSyncError extends Error {
-  constructor(public readonly code: ShopeeOrdersSyncErrorCode) {
+  constructor(
+    public readonly code: ShopeeOrdersSyncErrorCode,
+    public readonly diagnostics?: ShopeeOrderSyncFailureDiagnostics,
+  ) {
     super(code);
   }
 }

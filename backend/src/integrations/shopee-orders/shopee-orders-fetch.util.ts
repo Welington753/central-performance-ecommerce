@@ -9,6 +9,46 @@ import {
   ShopeeOrdersSyncError,
 } from './shopee-orders-sync-error';
 import type { ShopeeSyncBlock } from './shopee-orders-sync-window.util';
+import type {
+  ShopeeOrdersHttpDiagnostics,
+  ShopeeOrderSyncFailureDiagnostics,
+  ShopeeOrderSyncOutcomeKind,
+  ShopeeOrderSyncStage,
+} from './shopee-order-sync-diagnostics';
+
+/**
+ * Único subconjunto de `kind` que carrega diagnóstico propagável
+ * (`ShopeeOrderSyncOutcomeKind`) — `configuration_error`/`invalid_request`
+ * nunca são causa de `DATA_UNAVAILABLE`/`TEMPORARILY_UNAVAILABLE` (mapeiam
+ * para `NOT_CONFIGURED`, `resolveShopeeOrdersApiErrorCode`), então nunca
+ * geram diagnóstico de `stage` — continuam sem log estruturado, como já era.
+ */
+function isLoggableOrdersOutcomeKind(
+  kind: string,
+): kind is ShopeeOrderSyncOutcomeKind {
+  return (
+    kind === 'provider_rejected' ||
+    kind === 'invalid_response' ||
+    kind === 'rate_limited' ||
+    kind === 'temporary_failure' ||
+    kind === 'unknown_result'
+  );
+}
+
+function buildOrdersFetchFailureDiagnostics(
+  stage: ShopeeOrderSyncStage,
+  kind: string,
+  diagnostics: ShopeeOrdersHttpDiagnostics | undefined,
+  index: { blockIndex: number } | { batchIndex: number },
+): ShopeeOrderSyncFailureDiagnostics | undefined {
+  if (!isLoggableOrdersOutcomeKind(kind)) return undefined;
+  return {
+    stage,
+    outcomeKind: kind,
+    ...index,
+    ...(diagnostics ?? {}),
+  };
+}
 
 const ORDER_LIST_PAGE_SIZE = 100;
 
@@ -119,6 +159,12 @@ export async function fetchShopeeOrderSns(input: {
       if (outcome.kind !== 'success') {
         throw new ShopeeOrdersSyncError(
           resolveShopeeOrdersApiErrorCode(outcome.kind),
+          buildOrdersFetchFailureDiagnostics(
+            'ORDER_LIST',
+            outcome.kind,
+            'diagnostics' in outcome ? outcome.diagnostics : undefined,
+            { blockIndex },
+          ),
         );
       }
       pagesFetched += 1;
@@ -248,6 +294,12 @@ export async function fetchShopeeOrderDetails(input: {
     if (outcome.kind !== 'success') {
       throw new ShopeeOrdersSyncError(
         resolveShopeeOrdersApiErrorCode(outcome.kind),
+        buildOrdersFetchFailureDiagnostics(
+          'ORDER_DETAIL',
+          outcome.kind,
+          'diagnostics' in outcome ? outcome.diagnostics : undefined,
+          { batchIndex: i / ORDER_DETAIL_BATCH_SIZE },
+        ),
       );
     }
     details.push(...outcome.result.orders);

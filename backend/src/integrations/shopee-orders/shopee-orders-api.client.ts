@@ -32,6 +32,11 @@ import {
   parseRetryAfterMs,
   readLimitedResponseText,
 } from './shopee-orders-http.util';
+import {
+  sanitizeShopeeOrdersProviderErrorCode,
+  sanitizeShopeeOrdersProviderRequestId,
+  type ShopeeOrdersHttpDiagnostics,
+} from './shopee-order-sync-diagnostics';
 
 export interface ShopeeOrderListRequest extends ShopeeOrderListInput {
   accessToken: string;
@@ -48,10 +53,14 @@ export type ShopeeOrderListOutcome =
         | 'INVALID_ACCESS_TOKEN'
         | ShopeeOrderListInputInvalidCode;
     }
-  | { kind: 'provider_rejected' }
-  | { kind: 'rate_limited'; retryAfterMs: number | null }
-  | { kind: 'temporary_failure' }
-  | { kind: 'invalid_response' }
+  | { kind: 'provider_rejected'; diagnostics: ShopeeOrdersHttpDiagnostics }
+  | {
+      kind: 'rate_limited';
+      retryAfterMs: number | null;
+      diagnostics: ShopeeOrdersHttpDiagnostics;
+    }
+  | { kind: 'temporary_failure'; diagnostics: ShopeeOrdersHttpDiagnostics }
+  | { kind: 'invalid_response'; diagnostics: ShopeeOrdersHttpDiagnostics }
   | { kind: 'unknown_result' };
 
 export interface ShopeeOrderDetailRequest extends ShopeeOrderDetailInput {
@@ -69,10 +78,14 @@ export type ShopeeOrderDetailOutcome =
         | 'INVALID_ACCESS_TOKEN'
         | ShopeeOrderDetailInputInvalidCode;
     }
-  | { kind: 'provider_rejected' }
-  | { kind: 'rate_limited'; retryAfterMs: number | null }
-  | { kind: 'temporary_failure' }
-  | { kind: 'invalid_response' }
+  | { kind: 'provider_rejected'; diagnostics: ShopeeOrdersHttpDiagnostics }
+  | {
+      kind: 'rate_limited';
+      retryAfterMs: number | null;
+      diagnostics: ShopeeOrdersHttpDiagnostics;
+    }
+  | { kind: 'temporary_failure'; diagnostics: ShopeeOrdersHttpDiagnostics }
+  | { kind: 'invalid_response'; diagnostics: ShopeeOrdersHttpDiagnostics }
   | { kind: 'unknown_result' };
 
 /**
@@ -109,10 +122,14 @@ const MAX_ORDER_DETAIL_RESPONSE_BYTES = 524288;
  */
 type ShopeeOrdersTransportOutcome<TResult> =
   | { kind: 'success'; result: TResult }
-  | { kind: 'provider_rejected' }
-  | { kind: 'rate_limited'; retryAfterMs: number | null }
-  | { kind: 'temporary_failure' }
-  | { kind: 'invalid_response' }
+  | { kind: 'provider_rejected'; diagnostics: ShopeeOrdersHttpDiagnostics }
+  | {
+      kind: 'rate_limited';
+      retryAfterMs: number | null;
+      diagnostics: ShopeeOrdersHttpDiagnostics;
+    }
+  | { kind: 'temporary_failure'; diagnostics: ShopeeOrdersHttpDiagnostics }
+  | { kind: 'invalid_response'; diagnostics: ShopeeOrdersHttpDiagnostics }
   | { kind: 'unknown_result' };
 
 @Injectable()
@@ -154,14 +171,17 @@ export class ShopeeOrdersApiClient {
         return { kind: 'unknown_result' };
       }
 
-      if (response.status === 429) {
+      const httpStatus = response.status;
+
+      if (httpStatus === 429) {
         return {
           kind: 'rate_limited',
           retryAfterMs: parseRetryAfterMs(response.headers.get('retry-after')),
+          diagnostics: { httpStatus },
         };
       }
-      if (response.status >= 500) {
-        return { kind: 'temporary_failure' };
+      if (httpStatus >= 500) {
+        return { kind: 'temporary_failure', diagnostics: { httpStatus } };
       }
 
       let text: string;
@@ -169,26 +189,47 @@ export class ShopeeOrdersApiClient {
         text = await readLimitedResponseText(response, maxBytes);
       } catch {
         if (controller.signal.aborted) return { kind: 'unknown_result' };
-        return { kind: 'invalid_response' };
+        return { kind: 'invalid_response', diagnostics: { httpStatus } };
       }
 
       let json: unknown;
       try {
         json = JSON.parse(text);
       } catch {
-        return { kind: 'invalid_response' };
+        return { kind: 'invalid_response', diagnostics: { httpStatus } };
       }
 
       if (typeof json !== 'object' || json === null) {
-        return { kind: 'invalid_response' };
+        return { kind: 'invalid_response', diagnostics: { httpStatus } };
       }
       const raw = json as Record<string, unknown>;
+      // `request_id` é lido de forma independente da validação de schema
+      // abaixo (nunca sensível, mas só incluído no diagnóstico quando passa
+      // pelo próprio formato sanitizado — nunca o valor bruto sem checagem).
+      const providerRequestId = sanitizeShopeeOrdersProviderRequestId(
+        raw.request_id,
+      );
       if (typeof raw.error === 'string' && raw.error.length > 0) {
-        return { kind: 'provider_rejected' };
+        return {
+          kind: 'provider_rejected',
+          diagnostics: {
+            httpStatus,
+            providerErrorCode: sanitizeShopeeOrdersProviderErrorCode(raw.error),
+            ...(providerRequestId !== undefined ? { providerRequestId } : {}),
+          },
+        };
       }
 
       const validation = validate(json);
-      if (!validation.valid) return { kind: 'invalid_response' };
+      if (!validation.valid) {
+        return {
+          kind: 'invalid_response',
+          diagnostics: {
+            httpStatus,
+            ...(providerRequestId !== undefined ? { providerRequestId } : {}),
+          },
+        };
+      }
 
       return { kind: 'success', result: validation.result };
     } finally {
