@@ -3,16 +3,15 @@ export type ShopeeEnvironment = 'SANDBOX' | 'PRODUCTION';
 interface ShopeeEndpointSet {
   apiHost: string;
   /**
-   * Host da Shop API (Checkpoint CP2I) — DISTINTO de `apiHost` em produção.
-   * `apiHost` (`partner.shopeemobile.com`) é usado exclusivamente pelo
-   * cliente de token (`ShopeeHttpClient`, endpoints `/auth/token/get` e
-   * `/auth/access_token/get`) e NUNCA foi alterado aqui — nenhuma alteração
-   * ampla/silenciosa de host de fluxo já existente. A documentação oficial
-   * confirmada para a Shop API (ex.: `/api/v2/shop/get_shop_info`) usa hosts
-   * diferentes por ambiente:
+   * Host da Shop API (Checkpoint CP2I). `apiHost` é usado exclusivamente
+   * pelo cliente de token (`ShopeeHttpClient`, endpoints `/auth/token/get` e
+   * `/auth/access_token/get`). Em PRODUCTION (Brasil), desde a correção do
+   * erro `invalid_code`, `apiHost` e `shopApiHost` coincidem
+   * (`openplatform.shopee.com.br`) — ainda assim campos distintos, mantidos
+   * separados porque a documentação oficial os define por endpoint, não por
+   * coincidência de valor:
    *   - Sandbox: mesmo host de `apiHost` (`openplatform.sandbox.test-stable.shopee.sg`);
-   *   - Produção Brasil: `openplatform.shopee.com.br` (não
-   *     `partner.shopeemobile.com`).
+   *   - Produção Brasil: `openplatform.shopee.com.br`.
    * Qualquer cliente da Shop API (`ShopeeShopApiClient`) deve resolver o host
    * exclusivamente a partir deste campo, nunca de `apiHost`.
    */
@@ -62,7 +61,7 @@ export const SHOPEE_SHOP_INFO_PATH = '/api/v2/shop/get_shop_info';
 
 export const SHOPEE_ENDPOINTS: Record<ShopeeEnvironment, ShopeeEndpointSet> = {
   PRODUCTION: {
-    apiHost: 'https://partner.shopeemobile.com',
+    apiHost: 'https://openplatform.shopee.com.br',
     shopApiHost: 'https://openplatform.shopee.com.br',
     authorizationHost: 'https://open.shopee.com.br/auth',
   },

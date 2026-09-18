@@ -40,7 +40,7 @@ describe('loadShopeeConfig', () => {
 
     expect(result.configured).toBe(true);
     if (result.configured) {
-      expect(result.config.apiHost).toBe('https://partner.shopeemobile.com');
+      expect(result.config.apiHost).toBe('https://openplatform.shopee.com.br');
       expect(result.config.environment).toBe('PRODUCTION');
     }
   });
