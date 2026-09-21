@@ -790,6 +790,14 @@ function DashboardContent() {
   ).length;
 
   const scopedAccounts = displayData?.breakdownByAccount ?? [];
+  // "Visão consolidada dos marketplaces" (Fase 4, "cartões por conta ML"):
+  // sempre `breakdownByAccountUnscoped`, nunca `breakdownByAccount` — este
+  // último é filtrado pelo escopo (marketplace/conta) selecionado acima, e
+  // o painel precisa continuar mostrando TODAS as contas, igual ao painel
+  // por marketplace.
+  const mercadoLivreAccounts = (
+    displayData?.breakdownByAccountUnscoped ?? []
+  ).filter((account) => account.marketplace === "MERCADO_LIVRE");
   const connectedMlAccounts = scopedAccounts.filter(
     (a) => a.marketplace === "MERCADO_LIVRE" && a.status === "CONNECTED",
   );
@@ -810,7 +818,10 @@ function DashboardContent() {
     <div className="flex flex-col gap-8">
       {header}
 
-      <MarketplacePanel breakdown={breakdownByMarketplace} />
+      <MarketplacePanel
+        breakdown={breakdownByMarketplace}
+        mercadoLivreAccounts={mercadoLivreAccounts}
+      />
       <p className="text-xs text-foreground/60">
         {activeMarketplaces} de 3 marketplaces com integração ativa
         {" · "}

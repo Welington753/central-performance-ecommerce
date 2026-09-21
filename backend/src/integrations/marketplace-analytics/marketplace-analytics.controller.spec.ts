@@ -25,6 +25,7 @@ function emptyAggregate(): MarketplaceAnalyticsAggregate {
     topListings: [],
     breakdownByMarketplace: [],
     breakdownByAccount: [],
+    breakdownByAccountUnscoped: [],
     sources: [],
     dataCoverage: {
       status: 'unknown',

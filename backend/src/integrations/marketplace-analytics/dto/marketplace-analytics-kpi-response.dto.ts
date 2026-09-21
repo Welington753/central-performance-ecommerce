@@ -181,6 +181,14 @@ export interface MarketplaceAnalyticsKpisResponseDto {
   topListings: AnalyticsTopListing[];
   breakdownByMarketplace: MarketplaceBreakdownEntry[];
   breakdownByAccount: AccountBreakdownEntry[];
+  /**
+   * MESMA forma de `breakdownByAccount`, mas para TODAS as contas
+   * classificadas do sistema — nunca só as do filtro de escopo atual (Fase
+   * 4, "cartões por conta Mercado Livre"). Consumido pelo painel "Visão
+   * consolidada dos marketplaces", que sempre mostra todo mundo lado a
+   * lado, igual a `breakdownByMarketplace`.
+   */
+  breakdownByAccountUnscoped: AccountBreakdownEntry[];
   sources: AnalyticsSourceCoverage[];
   dataCoverage: AnalyticsDataCoverage;
   lastSync: string | null;

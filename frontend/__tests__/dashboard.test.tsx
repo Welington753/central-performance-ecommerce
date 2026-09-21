@@ -154,6 +154,7 @@ function analyticsDto(
     ],
     breakdownByMarketplace: fullBreakdown(),
     breakdownByAccount: [account()],
+    breakdownByAccountUnscoped: [account()],
     sources: [],
     dataCoverage: {
       status: "complete",
@@ -320,7 +321,7 @@ describe("DashboardPage", () => {
   it("shows Mercado Livre with real data and Amazon/Shopee as not connected, with no fabricated numbers", async () => {
     (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
     render(<DashboardPage />);
-    const ml = await screen.findByTestId("marketplace-panel-MERCADO_LIVRE");
+    const ml = await screen.findByTestId("marketplace-account-panel-acc-1");
     expect(within(ml).getByText(/R\$\s?1\.234,56/)).toBeInTheDocument();
     const amazon = screen.getByTestId("marketplace-panel-AMAZON");
     expect(within(amazon).getByText(/não conectado/i)).toBeInTheDocument();

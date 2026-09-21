@@ -11,6 +11,7 @@ import {
 import { intervalsToDto } from '../consolidated-coverage.util';
 import { computeRefundCoverage } from '../refund-coverage.util';
 import type {
+  AnalyticsAccountBreakdownRaw,
   AnalyticsAccountTotals,
   AnalyticsDailyPointRaw,
   AnalyticsPeriodTotals,
@@ -19,6 +20,7 @@ import type {
 import { toFullAggregate } from './marketplace-analytics-full-response.mapper';
 import { roundTo, shareOf } from './marketplace-analytics-response-math.util';
 import type {
+  AccountBreakdownEntry,
   AnalyticsBestDay,
   AnalyticsBreakdownSummary,
   AnalyticsDailyPoint,
@@ -82,18 +84,9 @@ export function toMarketplaceAnalyticsResponse(
         ? entry.lastSuccessfulSyncAt.toISOString()
         : null,
     })),
-    breakdownByAccount: aggregate.breakdownByAccount.map((entry) => ({
-      accountId: entry.accountId,
-      marketplace: entry.marketplace,
-      nickname: entry.nickname,
-      externalSellerId: entry.externalSellerId,
-      status: entry.status,
-      availability: entry.availability,
-      summary: entry.totals ? toBreakdownSummary(entry.totals) : null,
-      lastSync: entry.lastSuccessfulSyncAt
-        ? entry.lastSuccessfulSyncAt.toISOString()
-        : null,
-    })),
+    breakdownByAccount: aggregate.breakdownByAccount.map(toAccountBreakdown),
+    breakdownByAccountUnscoped:
+      aggregate.breakdownByAccountUnscoped.map(toAccountBreakdown),
     sources: aggregate.sources.map((source) => ({
       accountId: source.accountId,
       marketplace: source.marketplace,
@@ -275,6 +268,23 @@ function toTopProductBySku(
     units: row.units,
     grossRevenue: centsToDecimalString(row.grossRevenueCents),
     unitsSharePct: shareOf(row.units, totalUnitsInPeriod),
+  };
+}
+
+function toAccountBreakdown(
+  entry: AnalyticsAccountBreakdownRaw,
+): AccountBreakdownEntry {
+  return {
+    accountId: entry.accountId,
+    marketplace: entry.marketplace,
+    nickname: entry.nickname,
+    externalSellerId: entry.externalSellerId,
+    status: entry.status,
+    availability: entry.availability,
+    summary: entry.totals ? toBreakdownSummary(entry.totals) : null,
+    lastSync: entry.lastSuccessfulSyncAt
+      ? entry.lastSuccessfulSyncAt.toISOString()
+      : null,
   };
 }
 

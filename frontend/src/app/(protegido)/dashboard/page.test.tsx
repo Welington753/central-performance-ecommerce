@@ -78,6 +78,7 @@ function kpisDto(
     topListings: [],
     breakdownByMarketplace: [marketplaceEntry()],
     breakdownByAccount: [account()],
+    breakdownByAccountUnscoped: [account()],
     sources: [],
     dataCoverage: {
       status: "complete",

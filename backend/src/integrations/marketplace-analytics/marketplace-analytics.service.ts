@@ -268,6 +268,8 @@ export interface MarketplaceAnalyticsAggregate {
   topListings: AnalyticsTopListingRaw[];
   breakdownByMarketplace: AnalyticsMarketplaceBreakdownRaw[];
   breakdownByAccount: AnalyticsAccountBreakdownRaw[];
+  /** Ver comentário em `buildAccountBreakdown`/`breakdownByAccountUnscoped` no `getAggregate`. */
+  breakdownByAccountUnscoped: AnalyticsAccountBreakdownRaw[];
   sources: AnalyticsSourceCoverageRaw[];
   dataCoverage: ConsolidatedCoverage;
   lastSync: Date | null;
@@ -400,8 +402,10 @@ export class MarketplaceAnalyticsService {
         return latest;
       }, null);
 
-    const breakdownByAccount: AnalyticsAccountBreakdownRaw[] =
-      scopedAccounts.map((account) => ({
+    const buildAccountBreakdown = (
+      accounts: readonly ClassifiedAccount[],
+    ): AnalyticsAccountBreakdownRaw[] =>
+      accounts.map((account) => ({
         accountId: account.id,
         marketplace: account.marketplace,
         nickname: account.nickname,
@@ -413,6 +417,18 @@ export class MarketplaceAnalyticsService {
           : null,
         lastSuccessfulSyncAt: account.lastSuccessfulSyncAt,
       }));
+
+    const breakdownByAccount = buildAccountBreakdown(scopedAccounts);
+    // Aditivo (Fase 4, "cartões por conta Mercado Livre"): MESMA forma de
+    // `breakdownByAccount`, mas para TODAS as contas classificadas do
+    // sistema — nunca só as do escopo/filtro atual. Existe para o painel
+    // "Visão consolidada dos marketplaces" (sempre lado a lado,
+    // independente do filtro selecionado — mesma garantia já dada a
+    // `breakdownByMarketplace`) poder desenhar um cartão por conta do
+    // Mercado Livre sem depender do filtro de escopo escondê-las.
+    const breakdownByAccountUnscoped = buildAccountBreakdown([
+      ...classifiedByAccountId.values(),
+    ]);
 
     const accountsByMarketplace = new Map<Marketplace, ClassifiedAccount[]>();
     for (const account of classifiedByAccountId.values()) {
@@ -469,6 +485,7 @@ export class MarketplaceAnalyticsService {
         topListings: [],
         breakdownByMarketplace,
         breakdownByAccount,
+        breakdownByAccountUnscoped,
         sources: [],
         dataCoverage: {
           status: 'unknown',
@@ -548,6 +565,7 @@ export class MarketplaceAnalyticsService {
       topListings,
       breakdownByMarketplace,
       breakdownByAccount,
+      breakdownByAccountUnscoped,
       sources,
       dataCoverage,
       lastSync: lastSyncOf(scopedAccountIds),

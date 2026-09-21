@@ -54,6 +54,7 @@ function aggregate(
     topListings: [],
     breakdownByMarketplace: [],
     breakdownByAccount: [],
+    breakdownByAccountUnscoped: [],
     sources: [],
     dataCoverage: {
       status: 'unknown',

@@ -3351,4 +3351,199 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(amazonAggregate.dataCoverage.status).toBe('complete');
     });
   });
+
+  /**
+   * "Cartões por conta Mercado Livre" (Fase 4, dashboard "Visão consolidada
+   * dos marketplaces") — `breakdownByAccountUnscoped` é a fonte usada pelo
+   * frontend para desenhar um cartão POR CONTA em vez de um único cartão
+   * consolidado. Nunca depende do filtro de escopo (`marketplace`/
+   * `accountId`) do resto do endpoint, ao contrário de `breakdownByAccount`.
+   */
+  describe('breakdownByAccountUnscoped (cartões por conta Mercado Livre)', () => {
+    it('duas contas ML com valores diferentes aparecem separadas, cada uma com seu próprio total — nunca somadas', async () => {
+      const accountA = await seedAccount({ nickname: 'Mercado Livre 1' });
+      const accountB = await seedAccount({ nickname: 'Mercado Livre 2' });
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '300.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId: accountB,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '70.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      // Um segundo pedido pago só na conta A — prova que a agregação é POR
+      // `marketplace_account_id`, nunca só por `marketplace = MERCADO_LIVRE`
+      // (que somaria os dois pedidos de A com o de B indistintamente).
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: '2',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      const byId = new Map(
+        dto.breakdownByAccountUnscoped.map((entry) => [entry.accountId, entry]),
+      );
+      expect(byId.get(accountA)?.summary).toEqual({
+        grossRevenue: '350.00',
+        paidOrders: 2,
+        units: 0,
+      });
+      expect(byId.get(accountB)?.summary).toEqual({
+        grossRevenue: '70.00',
+        paidOrders: 1,
+        units: 0,
+      });
+    });
+
+    it('conta ML conectada sem nenhum pedido no período mostra zero, nunca null', async () => {
+      const withOrders = await seedAccount({ nickname: 'Com vendas' });
+      const withoutOrders = await seedAccount({ nickname: 'Sem vendas' });
+      await seedSuccessfulSyncRun(
+        withoutOrders,
+        new Date('2026-01-01T00:00:00.000Z'),
+        IN_CURRENT,
+      );
+      await seedOrder({
+        accountId: withOrders,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '40.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      const byId = new Map(
+        dto.breakdownByAccountUnscoped.map((entry) => [entry.accountId, entry]),
+      );
+      expect(byId.get(withoutOrders)?.summary).toEqual({
+        grossRevenue: '0.00',
+        paidOrders: 0,
+        units: 0,
+      });
+    });
+
+    it('soma das contas ML = total consolidado de breakdownByMarketplace para o mesmo período', async () => {
+      const accountA = await seedAccount();
+      const accountB = await seedAccount();
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '123.45',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId: accountB,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '67.89',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId: amazonAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '999.99',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate({}, REFERENCE_NOW);
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      const mlEntries = dto.breakdownByAccountUnscoped.filter(
+        (entry) => entry.marketplace === Marketplace.MERCADO_LIVRE,
+      );
+      const summedRevenueCents = mlEntries.reduce(
+        (sum, entry) =>
+          sum + Math.round(Number(entry.summary?.grossRevenue ?? '0') * 100),
+        0,
+      );
+      const summedOrders = mlEntries.reduce(
+        (sum, entry) => sum + (entry.summary?.paidOrders ?? 0),
+        0,
+      );
+
+      const mlConsolidated = dto.breakdownByMarketplace.find(
+        (entry) => entry.marketplace === Marketplace.MERCADO_LIVRE,
+      );
+      expect(mlConsolidated?.summary?.grossRevenue).toBe('191.34');
+      expect(summedRevenueCents).toBe(19134);
+      expect(summedOrders).toBe(mlConsolidated?.summary?.paidOrders);
+
+      // Amazon continua preservada, nunca afetada pela divisão do ML.
+      const amazonConsolidated = dto.breakdownByMarketplace.find(
+        (entry) => entry.marketplace === Marketplace.AMAZON,
+      );
+      expect(amazonConsolidated?.summary?.grossRevenue).toBe('999.99');
+    });
+
+    it('nunca depende do filtro de escopo — continua trazendo as duas contas ML mesmo filtrando só Amazon', async () => {
+      const accountA = await seedAccount();
+      const accountB = await seedAccount();
+      const amazonAccount = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+      await seedOrder({
+        accountId: accountA,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '10.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId: accountB,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '20.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+      await seedOrder({
+        accountId: amazonAccount,
+        externalOrderId: '1',
+        status: 'paid',
+        totalAmount: '30.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const aggregate = await analyticsService.getAggregate(
+        { accountId: amazonAccount },
+        REFERENCE_NOW,
+      );
+      const dto = toMarketplaceAnalyticsResponse(aggregate);
+
+      // `breakdownByAccount` (escopado) só traria a conta Amazon filtrada;
+      // `breakdownByAccountUnscoped` continua trazendo TODAS.
+      const mlIds = dto.breakdownByAccountUnscoped
+        .filter((entry) => entry.marketplace === Marketplace.MERCADO_LIVRE)
+        .map((entry) => entry.accountId)
+        .sort();
+      expect(mlIds).toEqual([accountA, accountB].sort());
+    });
+  });
 });
