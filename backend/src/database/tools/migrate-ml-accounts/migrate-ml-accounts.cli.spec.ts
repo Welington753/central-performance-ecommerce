@@ -1,5 +1,6 @@
 import { MIGRATION_CONFIRMATION_TOKEN } from './migrate-ml-accounts.constants';
 import {
+  formatAbortLine,
   formatMigrationReport,
   parseMigrationArgs,
   resolveSourceSecrets,
@@ -208,5 +209,43 @@ describe('formatMigrationReport', () => {
     expect(output).not.toMatch(/token=|access_token|refresh_token/i);
     expect(output).not.toMatch(/ciphertext|\biv\b|authTag|encryption_key/i);
     expect(output).not.toMatch(/length|comprimento|prefixo|sufixo/i);
+  });
+});
+
+describe('formatAbortLine', () => {
+  it('mostra o código fechado e o nome da etapa de um erro classificado', () => {
+    const line = formatAbortLine(
+      new MigrationAbortedError('TARGET_CONNECTION_FAILED'),
+    );
+    expect(line).toBe(
+      'migracao abortada: TARGET_CONNECTION_FAILED | etapa: conexao-destino',
+    );
+  });
+
+  it('nunca vaza mensagem, stack ou URL de um erro cru de driver', () => {
+    const driverError = new Error(
+      `connect ETIMEDOUT ${A_URL} user=admin password=${A_KEY}`,
+    );
+
+    const line = formatAbortLine(driverError);
+
+    expect(line).toBe(
+      'migracao abortada: FALHA_NAO_CLASSIFICADA | etapa: desconhecida',
+    );
+    expect(line).not.toContain(A_URL);
+    expect(line).not.toContain(A_KEY);
+    expect(line).not.toMatch(/ETIMEDOUT|password|admin/);
+  });
+
+  it('nunca vaza campos típicos de erro do Postgres (detail/query/parâmetros)', () => {
+    const pgLikeError = Object.assign(new Error('erro do driver'), {
+      detail: 'Key (external_seller_id)=(1548451374) already exists.',
+      query: 'INSERT INTO marketplace_accounts ...',
+      parameters: ['token-em-claro'],
+    });
+
+    const line = formatAbortLine(pgLikeError);
+
+    expect(line).not.toMatch(/INSERT|already exists|token-em-claro|1548451374/);
   });
 });

@@ -6,6 +6,8 @@ import {
 } from './migrate-ml-accounts.constants';
 import {
   MigrationAbortedError,
+  runStage,
+  toAbortedError,
   type SqlClient,
 } from './migrate-ml-accounts.errors';
 import {
@@ -90,24 +92,32 @@ export async function migrateMercadoLivreAccounts(
   const targetCipher = buildCipher(input.targetEncryptionKey, 'target');
   const sourceCipher = buildCipher(input.sourceEncryptionKey, 'source');
 
-  const rows = await loadSourceAccounts(input.sourceClient);
-  await assertTargetIsReady(input.targetClient);
+  const rows = await runStage('SOURCE_PREFLIGHT_FAILED', () =>
+    loadSourceAccounts(input.sourceClient),
+  );
+  await runStage('TARGET_PREFLIGHT_FAILED', () =>
+    assertTargetIsReady(input.targetClient),
+  );
 
-  const prepared = rows.map((row) => ({
-    row,
-    encryptedAccessToken: reencryptToken(
-      row.encryptedAccessToken,
-      row.id,
-      sourceCipher,
-      targetCipher,
+  const prepared = await runStage('REENCRYPTION_FAILED', () =>
+    Promise.resolve(
+      rows.map((row) => ({
+        row,
+        encryptedAccessToken: reencryptToken(
+          row.encryptedAccessToken,
+          row.id,
+          sourceCipher,
+          targetCipher,
+        ),
+        encryptedRefreshToken: reencryptToken(
+          row.encryptedRefreshToken,
+          row.id,
+          sourceCipher,
+          targetCipher,
+        ),
+      })),
     ),
-    encryptedRefreshToken: reencryptToken(
-      row.encryptedRefreshToken,
-      row.id,
-      sourceCipher,
-      targetCipher,
-    ),
-  }));
+  );
 
   return writeInTransaction(input, prepared);
 }
@@ -117,7 +127,7 @@ async function writeInTransaction(
   prepared: PreparedAccount[],
 ): Promise<MigrationReport> {
   const client = input.targetClient;
-  await client.query('BEGIN');
+  await runStage('TARGET_TRANSACTION_FAILED', () => client.query('BEGIN'));
 
   try {
     await client.query(
@@ -158,8 +168,16 @@ async function writeInTransaction(
       outcome,
     };
   } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
+    // O motivo ORIGINAL é preservado (ex.: TARGET_NOT_EMPTY); só um erro
+    // cru do driver vira TARGET_TRANSACTION_FAILED. Se nem o rollback
+    // funcionar, isso passa a ser o fato mais importante a reportar.
+    const classified = toAbortedError(error, 'TARGET_TRANSACTION_FAILED');
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      throw new MigrationAbortedError('TARGET_ROLLBACK_FAILED');
+    }
+    throw classified;
   }
 }
 

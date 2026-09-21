@@ -469,6 +469,14 @@ describe('migrateMercadoLivreAccounts (dois Postgres reais)', () => {
       expect(error.message).not.toMatch(/[A-Za-z0-9+/]{40,}={0,2}/);
     });
 
+    it('aborta quando a chave de origem é inválida', async () => {
+      await seedSourceAccounts();
+      await expectAbort(
+        run({ sourceEncryptionKey: 'chave-curta-demais' }),
+        'SOURCE_KEY_INVALID',
+      );
+    });
+
     it('aborta quando a chave de destino é inválida', async () => {
       await seedSourceAccounts();
       await expectAbort(

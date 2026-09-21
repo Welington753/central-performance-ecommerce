@@ -1,7 +1,9 @@
 import { readFileSync } from 'fs';
-import { join } from 'path';
 import { parse as parseDotenv } from 'dotenv';
-import { DataSource, type QueryRunner } from 'typeorm';
+import {
+  openMigrationConnection,
+  resolveSourceEnvPath,
+} from './connection-options';
 import {
   migrateMercadoLivreAccounts,
   type MigrationMode,
@@ -10,8 +12,9 @@ import {
 import { MIGRATION_CONFIRMATION_TOKEN } from './migrate-ml-accounts.constants';
 import {
   MigrationAbortedError,
-  type SqlClient,
+  runStageSync,
 } from './migrate-ml-accounts.errors';
+import { stageOfReason } from './migration-stages';
 
 export interface ParsedMigrationArgs {
   mode: MigrationMode;
@@ -121,46 +124,40 @@ export function formatMigrationReport(report: MigrationReport): string[] {
   return lines;
 }
 
-function toSqlClient(runner: QueryRunner): SqlClient {
-  return {
-    query: async (text: string, values?: unknown[]): Promise<unknown[]> => {
-      const rows: unknown = await runner.query(text, values);
-      return Array.isArray(rows) ? (rows as unknown[]) : [];
-    },
-  };
+/**
+ * Saída de falha: SOMENTE o código fechado e o nome fixo da etapa. Nunca
+ * `error.message`, `stack`, `detail`, `query`, parâmetros ou o objeto bruto
+ * — qualquer um deles poderia carregar host, usuário, senha ou payload.
+ */
+export function formatAbortLine(error: unknown): string {
+  if (error instanceof MigrationAbortedError) {
+    return `migracao abortada: ${error.message} | etapa: ${stageOfReason(
+      error.reason,
+    )}`;
+  }
+  return 'migracao abortada: FALHA_NAO_CLASSIFICADA | etapa: desconhecida';
 }
 
-/**
- * Conexão dedicada (um único `QueryRunner`, nunca o pool) — exigida para que
- * `BEGIN`/`COMMIT`/`ROLLBACK` sejam atômicos. `entities: []` impede qualquer
- * carga de metadata da aplicação: esta ferramenta nunca sobe o Nest, nunca
- * roda scheduler e, portanto, nunca dispara renovação de token.
- */
-async function openConnection(
-  url: string,
-): Promise<{ dataSource: DataSource; client: SqlClient }> {
-  const dataSource = new DataSource({
-    type: 'postgres',
-    url,
-    entities: [],
-    synchronize: false,
-    logging: false,
-  });
-  await dataSource.initialize();
-  const runner = dataSource.createQueryRunner();
-  await runner.connect();
-  return { dataSource, client: toSqlClient(runner) };
+function loadSourceEnvFile(): Record<string, string | undefined> {
+  const path = resolveSourceEnvPath(process.cwd());
+  return runStageSync('SOURCE_ENV_LOAD_FAILED', () =>
+    parseDotenv(readFileSync(path)),
+  );
 }
 
 async function main(): Promise<void> {
   const { mode } = parseMigrationArgs(process.argv.slice(2));
   const target = resolveTargetSecrets(process.env);
-  const source = resolveSourceSecrets(
-    parseDotenv(readFileSync(join(process.cwd(), '.env'))),
-  );
+  const source = resolveSourceSecrets(loadSourceEnvFile());
 
-  const sourceConnection = await openConnection(source.databaseUrl);
-  const targetConnection = await openConnection(target.databaseUrl);
+  const sourceConnection = await openMigrationConnection(
+    source.databaseUrl,
+    'source',
+  );
+  const targetConnection = await openMigrationConnection(
+    target.databaseUrl,
+    'target',
+  );
 
   try {
     const report = await migrateMercadoLivreAccounts({
@@ -185,13 +182,7 @@ async function main(): Promise<void> {
  */
 if (require.main === module) {
   main().catch((error: unknown) => {
-    // Erro fora do vocabulário fechado nunca tem a mensagem impressa (pode
-    // carregar trecho de conexão ou de payload) — só o nome da classe.
-    const reason =
-      error instanceof MigrationAbortedError
-        ? error.message
-        : `FALHA_INESPERADA (${error instanceof Error ? error.name : 'desconhecida'})`;
-    process.stderr.write(`migracao abortada: ${reason}\n`);
+    process.stderr.write(`${formatAbortLine(error)}\n`);
     process.exitCode = 1;
   });
 }

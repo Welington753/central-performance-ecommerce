@@ -16,6 +16,16 @@ export type MigrationAbortReason =
   | 'SOURCE_CREDENTIAL_ENCRYPTION_KEY_MISSING'
   | 'TARGET_DATABASE_URL_MISSING'
   | 'TARGET_CREDENTIAL_ENCRYPTION_KEY_MISSING'
+  | 'SOURCE_ENV_LOAD_FAILED'
+  | 'SOURCE_CONFIG_INVALID'
+  | 'SOURCE_CONNECTION_FAILED'
+  | 'TARGET_CONFIG_INVALID'
+  | 'TARGET_CONNECTION_FAILED'
+  | 'SOURCE_PREFLIGHT_FAILED'
+  | 'TARGET_PREFLIGHT_FAILED'
+  | 'REENCRYPTION_FAILED'
+  | 'TARGET_TRANSACTION_FAILED'
+  | 'TARGET_ROLLBACK_FAILED'
   | 'SOURCE_KEY_INVALID'
   | 'TARGET_KEY_INVALID'
   | 'SOURCE_ROW_MALFORMED'
@@ -50,4 +60,40 @@ export class MigrationAbortedError extends Error {
   ) {
     super(accountId ? `${reason} (conta ${accountId})` : reason);
   }
+}
+
+/**
+ * Converte um erro inesperado (driver, TLS, rede, sistema de arquivos) no
+ * código fechado do ESTÁGIO em que ele ocorreu, no ponto mais próximo da
+ * origem. É o que impede um `Error` cru — cuja mensagem pode conter host,
+ * usuário, SQL com parâmetros ou trecho de payload — de chegar à saída.
+ * Erros já classificados passam intactos, preservando seu código original.
+ */
+export async function runStage<T>(
+  reason: MigrationAbortReason,
+  run: () => Promise<T>,
+): Promise<T> {
+  try {
+    return await run();
+  } catch (error) {
+    throw toAbortedError(error, reason);
+  }
+}
+
+export function runStageSync<T>(reason: MigrationAbortReason, run: () => T): T {
+  try {
+    return run();
+  } catch (error) {
+    throw toAbortedError(error, reason);
+  }
+}
+
+export function toAbortedError(
+  error: unknown,
+  reason: MigrationAbortReason,
+): MigrationAbortedError {
+  if (error instanceof MigrationAbortedError) {
+    return error;
+  }
+  return new MigrationAbortedError(reason);
 }
