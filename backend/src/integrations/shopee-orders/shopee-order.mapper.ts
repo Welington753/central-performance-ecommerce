@@ -46,9 +46,11 @@ export class ShopeeOrderMappingError extends Error {
  * - `UNPAID`/`INVOICE_PENDING`/`IN_CANCEL` → `pending`: nenhum dos três é
  *   financeiramente concluído — `IN_CANCEL` ainda pode reverter, os outros
  *   dois nunca chegaram a ser pagos.
- * - `READY_TO_SHIP`/`PROCESSED`/`SHIPPED`/`COMPLETED` → `paid`: pagamento já
- *   confirmado (só entram nesses estados após isso), independente do estágio
- *   logístico.
+ * - `READY_TO_SHIP`/`PROCESSED`/`SHIPPED`/`TO_CONFIRM_RECEIVE`/`COMPLETED` →
+ *   `paid`: pagamento já confirmado (só entram nesses estados após isso),
+ *   independente do estágio logístico. `TO_CONFIRM_RECEIVE` é o estado
+ *   posterior ao envio em que o comprador ainda não confirmou o recebimento —
+ *   financeiramente equivalente a `SHIPPED`, nunca a `pending`.
  * - `CANCELLED` → `cancelled`: cancelamento CONFIRMADO pelo provedor (nunca
  *   `IN_CANCEL`, que ainda está em andamento).
  *
@@ -67,6 +69,7 @@ const SHOPEE_STATUS_TO_CANONICAL: Record<
   READY_TO_SHIP: PAID_ORDER_STATUS,
   PROCESSED: PAID_ORDER_STATUS,
   SHIPPED: PAID_ORDER_STATUS,
+  TO_CONFIRM_RECEIVE: PAID_ORDER_STATUS,
   COMPLETED: PAID_ORDER_STATUS,
   CANCELLED: CANCELLED_ORDER_STATUS,
 };

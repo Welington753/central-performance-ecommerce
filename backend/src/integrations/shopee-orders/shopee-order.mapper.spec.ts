@@ -14,6 +14,7 @@ const ALL_ORDER_STATUSES: ShopeeOrderStatus[] = [
   'IN_CANCEL',
   'CANCELLED',
   'INVOICE_PENDING',
+  'TO_CONFIRM_RECEIVE',
 ];
 
 function validItem(
@@ -93,8 +94,18 @@ describe('mapShopeeOrder', () => {
     PROCESSED: 'paid',
     SHIPPED: 'paid',
     COMPLETED: 'paid',
+    TO_CONFIRM_RECEIVE: 'paid',
     CANCELLED: 'cancelled',
   };
+
+  it('mapeia TO_CONFIRM_RECEIVE para paid, preservando o bruto em sourceStatus', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ orderStatus: 'TO_CONFIRM_RECEIVE' }),
+    );
+    expect(result.status).toBe('paid');
+    expect(result.sourceStatus).toBe('TO_CONFIRM_RECEIVE');
+  });
 
   it.each(ALL_ORDER_STATUSES)(
     'mapeia "%s" para o status canônico correto, preservando o bruto em sourceStatus',

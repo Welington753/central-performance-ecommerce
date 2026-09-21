@@ -95,6 +95,7 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
     'IN_CANCEL',
     'CANCELLED',
     'INVOICE_PENDING',
+    'TO_CONFIRM_RECEIVE',
   ] as const)('accepts documented order_status %s', (order_status) => {
     const result = validateShopeeOrderDetailResponseBody(
       baseBody({ orders: [validOrder({ order_status })] }),
@@ -104,6 +105,19 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
     if (result.valid) {
       expect(result.result.orders[0].orderStatus).toBe(order_status);
     }
+  });
+
+  it('accepts TO_CONFIRM_RECEIVE — status Live confirmado, nunca mais invalid_response', () => {
+    const result = validateShopeeOrderDetailResponseBody(
+      baseBody({
+        orders: [validOrder({ order_status: 'TO_CONFIRM_RECEIVE' })],
+      }),
+      REQUESTED,
+    );
+    expect(result.valid).toBe(true);
+    expect(result).not.toMatchObject({
+      issue: { code: 'ORDER_STATUS_INVALID' },
+    });
   });
 
   it('rejects an undocumented/unknown order_status, never exposing raw order/item data', () => {

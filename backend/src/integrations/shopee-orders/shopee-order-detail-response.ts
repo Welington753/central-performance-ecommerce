@@ -10,12 +10,18 @@ import {
  * documentação oficial (`v2.order.get_order_list`, único ponto onde a
  * Shopee enumera todos os valores). Um valor fora desta lista é sempre
  * `invalid_response`, nunca repassado cru.
+ *
+ * `TO_CONFIRM_RECEIVE` foi confirmado em resposta Live real (diagnóstico
+ * `ORDER_STATUS_INVALID` + `providerOrderStatusCode: TO_CONFIRM_RECEIVE`) e
+ * entra aqui como valor fechado; a lista segue fechada — qualquer outro valor
+ * continua rejeitado com diagnóstico sanitizado.
  */
 export type ShopeeOrderStatus =
   | 'UNPAID'
   | 'READY_TO_SHIP'
   | 'PROCESSED'
   | 'SHIPPED'
+  | 'TO_CONFIRM_RECEIVE'
   | 'COMPLETED'
   | 'IN_CANCEL'
   | 'CANCELLED'
@@ -26,6 +32,7 @@ const ORDER_STATUS_VALUES: ReadonlySet<string> = new Set<ShopeeOrderStatus>([
   'READY_TO_SHIP',
   'PROCESSED',
   'SHIPPED',
+  'TO_CONFIRM_RECEIVE',
   'COMPLETED',
   'IN_CANCEL',
   'CANCELLED',
