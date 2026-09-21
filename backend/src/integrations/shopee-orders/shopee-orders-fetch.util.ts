@@ -9,6 +9,7 @@ import {
   ShopeeOrdersSyncError,
 } from './shopee-orders-sync-error';
 import type { ShopeeSyncBlock } from './shopee-orders-sync-window.util';
+import type { ShopeeOrderListTimeRangeField } from './shopee-order-list-input';
 import type {
   ShopeeOrdersHttpDiagnostics,
   ShopeeOrderSyncFailureDiagnostics,
@@ -77,7 +78,7 @@ interface OrderListClient {
   getOrderList(input: {
     accessToken: string;
     shopId: string;
-    timeRangeField: 'update_time';
+    timeRangeField: ShopeeOrderListTimeRangeField;
     timeFrom: number;
     timeTo: number;
     pageSize: number;
@@ -105,7 +106,13 @@ export interface ShopeeOrderSnFetchResult {
 
 /**
  * Busca todos os `order_sn` de `get_order_list` (Checkpoint CP2K-3B) para
- * todos os blocos de uma janela, sempre com `time_range_field=update_time`.
+ * todos os blocos de uma janela. `timeRangeField` (Fase 4, "Completar
+ * histórico Shopee") tem o mesmo padrão default de sempre — `update_time`,
+ * como antes deste checkpoint — e só o backfill histórico passa
+ * `create_time` explicitamente: uma venda antiga já concluída pode nunca
+ * mais ser "atualizada", então só a data de CRIAÇÃO alcança pedidos antigos;
+ * a sincronização normal continua em `update_time` para nunca perder um
+ * pedido recente que só teve o status alterado.
  * Deduplica entre páginas e entre blocos (a sobreposição de 1 segundo entre
  * blocos, ver `shopee-orders-sync-window.util.ts`, pode repetir o mesmo
  * pedido), preservando a ordem da primeira ocorrência.
@@ -129,7 +136,9 @@ export async function fetchShopeeOrderSns(input: {
   client: OrderListClient;
   credentials: ShopeeShopCredentials;
   blocks: ShopeeSyncBlock[];
+  timeRangeField?: ShopeeOrderListTimeRangeField;
 }): Promise<ShopeeOrderSnFetchResult> {
+  const timeRangeField = input.timeRangeField ?? 'update_time';
   const orderSnSet = new Set<string>();
   const orderSns: string[] = [];
   let pagesFetched = 0;
@@ -149,7 +158,7 @@ export async function fetchShopeeOrderSns(input: {
       const outcome = await input.client.getOrderList({
         accessToken: input.credentials.accessToken,
         shopId: input.credentials.shopId,
-        timeRangeField: 'update_time',
+        timeRangeField,
         timeFrom: block.timeFrom,
         timeTo: block.timeTo,
         pageSize: ORDER_LIST_PAGE_SIZE,

@@ -140,6 +140,24 @@ describe('MarketplaceAutoSyncService', () => {
       jest.useRealTimers();
     });
 
+    it('never schedules a timer just because BACKFILL_WORKER_ENABLED=true — the two flags are independent (regression: render.yaml conflated them)', () => {
+      jest.useFakeTimers();
+      const setIntervalSpy = jest.spyOn(global, 'setInterval');
+      const { service } = buildOrchestrator({
+        configValues: {
+          NODE_ENV: 'production',
+          MARKETPLACE_AUTO_SYNC_ENABLED: 'false',
+          BACKFILL_WORKER_ENABLED: 'true',
+        },
+      });
+
+      service.onModuleInit();
+
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+      service.onModuleDestroy();
+      jest.useRealTimers();
+    });
+
     it('schedules a timer at the configured interval when enabled outside test', () => {
       jest.useFakeTimers();
       const setIntervalSpy = jest.spyOn(global, 'setInterval');

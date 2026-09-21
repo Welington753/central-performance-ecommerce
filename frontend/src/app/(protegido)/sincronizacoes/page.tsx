@@ -99,7 +99,10 @@ export default function SincronizacoesPage() {
   );
   const runningRef = useRef(false);
 
-  const [mlAccounts, setMlAccounts] = useState<
+  // "Completar histórico" (Fase 4) — Mercado Livre e Shopee, nesta ordem;
+  // Amazon fica de fora por design (sem backfill implementado ainda para
+  // esse marketplace).
+  const [backfillAccounts, setBackfillAccounts] = useState<
     Array<{ accountId: string; label: string }>
   >([]);
   const [backfillStatuses, setBackfillStatuses] = useState<
@@ -185,15 +188,18 @@ export default function SincronizacoesPage() {
   );
 
   // "Completar histórico de todas as lojas": só ENFILEIRA (chama `start`)
-  // para as duas contas — o worker do backend decide como processar cada
-  // job de forma controlada. Nunca executa chunks aqui; nunca deixa uma
-  // conta com erro bloquear a outra (`Promise.allSettled`).
+  // para as contas elegíveis (Mercado Livre + Shopee conectadas) — o worker
+  // do backend decide como processar cada job de forma controlada. Nunca
+  // executa chunks aqui; nunca deixa uma conta com erro bloquear a outra
+  // (`Promise.allSettled`).
   async function handleCompleteAllHistory() {
-    if (mlAccounts.length === 0) return;
+    if (backfillAccounts.length === 0) return;
     setRunningAllBackfill(true);
     try {
       await Promise.allSettled(
-        mlAccounts.map((account) => handleStartBackfill(account.accountId)),
+        backfillAccounts.map((account) =>
+          handleStartBackfill(account.accountId),
+        ),
       );
     } finally {
       setRunningAllBackfill(false);
@@ -201,23 +207,23 @@ export default function SincronizacoesPage() {
   }
 
   // Polling leve só para acompanhamento (Fase 4, "Backfill durável") —
-  // nunca dirige o processamento. Continua enquanto QUALQUER conta ML tiver
-  // um job em andamento; desmontar o componente só limpa o timer, nunca
-  // pausa o job (ele roda no backend, independente da aba).
-  const anyJobActive = mlAccounts.some((account) => {
+  // nunca dirige o processamento. Continua enquanto QUALQUER conta elegível
+  // tiver um job em andamento; desmontar o componente só limpa o timer,
+  // nunca pausa o job (ele roda no backend, independente da aba).
+  const anyJobActive = backfillAccounts.some((account) => {
     const job = backfillStatuses[account.accountId]?.job;
     return job !== null && job !== undefined && ACTIVE_JOB_STATUSES.includes(job.status);
   });
 
   useEffect(() => {
-    if (!anyJobActive || mlAccounts.length === 0) return;
+    if (!anyJobActive || backfillAccounts.length === 0) return;
     const intervalId = setInterval(() => {
-      mlAccounts.forEach((account) => {
+      backfillAccounts.forEach((account) => {
         void loadBackfillStatus(account.accountId);
       });
     }, BACKFILL_POLL_INTERVAL_MS);
     return () => clearInterval(intervalId);
-  }, [anyJobActive, mlAccounts, loadBackfillStatus]);
+  }, [anyJobActive, backfillAccounts, loadBackfillStatus]);
 
   const loadSyncRuns = useCallback(async () => {
     try {
@@ -284,17 +290,36 @@ export default function SincronizacoesPage() {
       setRows(next);
       setRowsLoadError(false);
 
+      // "Completar histórico" (Fase 4): Mercado Livre primeiro, depois
+      // Shopee — mesma ordem em que aparecem na lista de sincronização
+      // acima. Só contas CONNECTED entram; Amazon fica de fora (sem
+      // backfill implementado ainda para esse marketplace).
       const connectedMl = accounts.filter(
         (item) =>
           item.marketplace === "MERCADO_LIVRE" && item.status === "CONNECTED",
       );
-      const nextMlAccounts = connectedMl.map((item) => ({
-        accountId: item.id,
-        label: accountLabel(item),
-      }));
-      setMlAccounts(nextMlAccounts);
+      const connectedShopee = accounts.filter(
+        (item) => item.marketplace === "SHOPEE" && item.status === "CONNECTED",
+      );
+      // Rótulo do Mercado Livre permanece igual ao de sempre (sem prefixo de
+      // marketplace) — preserva integralmente os testes/UX já existentes do
+      // backfill ML. Shopee ganha o prefixo "Shopee — " porque, ao contrário
+      // do ML (cujo apelido já costuma dizer "Mercado Livre ..."), o apelido
+      // Shopee não se autoidentifica, e agora os dois aparecem juntos nesta
+      // lista.
+      const nextBackfillAccounts = [
+        ...connectedMl.map((item) => ({
+          accountId: item.id,
+          label: accountLabel(item),
+        })),
+        ...connectedShopee.map((item) => ({
+          accountId: item.id,
+          label: `Shopee — ${accountLabel(item)}`,
+        })),
+      ];
+      setBackfillAccounts(nextBackfillAccounts);
       await Promise.all(
-        nextMlAccounts.map((item) => loadBackfillStatus(item.accountId)),
+        nextBackfillAccounts.map((item) => loadBackfillStatus(item.accountId)),
       );
     } catch {
       setRowsLoadError(true);
@@ -441,12 +466,13 @@ export default function SincronizacoesPage() {
           <div>
             <h2 className="text-lg font-semibold">Completar histórico</h2>
             <p className="mt-1 text-sm text-foreground/60">
-              Busca vendas antigas do Mercado Livre até o primeiro período
-              disponível para cada conta — diferente de &quot;Sincronizar
-              agora&quot;, que atualiza somente vendas recentes e alterações.
+              Busca vendas antigas até o primeiro período disponível de cada
+              conta, nos marketplaces compatíveis (Mercado Livre e Shopee) —
+              diferente de &quot;Sincronizar agora&quot;, que atualiza somente
+              vendas recentes e alterações.
             </p>
           </div>
-          {mlAccounts.length > 1 ? (
+          {backfillAccounts.length > 1 ? (
             <button
               type="button"
               onClick={() => void handleCompleteAllHistory()}
@@ -460,26 +486,34 @@ export default function SincronizacoesPage() {
           ) : null}
         </div>
 
-        {mlAccounts.length === 0 ? (
+        {backfillAccounts.length === 0 ? (
           <p className="text-sm text-foreground/60">
-            Nenhuma conta do Mercado Livre conectada ainda.
+            Nenhuma conta do Mercado Livre ou da Shopee conectada ainda.
           </p>
         ) : (
           <div className="flex flex-col gap-3">
-            {mlAccounts.map((mlAccount) => (
+            {backfillAccounts.map((backfillAccount) => (
               <BackfillAccountPanel
-                key={mlAccount.accountId}
-                label={mlAccount.label}
-                status={backfillStatuses[mlAccount.accountId] ?? null}
-                loadError={backfillLoadErrors[mlAccount.accountId] ?? false}
+                key={backfillAccount.accountId}
+                label={backfillAccount.label}
+                status={backfillStatuses[backfillAccount.accountId] ?? null}
+                loadError={
+                  backfillLoadErrors[backfillAccount.accountId] ?? false
+                }
                 actionPending={
-                  backfillActionPending[mlAccount.accountId] ?? false
+                  backfillActionPending[backfillAccount.accountId] ?? false
                 }
                 disabled={runningAllBackfill}
-                errorMessage={backfillErrors[mlAccount.accountId] ?? null}
-                onStart={() => void handleStartBackfill(mlAccount.accountId)}
-                onPause={() => void handlePauseBackfill(mlAccount.accountId)}
-                onResume={() => void handleResumeBackfill(mlAccount.accountId)}
+                errorMessage={backfillErrors[backfillAccount.accountId] ?? null}
+                onStart={() =>
+                  void handleStartBackfill(backfillAccount.accountId)
+                }
+                onPause={() =>
+                  void handlePauseBackfill(backfillAccount.accountId)
+                }
+                onResume={() =>
+                  void handleResumeBackfill(backfillAccount.accountId)
+                }
               />
             ))}
           </div>

@@ -7,6 +7,8 @@ import { AmazonOrdersSyncError } from '../amazon-orders/amazon-orders-sync.servi
 import { AmazonOrdersSyncService } from '../amazon-orders/amazon-orders-sync.service';
 import { MercadoLivreOrdersSyncService } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
 import { SyncOrdersError } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
+import { ShopeeOrdersSyncService } from '../shopee-orders/shopee-orders-sync.service';
+import { ShopeeOrdersSyncError } from '../shopee-orders/shopee-orders-sync-error';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
 import {
@@ -45,6 +47,7 @@ export type BackfillErrorCode =
   | 'NO_INITIAL_SYNC_YET'
   | 'BACKFILL_ALREADY_RUNNING'
   | 'AMAZON_NOT_CONFIGURED'
+  | 'SHOPEE_NOT_CONFIGURED'
   | 'TOKEN_EXPIRED'
   | 'ACCOUNT_BUSY'
   | 'TOKEN_REFRESH_PENDING'
@@ -133,8 +136,8 @@ const STALE_RUN_THRESHOLD_MS = 30 * 60 * 1000;
  * pedidos de uma vez, idempotente e retomável após queda (cada chunk deriva
  * seu próprio estado de `sync_runs`, nenhuma tabela/coluna nova).
  * Reaproveita INTEGRALMENTE `MercadoLivreOrdersSyncService`/
- * `AmazonOrdersSyncService` via `windowOverride` — nenhuma cópia de
- * fetch/persistência.
+ * `AmazonOrdersSyncService`/`ShopeeOrdersSyncService` via `windowOverride` —
+ * nenhuma cópia de fetch/persistência.
  */
 @Injectable()
 export class MarketplaceBackfillService {
@@ -143,6 +146,7 @@ export class MarketplaceBackfillService {
     private readonly persistence: MarketplaceOrdersPersistenceService,
     private readonly mlSyncService: MercadoLivreOrdersSyncService,
     private readonly amazonSyncService: AmazonOrdersSyncService,
+    private readonly shopeeSyncService: ShopeeOrdersSyncService,
     private readonly syncRunsService: SyncRunsService,
     private readonly jobsPersistence: BackfillJobsPersistenceService,
     private readonly configService: ConfigService,
@@ -238,7 +242,8 @@ export class MarketplaceBackfillService {
     }
     if (
       account.marketplace !== Marketplace.MERCADO_LIVRE &&
-      account.marketplace !== Marketplace.AMAZON
+      account.marketplace !== Marketplace.AMAZON &&
+      account.marketplace !== Marketplace.SHOPEE
     ) {
       throw new BackfillError('MARKETPLACE_NOT_SUPPORTED');
     }
@@ -356,6 +361,18 @@ export class MarketplaceBackfillService {
       );
       return summary.ordersFetched;
     }
+    if (marketplace === Marketplace.SHOPEE) {
+      // `create_time`, nunca `update_time` (padrão da sincronização normal):
+      // uma venda antiga já concluída pode nunca mais ser "atualizada" — só
+      // a data de CRIAÇÃO alcança o histórico antigo (ver
+      // `shopee-orders-fetch.util.ts`).
+      const summary = await this.shopeeSyncService.syncOrders(input.accountId, {
+        windowOverride: input.window,
+        type: SyncRunType.INITIAL,
+        timeRangeField: 'create_time',
+      });
+      return summary.ordersFetched;
+    }
     throw new BackfillError('MARKETPLACE_NOT_SUPPORTED');
   }
 
@@ -394,6 +411,20 @@ export class MarketplaceBackfillService {
           return new BackfillError('ACCOUNT_NOT_CONNECTED');
         case 'PROVIDER_RATE_LIMITED':
           return new BackfillError('PROVIDER_RATE_LIMITED');
+        default:
+          return new BackfillError('SYNC_FAILED');
+      }
+    }
+    if (error instanceof ShopeeOrdersSyncError) {
+      switch (error.code) {
+        case 'SYNC_ALREADY_RUNNING':
+          return new BackfillError('BACKFILL_ALREADY_RUNNING');
+        case 'NOT_CONNECTED':
+          return new BackfillError('ACCOUNT_NOT_CONNECTED');
+        case 'CONNECTION_BUSY':
+          return new BackfillError('ACCOUNT_BUSY');
+        case 'NOT_CONFIGURED':
+          return new BackfillError('SHOPEE_NOT_CONFIGURED');
         default:
           return new BackfillError('SYNC_FAILED');
       }

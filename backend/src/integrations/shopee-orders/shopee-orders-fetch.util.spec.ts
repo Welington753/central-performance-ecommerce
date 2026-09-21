@@ -74,6 +74,20 @@ describe('fetchShopeeOrderSns', () => {
     );
   });
 
+  it('usa create_time quando explicitamente pedido (Fase 4, backfill histórico)', async () => {
+    const getOrderList = jest.fn().mockResolvedValue(listSuccess(['A']));
+    await fetchShopeeOrderSns({
+      client: { getOrderList },
+      credentials: CREDENTIALS,
+      blocks: [BLOCK],
+      timeRangeField: 'create_time',
+    });
+
+    expect(getOrderList).toHaveBeenCalledWith(
+      expect.objectContaining({ timeRangeField: 'create_time' }),
+    );
+  });
+
   it('múltiplas páginas: envia o nextCursor na chamada seguinte e para quando more=false', async () => {
     const getOrderList = jest
       .fn()

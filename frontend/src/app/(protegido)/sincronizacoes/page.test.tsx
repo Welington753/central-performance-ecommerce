@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SincronizacoesPage from "./page";
 import { ApiFetchError } from "@/lib/api";
@@ -20,6 +20,7 @@ jest.mock("../../../lib/api", () => {
     syncMercadoLivreOrders: jest.fn(),
     syncAmazonOrders: jest.fn(),
     syncShopeeOrders: jest.fn(),
+    startBackfill: jest.fn(),
   };
 });
 
@@ -31,6 +32,7 @@ const api = jest.requireMock("../../../lib/api") as {
   syncMercadoLivreOrders: jest.Mock;
   syncAmazonOrders: jest.Mock;
   syncShopeeOrders: jest.Mock;
+  startBackfill: jest.Mock;
 };
 
 function account(
@@ -96,6 +98,7 @@ beforeEach(() => {
   mockEmptySyncRuns();
   api.fetchAmazonSetupStatus.mockResolvedValue(amazonSetupStatus());
   api.fetchBackfillStatus.mockResolvedValue(backfillStatus());
+  api.startBackfill.mockResolvedValue(backfillStatus());
 });
 
 describe("SincronizacoesPage — contas Shopee", () => {
@@ -106,8 +109,9 @@ describe("SincronizacoesPage — contas Shopee", () => {
 
     render(<SincronizacoesPage />);
 
+    const row = await screen.findByTestId("sync-all-row-shopee-1");
     expect(
-      await screen.findByText("Shopee — Loja Principal"),
+      within(row).getByText("Shopee — Loja Principal"),
     ).toBeInTheDocument();
   });
 
@@ -271,8 +275,12 @@ describe("SincronizacoesPage — contas Shopee", () => {
 
     render(<SincronizacoesPage />);
 
-    await screen.findByText("Shopee — Conta 999");
-    expect(screen.getAllByText(/Shopee —/)).toHaveLength(1);
+    // Uma conta Shopee CONNECTED aparece duas vezes: na lista de
+    // sincronização manual e no painel de "Completar histórico" (Fase 4).
+    await waitFor(() =>
+      expect(screen.getAllByText("Shopee — Conta 999")).toHaveLength(2),
+    );
+    expect(screen.getAllByText(/Shopee —/)).toHaveLength(2);
     expect(screen.getByText("Aguardando")).toBeInTheDocument();
   });
 
@@ -303,5 +311,95 @@ describe("SincronizacoesPage — contas Shopee", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("Amazon — Amazon Loja")).toBeInTheDocument();
     expect(screen.queryByText(/Shopee —/)).not.toBeInTheDocument();
+  });
+});
+
+describe("SincronizacoesPage — Completar histórico (Fase 4, Shopee)", () => {
+  function mlAccount(overrides: Partial<MarketplaceAccountDto> = {}) {
+    return account({
+      marketplace: "MERCADO_LIVRE",
+      ...overrides,
+    });
+  }
+
+  it("botão global dispara start para as 2 contas Mercado Livre conectadas e 1 conta Shopee conectada, nunca para a desconectada", async () => {
+    // O botão "Completar histórico" fica desabilitado enquanto a conta
+    // nunca sincronizou (`NOT_STARTED`) — todas as contas do teste já têm
+    // ao menos uma sincronização prévia.
+    api.fetchBackfillStatus.mockResolvedValue(
+      backfillStatus({ status: "IN_PROGRESS", oldestCoveredAt: "2026-05-01" }),
+    );
+    api.fetchMarketplaceAccounts.mockResolvedValueOnce([
+      mlAccount({ id: "ml-1", nickname: "Mercado Livre 1" }),
+      mlAccount({ id: "ml-2", nickname: "Mercado Livre 2" }),
+      account({ id: "shopee-1", nickname: "Shopee Conectada" }),
+      account({
+        id: "shopee-2",
+        nickname: "Shopee Desconectada",
+        status: "TOKEN_EXPIRED",
+      }),
+    ]);
+
+    const user = userEvent.setup();
+    render(<SincronizacoesPage />);
+
+    const button = await screen.findByRole("button", {
+      name: "Completar histórico de todas as lojas",
+    });
+    await user.click(button);
+
+    await waitFor(() => expect(api.startBackfill).toHaveBeenCalledTimes(3));
+    const calledIds = api.startBackfill.mock.calls.map((call) => call[0]);
+    expect(calledIds.sort()).toEqual(["ml-1", "ml-2", "shopee-1"]);
+    expect(calledIds).not.toContain("shopee-2");
+  });
+
+  it("botão individual da conta Shopee dispara start só para ela, nunca para o Mercado Livre", async () => {
+    api.fetchBackfillStatus.mockResolvedValue(
+      backfillStatus({ status: "IN_PROGRESS", oldestCoveredAt: "2026-05-01" }),
+    );
+    api.fetchMarketplaceAccounts.mockResolvedValueOnce([
+      mlAccount({ id: "ml-1", nickname: "Mercado Livre 1" }),
+      account({ id: "shopee-1", nickname: "Shopee Conectada" }),
+    ]);
+
+    const user = userEvent.setup();
+    render(<SincronizacoesPage />);
+
+    const panel = await screen.findByTestId(
+      "backfill-panel-Shopee — Shopee Conectada",
+    );
+    const startButton = within(panel).getByRole("button", {
+      name: "Completar histórico",
+    });
+    await user.click(startButton);
+
+    await waitFor(() => expect(api.startBackfill).toHaveBeenCalledTimes(1));
+    expect(api.startBackfill).toHaveBeenCalledWith("shopee-1");
+  });
+
+  it("conta Shopee desconectada nunca ganha painel de histórico nem entra no botão global", async () => {
+    api.fetchMarketplaceAccounts.mockResolvedValueOnce([
+      mlAccount({ id: "ml-1", nickname: "Mercado Livre 1" }),
+      account({
+        id: "shopee-1",
+        nickname: "Shopee Desconectada",
+        status: "TOKEN_EXPIRED",
+      }),
+    ]);
+
+    render(<SincronizacoesPage />);
+
+    await screen.findByText("Mercado Livre — Mercado Livre 1");
+    expect(
+      screen.queryByTestId("backfill-panel-Shopee — Shopee Desconectada"),
+    ).not.toBeInTheDocument();
+    // Só 1 conta elegível (ML) — botão "de todas as lojas" não é exibido
+    // (BackfillAccountPanel individual já cobre o caso de conta única).
+    expect(
+      screen.queryByRole("button", {
+        name: "Completar histórico de todas as lojas",
+      }),
+    ).not.toBeInTheDocument();
   });
 });

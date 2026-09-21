@@ -349,6 +349,46 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
     );
   });
 
+  it('aceita um windowOverride e timeRangeField explícitos — reaproveitado pelo backfill histórico (Fase 4)', async () => {
+    const { service, persistence, client } = buildService();
+    const windowOverride = {
+      from: new Date('2020-01-01T00:00:00.000Z'),
+      to: new Date('2020-01-31T00:00:00.000Z'),
+    };
+
+    await service.syncOrders(ACCOUNT_ID, {
+      windowOverride,
+      type: SyncRunType.INITIAL,
+      timeRangeField: 'create_time',
+    });
+
+    expect(persistence.beginSyncRun).toHaveBeenCalledWith(
+      expect.objectContaining({
+        periodFrom: windowOverride.from,
+        periodTo: windowOverride.to,
+        type: SyncRunType.INITIAL,
+      }),
+    );
+    expect(client.getOrderList).toHaveBeenCalledWith(
+      expect.objectContaining({ timeRangeField: 'create_time' }),
+    );
+    // Nunca consulta a cobertura já sincronizada quando a janela é explícita
+    // — evita uma leitura supérflua, mesma garantia já provada para o ML.
+    expect(persistence.getAccountSyncCoverage).not.toHaveBeenCalled();
+  });
+
+  it('sem windowOverride: continua usando update_time (padrão da sincronização normal, nunca create_time por engano)', async () => {
+    const { client } = await (async () => {
+      const built = buildService();
+      await built.service.syncOrders(ACCOUNT_ID);
+      return built;
+    })();
+
+    expect(client.getOrderList).toHaveBeenCalledWith(
+      expect.objectContaining({ timeRangeField: 'update_time' }),
+    );
+  });
+
   it('sucesso com VÁRIOS pedidos: mapeia, persiste e finaliza SUCCESS', async () => {
     const { service, persistence } = buildService({
       client: {

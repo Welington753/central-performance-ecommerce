@@ -13,12 +13,16 @@ import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
-import { computeIncrementalSyncWindow } from '../marketplace-orders/period.util';
+import {
+  computeIncrementalSyncWindow,
+  type PeriodWindow,
+} from '../marketplace-orders/period.util';
 import { SyncRunType } from '../../sync/sync-run.entity';
 import {
   fetchShopeeOrderDetails,
   fetchShopeeOrderSns,
 } from './shopee-orders-fetch.util';
+import type { ShopeeOrderListTimeRangeField } from './shopee-order-list-input';
 import { ShopeeOrdersApiClient } from './shopee-orders-api.client';
 import { mapShopeeOrder, ShopeeOrderMappingError } from './shopee-order.mapper';
 import {
@@ -101,9 +105,21 @@ export class ShopeeOrdersSyncService {
     private readonly persistence: MarketplaceOrdersPersistenceService,
   ) {}
 
+  /**
+   * `windowOverride`/`type`/`timeRangeField` (Fase 4, "Completar histórico
+   * Shopee") existem só para o backfill histórico (`MarketplaceBackfillService`)
+   * reaproveitar esta MESMA implementação — mesmo padrão já usado por
+   * `MercadoLivreOrdersSyncService`/`AmazonOrdersSyncService`. Sem
+   * `windowOverride` (botão manual "Sincronizar agora" e o ciclo automático),
+   * a janela continua sempre a incremental de sempre.
+   */
   async syncOrders(
     accountId: string,
-    options: { type?: SyncRunType } = {},
+    options: {
+      type?: SyncRunType;
+      windowOverride?: PeriodWindow;
+      timeRangeField?: ShopeeOrderListTimeRangeField;
+    } = {},
   ): Promise<ShopeeOrdersSyncSummary> {
     const account =
       await this.marketplaceAccountsService.findByIdOrFail(accountId);
@@ -119,8 +135,12 @@ export class ShopeeOrdersSyncService {
     }
 
     const startedAt = new Date();
-    const coverage = await this.persistence.getAccountSyncCoverage(accountId);
-    const window = computeIncrementalSyncWindow(coverage.intervals, startedAt);
+    const window =
+      options.windowOverride ??
+      computeIncrementalSyncWindow(
+        (await this.persistence.getAccountSyncCoverage(accountId)).intervals,
+        startedAt,
+      );
 
     let syncRunId: string;
     try {
@@ -153,6 +173,7 @@ export class ShopeeOrdersSyncService {
           client: this.client,
           credentials,
           blocks,
+          timeRangeField: options.timeRangeField,
         });
 
       const detailOrders = await fetchShopeeOrderDetails({

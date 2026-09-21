@@ -7,6 +7,7 @@ import {
 import { SyncAlreadyRunningError } from '../marketplace-orders/marketplace-orders-persistence.service';
 import { SyncOrdersError } from '../mercado-livre-orders/mercado-livre-orders-sync.service';
 import { AmazonOrdersSyncError } from '../amazon-orders/amazon-orders-sync.service';
+import { ShopeeOrdersSyncError } from '../shopee-orders/shopee-orders-sync-error';
 import { BackfillJobActiveConflictError } from './backfill-jobs-persistence.service';
 import {
   BackfillError,
@@ -94,6 +95,7 @@ function buildService(
     persistence?: Record<string, jest.Mock>;
     mlSyncService?: Record<string, jest.Mock>;
     amazonSyncService?: Record<string, jest.Mock>;
+    shopeeSyncService?: Record<string, jest.Mock>;
     syncRunsService?: Record<string, jest.Mock>;
     jobsPersistence?: Record<string, jest.Mock>;
     env?: Record<string, string>;
@@ -129,6 +131,10 @@ function buildService(
     syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 3 }),
     ...overrides.amazonSyncService,
   };
+  const shopeeSyncService = {
+    syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 3 }),
+    ...overrides.shopeeSyncService,
+  };
   const syncRunsService = {
     findAll: jest.fn().mockResolvedValue([syncRun()]),
     ...overrides.syncRunsService,
@@ -155,6 +161,7 @@ function buildService(
     persistence as never,
     mlSyncService as never,
     amazonSyncService as never,
+    shopeeSyncService as never,
     syncRunsService as never,
     jobsPersistence as never,
     configService as never,
@@ -166,6 +173,7 @@ function buildService(
     persistence,
     mlSyncService,
     amazonSyncService,
+    shopeeSyncService,
     syncRunsService,
     jobsPersistence,
     configService,
@@ -463,6 +471,27 @@ describe('MarketplaceBackfillService', () => {
       );
     });
 
+    it('dispatches a Shopee account to ShopeeOrdersSyncService with a windowOverride, type INITIAL and timeRangeField=create_time', async () => {
+      const { service, shopeeSyncService } = buildService({
+        marketplaceAccountsService: {
+          findByIdOrFail: jest
+            .fn()
+            .mockResolvedValue(account({ marketplace: Marketplace.SHOPEE })),
+        },
+      });
+
+      await service.runNextChunk('acc-1');
+
+      expect(shopeeSyncService.syncOrders).toHaveBeenCalledWith('acc-1', {
+        windowOverride: {
+          from: new Date('2026-05-02T00:00:00.000Z'),
+          to: new Date('2026-06-01T00:00:00.000Z'),
+        },
+        type: 'INITIAL',
+        timeRangeField: 'create_time',
+      });
+    });
+
     it('reports hasMoreHistory=true and the fetched count when the chunk returned orders', async () => {
       const { service } = buildService({
         mlSyncService: {
@@ -523,6 +552,41 @@ describe('MarketplaceBackfillService', () => {
       });
     });
 
+    it.each([
+      ['SYNC_ALREADY_RUNNING', 'BACKFILL_ALREADY_RUNNING'],
+      ['NOT_CONNECTED', 'ACCOUNT_NOT_CONNECTED'],
+      ['CONNECTION_BUSY', 'ACCOUNT_BUSY'],
+      ['NOT_CONFIGURED', 'SHOPEE_NOT_CONFIGURED'],
+      ['TEMPORARILY_UNAVAILABLE', 'SYNC_FAILED'],
+      ['DATA_UNAVAILABLE', 'SYNC_FAILED'],
+      ['SYNC_FAILED', 'SYNC_FAILED'],
+    ])(
+      'maps ShopeeOrdersSyncError("%s") to %s',
+      async (shopeeCode, backfillCode) => {
+        const { service } = buildService({
+          marketplaceAccountsService: {
+            findByIdOrFail: jest
+              .fn()
+              .mockResolvedValue(account({ marketplace: Marketplace.SHOPEE })),
+          },
+          shopeeSyncService: {
+            syncOrders: jest
+              .fn()
+              .mockRejectedValue(
+                new ShopeeOrdersSyncError(
+                  shopeeCode as ConstructorParameters<
+                    typeof ShopeeOrdersSyncError
+                  >[0],
+                ),
+              ),
+          },
+        });
+        await expect(service.runNextChunk('acc-1')).rejects.toMatchObject({
+          code: backfillCode,
+        });
+      },
+    );
+
     it('falls back to SYNC_FAILED for an unrecognized error', async () => {
       const { service } = buildService({
         mlSyncService: {
@@ -549,6 +613,27 @@ describe('MarketplaceBackfillService', () => {
       expect(status.job).toMatchObject({ id: 'job-1', status: 'QUEUED' });
     });
 
+    it('creates a job for a connected Shopee account', async () => {
+      const { service, jobsPersistence } = buildService({
+        marketplaceAccountsService: {
+          findByIdOrFail: jest
+            .fn()
+            .mockResolvedValue(account({ marketplace: Marketplace.SHOPEE })),
+        },
+      });
+      jobsPersistence.findLatestJob.mockResolvedValue(
+        backfillJobRow({ marketplace: Marketplace.SHOPEE }),
+      );
+
+      const status = await service.startBackfill('acc-1');
+
+      expect(jobsPersistence.createJob).toHaveBeenCalledWith(
+        'acc-1',
+        Marketplace.SHOPEE,
+      );
+      expect(status.job).toMatchObject({ id: 'job-1', status: 'QUEUED' });
+    });
+
     it('is idempotent: an active-job conflict never throws — returns the existing job status', async () => {
       const { service, jobsPersistence } = buildService({
         jobsPersistence: {
@@ -563,6 +648,115 @@ describe('MarketplaceBackfillService', () => {
 
       const status = await service.startBackfill('acc-1');
       expect(status.job).toMatchObject({ status: 'RUNNING' });
+    });
+
+    it('"completar histórico de todas as lojas" com 2 contas ML já com job ativo e 1 Shopee sem job: reconhece as ML existentes (nunca duplica) e cria só o job Shopee que falta', async () => {
+      // Espelha exatamente o botão global do frontend: uma chamada de
+      // `startBackfill` POR CONTA, sequencial ou em paralelo — o backend
+      // nunca recebe um "start all" em lote, então a idempotência PRECISA
+      // valer chamada a chamada (regressão de produção: 2 jobs ML já
+      // QUEUED + 1 conta Shopee nova).
+      const accountsById: Record<string, MarketplaceAccount> = {
+        'ml-1': account({
+          id: 'ml-1',
+          marketplace: Marketplace.MERCADO_LIVRE,
+        }),
+        'ml-2': account({
+          id: 'ml-2',
+          marketplace: Marketplace.MERCADO_LIVRE,
+        }),
+        'shopee-1': account({
+          id: 'shopee-1',
+          marketplace: Marketplace.SHOPEE,
+        }),
+      };
+      const jobsById: Record<string, ReturnType<typeof backfillJobRow>> = {
+        'ml-1': backfillJobRow({
+          id: 'job-ml-1',
+          marketplaceAccountId: 'ml-1',
+          marketplace: Marketplace.MERCADO_LIVRE,
+          status: 'QUEUED',
+        }),
+        'ml-2': backfillJobRow({
+          id: 'job-ml-2',
+          marketplaceAccountId: 'ml-2',
+          marketplace: Marketplace.MERCADO_LIVRE,
+          status: 'RUNNING',
+        }),
+        'shopee-1': backfillJobRow({
+          id: 'job-shopee-1',
+          marketplaceAccountId: 'shopee-1',
+          marketplace: Marketplace.SHOPEE,
+          status: 'QUEUED',
+        }),
+      };
+
+      const { service, jobsPersistence } = buildService({
+        marketplaceAccountsService: {
+          findByIdOrFail: jest
+            .fn()
+            .mockImplementation((id: string) =>
+              Promise.resolve(accountsById[id]),
+            ),
+        },
+        jobsPersistence: {
+          // As duas contas ML já têm job ativo — a mesma violação do índice
+          // único parcial que ocorre de verdade contra o Postgres
+          // (`UQ_marketplace_backfill_jobs_active_per_account`, provada em
+          // `backfill-jobs-persistence.service.integration.spec.ts`).
+          // Shopee não tem job ainda: `createJob` sucede normalmente.
+          createJob: jest
+            .fn()
+            .mockImplementation((accountId: string) =>
+              accountId === 'shopee-1'
+                ? Promise.resolve(jobsById['shopee-1'])
+                : Promise.reject(new BackfillJobActiveConflictError()),
+            ),
+          findLatestJob: jest
+            .fn()
+            .mockImplementation((accountId: string) =>
+              Promise.resolve(jobsById[accountId]),
+            ),
+        },
+      });
+
+      const results = await Promise.all(
+        ['ml-1', 'ml-2', 'shopee-1'].map((id) => service.startBackfill(id)),
+      );
+
+      // Reconhece: cada conta devolve o job correspondente (nunca `null`,
+      // nunca um id trocado entre contas).
+      expect(results[0].job).toMatchObject({
+        id: 'job-ml-1',
+        status: 'QUEUED',
+      });
+      expect(results[1].job).toMatchObject({
+        id: 'job-ml-2',
+        status: 'RUNNING',
+      });
+      expect(results[2].job).toMatchObject({
+        id: 'job-shopee-1',
+        status: 'QUEUED',
+      });
+
+      // Nunca duplica: createJob foi chamado uma vez por conta (a chamada em
+      // si é sempre feita — a idempotência vem do índice único parcial no
+      // banco, exercitado aqui via `BackfillJobActiveConflictError` —, mas
+      // nenhuma segunda tentativa de criação acontece para as contas ML).
+      expect(jobsPersistence.createJob).toHaveBeenCalledTimes(3);
+      expect(jobsPersistence.createJob).toHaveBeenCalledWith(
+        'ml-1',
+        Marketplace.MERCADO_LIVRE,
+      );
+      expect(jobsPersistence.createJob).toHaveBeenCalledWith(
+        'ml-2',
+        Marketplace.MERCADO_LIVRE,
+      );
+      // Cria só o que faltava: Shopee.
+      expect(jobsPersistence.createJob).toHaveBeenCalledWith(
+        'shopee-1',
+        Marketplace.SHOPEE,
+      );
     });
 
     it('rejects a disconnected account with ACCOUNT_NOT_CONNECTED, never creating a job', async () => {

@@ -138,6 +138,67 @@ describe('MarketplaceBackfillWorkerService — concorrência entre processos (Po
     }
   });
 
+  it('regressão de produção: jobs QUEUED criados enquanto BACKFILL_WORKER_ENABLED estava false são retomados automaticamente assim que o worker é ligado, sem novo clique do usuário', async () => {
+    const secondAccount = await dataSource
+      .getRepository(MarketplaceAccount)
+      .save({
+        id: randomUUID(),
+        marketplace: Marketplace.MERCADO_LIVRE,
+        externalSellerId: '1029648966',
+        nickname: 'Mercado Livre 2',
+        status: MarketplaceAccountStatus.CONNECTED,
+        tokenVersion: 1,
+      });
+
+    // Simula exatamente o estado reportado em produção: dois jobs ML já
+    // criados (cliques anteriores do usuário) e nunca reivindicados, porque
+    // BACKFILL_WORKER_ENABLED estava "false" na época — nenhuma ação nova é
+    // tomada aqui além de criá-los, como já estavam antes do deploy da
+    // correção.
+    const persistenceBeforeFix = new BackfillJobsPersistenceService(dataSource);
+    await persistenceBeforeFix.createJob(accountId, Marketplace.MERCADO_LIVRE);
+    await persistenceBeforeFix.createJob(
+      secondAccount.id,
+      Marketplace.MERCADO_LIVRE,
+    );
+
+    // "Deploy da correção": só agora um worker é instanciado — com
+    // BACKFILL_WORKER_ENABLED=true (fakeConfigService) — e roda seu PRIMEIRO
+    // ciclo. Nenhum `start`/`createJob` novo é chamado.
+    const runNextChunk = jest.fn().mockResolvedValue({
+      hasMoreHistory: true,
+      oldestCoveredAt: '2026-01-01',
+      ordersFetched: 4,
+    });
+    const worker = new MarketplaceBackfillWorkerService(
+      fakeConfigService(),
+      { runNextChunk } as never,
+      persistenceBeforeFix,
+    );
+
+    await worker.runTickOnce();
+
+    expect(runNextChunk).toHaveBeenCalledTimes(2);
+    expect(runNextChunk).toHaveBeenCalledWith(accountId);
+    expect(runNextChunk).toHaveBeenCalledWith(secondAccount.id);
+
+    const jobsAfter = await Promise.all([
+      persistenceBeforeFix.findLatestJob(accountId),
+      persistenceBeforeFix.findLatestJob(secondAccount.id),
+    ]);
+    for (const job of jobsAfter) {
+      expect(job!.chunksProcessed).toBe(1);
+    }
+
+    // Idempotência: reivindicar de novo (segundo ciclo, sem trabalho pendente
+    // ainda) nunca duplica nem cria um terceiro job para nenhuma conta.
+    const allJobsForAccount = await dataSource.query<Array<{ count: number }>>(
+      'SELECT count(*)::int AS count FROM marketplace_backfill_jobs WHERE marketplace_account_id = ANY($1::uuid[])',
+      [[accountId, secondAccount.id]],
+    );
+    expect(allJobsForAccount[0].count).toBe(2);
+  });
+
   it('a job abandoned by a worker that never restarts is picked up and completed by a second worker instance', async () => {
     const persistenceA = new BackfillJobsPersistenceService(dataSource);
     const job = await persistenceA.createJob(

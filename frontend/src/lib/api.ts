@@ -434,6 +434,7 @@ export const BACKFILL_ERROR_MESSAGES: Record<string, string> = {
     "Sincronize esta conta pelo menos uma vez antes de completar o histórico.",
   BACKFILL_ALREADY_RUNNING: "Conta temporariamente ocupada.",
   AMAZON_NOT_CONFIGURED: "Integração Amazon não configurada no servidor.",
+  SHOPEE_NOT_CONFIGURED: "Integração Shopee não configurada no servidor.",
   SYNC_FAILED: "Falha ao consultar o marketplace. Tente novamente.",
   TOKEN_EXPIRED:
     "O marketplace encerrou o acesso desta conta. Reconecte-a em Integrações.",
