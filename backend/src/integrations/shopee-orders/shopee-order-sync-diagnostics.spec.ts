@@ -155,9 +155,33 @@ describe('buildShopeeOrderSyncFailureLogPayload', () => {
       'validationFieldPath',
       'validationActualType',
       'validationOrderIndex',
+      'providerOrderStatusCode',
     ]) {
       expect(Object.prototype.hasOwnProperty.call(payload, key)).toBe(false);
     }
+  });
+
+  it('inclui providerOrderStatusCode quando presente no diagnostico', () => {
+    const payload = buildShopeeOrderSyncFailureLogPayload({
+      failureCode: 'DATA_UNAVAILABLE',
+      marketplaceAccountId: 'acc-1',
+      syncRunId: 'run-1',
+      diagnostics: {
+        stage: 'ORDER_DETAIL',
+        outcomeKind: 'invalid_response',
+        httpStatus: 200,
+        batchIndex: 6,
+        validationIssueCode: 'ORDER_STATUS_INVALID',
+        validationFieldPath: 'response.order_list[].order_status',
+        validationActualType: 'string',
+        validationOrderIndex: 49,
+        providerOrderStatusCode: 'DELIVERED',
+      },
+    });
+
+    expect(payload).toMatchObject({
+      providerOrderStatusCode: 'DELIVERED',
+    });
   });
 });
 
@@ -243,5 +267,48 @@ describe('sanitizeShopeeOrderDetailValidationIssue', () => {
     ]);
     expect(JSON.stringify(sanitized)).not.toContain('2404098R48U37H');
     expect(JSON.stringify(sanitized)).not.toContain('maria.silva');
+  });
+
+  it('propaga providerOrderStatusCode quando o issue e ORDER_STATUS_INVALID', () => {
+    expect(
+      sanitizeShopeeOrderDetailValidationIssue({
+        code: 'ORDER_STATUS_INVALID',
+        fieldPath: 'response.order_list[].order_status',
+        actualType: 'string',
+        orderIndex: 49,
+        providerOrderStatusCode: 'DELIVERED',
+      }),
+    ).toEqual({
+      validationIssueCode: 'ORDER_STATUS_INVALID',
+      validationFieldPath: 'response.order_list[].order_status',
+      validationActualType: 'string',
+      validationOrderIndex: 49,
+      providerOrderStatusCode: 'DELIVERED',
+    });
+  });
+
+  it('descarta providerOrderStatusCode fora do padrao uppercase fechado', () => {
+    const sanitized = sanitizeShopeeOrderDetailValidationIssue({
+      code: 'ORDER_STATUS_INVALID',
+      fieldPath: 'response.order_list[].order_status',
+      actualType: 'string',
+      providerOrderStatusCode: 'delivered!!',
+    });
+    expect(sanitized.providerOrderStatusCode).toBe('UNCLASSIFIED_ORDER_STATUS');
+  });
+
+  it('nunca propaga providerOrderStatusCode para outro validationIssueCode, mesmo se presente no issue bruto', () => {
+    const sanitized = sanitizeShopeeOrderDetailValidationIssue({
+      code: 'CURRENCY_INVALID',
+      fieldPath: 'response.order_list[].currency',
+      actualType: 'string',
+      providerOrderStatusCode: 'DELIVERED',
+    });
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        sanitized,
+        'providerOrderStatusCode',
+      ),
+    ).toBe(false);
   });
 });

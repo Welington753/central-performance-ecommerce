@@ -212,8 +212,16 @@ describe('ShopeeOrdersApiClient.getOrderDetail - status desconhecido e integrida
       orderSnList: VALID_ORDER_SN_LIST,
     });
 
-    expect(outcome).toMatchObject({ kind: 'invalid_response' });
-    expect(JSON.stringify(outcome)).not.toContain('SOME_FUTURE_STATUS');
+    // `providerOrderStatusCode` (diagnóstico sanitizado) é o ÚNICO campo
+    // autorizado a repetir um `order_status` uppercase válido — nunca
+    // order_sn/item/preço/corpo bruto.
+    expect(outcome).toMatchObject({
+      kind: 'invalid_response',
+      diagnostics: {
+        validationIssueCode: 'ORDER_STATUS_INVALID',
+        providerOrderStatusCode: 'SOME_FUTURE_STATUS',
+      },
+    });
   });
 
   it('returns invalid_response for a response containing an orderSn that was not requested', async () => {

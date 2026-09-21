@@ -147,6 +147,31 @@ export interface ShopeeOrderDetailValidationIssue {
   actualType: ShopeeValidationActualType;
   /** Índice do pedido dentro do lote de `get_order_detail`; ausente em falha de envelope. */
   orderIndex?: number;
+  /**
+   * Presente SOMENTE quando `code === 'ORDER_STATUS_INVALID'` e o valor
+   * bruto rejeitado era uma `string` — nunca para qualquer outro código, nunca
+   * para outro tipo. Sempre o resultado de
+   * {@link sanitizeShopeeProviderOrderStatusCode}, nunca o valor bruto.
+   */
+  providerOrderStatusCode?: string;
+}
+
+export const UNCLASSIFIED_ORDER_STATUS = 'UNCLASSIFIED_ORDER_STATUS';
+
+/**
+ * Mesmo padrão de vocabulário fechado de `order_status` documentado —
+ * maiúsculas ASCII, dígitos e `_`, começando por letra, até 64 caracteres
+ * (mesmo teto de `sanitizeShopeeOrdersProviderErrorCode`). Qualquer valor
+ * fora do padrão cai fechado no sentinela, nunca no valor bruto.
+ */
+const PROVIDER_ORDER_STATUS_CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
+
+export function sanitizeShopeeProviderOrderStatusCode(
+  rawStatus: string,
+): string {
+  return PROVIDER_ORDER_STATUS_CODE_PATTERN.test(rawStatus)
+    ? rawStatus
+    : UNCLASSIFIED_ORDER_STATUS;
 }
 
 export function describeShopeeValidationActualType(
@@ -183,6 +208,11 @@ export function shopeeOrderDetailValidationIssue(
     fieldPath: SHOPEE_ORDER_DETAIL_VALIDATION_ISSUE_FIELD_PATHS[code],
     actualType: describeShopeeValidationActualType(value),
     ...(orderIndex === undefined ? {} : { orderIndex }),
+    ...(code === 'ORDER_STATUS_INVALID' && typeof value === 'string'
+      ? {
+          providerOrderStatusCode: sanitizeShopeeProviderOrderStatusCode(value),
+        }
+      : {}),
   };
 }
 

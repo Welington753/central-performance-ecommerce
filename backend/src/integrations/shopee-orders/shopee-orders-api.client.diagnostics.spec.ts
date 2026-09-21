@@ -335,6 +335,69 @@ describe('ShopeeOrdersApiClient.getOrderDetail - diagnostico sanitizado', () => 
     expect(serialized).not.toContain('QAZ-SADOER-05');
   });
 
+  it('invalid_response: order_status rejeitado propaga providerOrderStatusCode sanitizado', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        validOrderDetailBody({
+          orders: [validOrderDetailOrder({ order_status: 'DELIVERED' })],
+        }),
+      ),
+    );
+    const client = new ShopeeOrdersApiClient(
+      makeCredentialsService(),
+      fetchImpl,
+      fixedClock,
+    );
+
+    const outcome = await client.getOrderDetail({
+      accessToken: ACCESS_TOKEN,
+      shopId: SHOP_ID,
+      orderSnList: VALID_ORDER_SN_LIST,
+    });
+
+    expect(outcome).toEqual({
+      kind: 'invalid_response',
+      diagnostics: {
+        httpStatus: 200,
+        providerRequestId: 'req-abc123',
+        validationIssueCode: 'ORDER_STATUS_INVALID',
+        validationFieldPath: 'response.order_list[].order_status',
+        validationActualType: 'string',
+        validationOrderIndex: 0,
+        providerOrderStatusCode: 'DELIVERED',
+      },
+    });
+  });
+
+  it('invalid_response: order_status com caracteres invalidos cai no fallback fechado', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        validOrderDetailBody({
+          orders: [validOrderDetailOrder({ order_status: 'delivered!!' })],
+        }),
+      ),
+    );
+    const client = new ShopeeOrdersApiClient(
+      makeCredentialsService(),
+      fetchImpl,
+      fixedClock,
+    );
+
+    const outcome = await client.getOrderDetail({
+      accessToken: ACCESS_TOKEN,
+      shopId: SHOP_ID,
+      orderSnList: VALID_ORDER_SN_LIST,
+    });
+
+    expect(outcome).toMatchObject({
+      kind: 'invalid_response',
+      diagnostics: { providerOrderStatusCode: 'UNCLASSIFIED_ORDER_STATUS' },
+    });
+    expect(JSON.stringify(outcome)).not.toContain('delivered');
+  });
+
   it('invalid_response por JSON ilegivel: nunca inventa issue code de validacao', async () => {
     const fetchImpl = jest
       .fn()

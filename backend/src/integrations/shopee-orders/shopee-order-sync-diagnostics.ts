@@ -1,5 +1,6 @@
 import type { ShopeeOrderMappingErrorReason } from './shopee-order.mapper';
 import {
+  sanitizeShopeeProviderOrderStatusCode,
   SHOPEE_ORDER_DETAIL_VALIDATION_FIELD_PATHS,
   SHOPEE_ORDER_DETAIL_VALIDATION_ISSUE_CODES,
   SHOPEE_VALIDATION_ACTUAL_TYPES,
@@ -82,6 +83,8 @@ export interface ShopeeOrdersHttpDiagnostics {
   validationFieldPath?: ShopeeOrderDetailValidationFieldPath;
   validationActualType?: ShopeeValidationActualType;
   validationOrderIndex?: number;
+  /** Só existe quando `validationIssueCode === 'ORDER_STATUS_INVALID'` — nunca para outro código. */
+  providerOrderStatusCode?: string;
 }
 
 /** Campos de validação do diagnóstico — nunca montados fora de {@link sanitizeShopeeOrderDetailValidationIssue}. */
@@ -91,6 +94,7 @@ export type ShopeeOrderValidationDiagnostics = Pick<
   | 'validationFieldPath'
   | 'validationActualType'
   | 'validationOrderIndex'
+  | 'providerOrderStatusCode'
 >;
 
 const VALIDATION_ISSUE_CODES: ReadonlySet<string> = new Set(
@@ -139,11 +143,25 @@ export function sanitizeShopeeOrderDetailValidationIssue(
     Number.isSafeInteger(orderIndex) &&
     orderIndex >= 0;
 
+  // `providerOrderStatusCode` só é válido junto de `ORDER_STATUS_INVALID` —
+  // presente no issue bruto para qualquer outro código é sempre descartado
+  // (nunca confiado sem essa amarração), e reconferido pelo mesmo
+  // sanitizador de origem (fail-closed, nunca o valor bruto).
+  const rawProviderOrderStatusCode = raw.providerOrderStatusCode;
+  const providerOrderStatusCode =
+    code === 'ORDER_STATUS_INVALID' &&
+    typeof rawProviderOrderStatusCode === 'string'
+      ? sanitizeShopeeProviderOrderStatusCode(rawProviderOrderStatusCode)
+      : undefined;
+
   return {
     validationIssueCode: code as ShopeeOrderDetailValidationIssueCode,
     validationFieldPath: fieldPath as ShopeeOrderDetailValidationFieldPath,
     validationActualType: actualType as ShopeeValidationActualType,
     ...(validOrderIndex ? { validationOrderIndex: orderIndex } : {}),
+    ...(providerOrderStatusCode !== undefined
+      ? { providerOrderStatusCode }
+      : {}),
   };
 }
 
@@ -198,6 +216,7 @@ export function buildShopeeOrderSyncFailureLogPayload(input: {
     validationFieldPath: input.diagnostics.validationFieldPath,
     validationActualType: input.diagnostics.validationActualType,
     validationOrderIndex: input.diagnostics.validationOrderIndex,
+    providerOrderStatusCode: input.diagnostics.providerOrderStatusCode,
   };
   const entries = Object.entries(full).filter(
     ([, value]) => value !== undefined,

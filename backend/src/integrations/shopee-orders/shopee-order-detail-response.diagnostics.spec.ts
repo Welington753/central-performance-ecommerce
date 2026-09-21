@@ -218,13 +218,6 @@ describe('validateShopeeOrderDetailResponseBody - issue code do pedido', () => {
       'string',
     ],
     [
-      'order_status',
-      'ORDER_STATUS_INVALID',
-      'response.order_list[].order_status',
-      'DELIVERED',
-      'string',
-    ],
-    [
       'total_amount',
       'TOTAL_AMOUNT_INVALID',
       'response.order_list[].total_amount',
@@ -263,6 +256,44 @@ describe('validateShopeeOrderDetailResponseBody - issue code do pedido', () => {
     expect(
       invalidIssue(baseBody({ orders: [validOrder({ [field]: value })] })),
     ).toEqual({ code, fieldPath, actualType, orderIndex: 0 });
+  });
+
+  it('order_status invalido uppercase produz ORDER_STATUS_INVALID com providerOrderStatusCode sanitizado', () => {
+    expect(
+      invalidIssue(
+        baseBody({ orders: [validOrder({ order_status: 'DELIVERED' })] }),
+      ),
+    ).toEqual({
+      code: 'ORDER_STATUS_INVALID',
+      fieldPath: 'response.order_list[].order_status',
+      actualType: 'string',
+      orderIndex: 0,
+      providerOrderStatusCode: 'DELIVERED',
+    });
+  });
+
+  it('order_status invalido com caracteres fora do padrao cai no fallback fechado', () => {
+    expect(
+      invalidIssue(
+        baseBody({ orders: [validOrder({ order_status: 'delivered!!' })] }),
+      ),
+    ).toEqual({
+      code: 'ORDER_STATUS_INVALID',
+      fieldPath: 'response.order_list[].order_status',
+      actualType: 'string',
+      orderIndex: 0,
+      providerOrderStatusCode: 'UNCLASSIFIED_ORDER_STATUS',
+    });
+  });
+
+  it('order_status nao string nunca produz providerOrderStatusCode', () => {
+    const issue = invalidIssue(
+      baseBody({ orders: [validOrder({ order_status: 123 })] }),
+    );
+    expect(issue.code).toBe('ORDER_STATUS_INVALID');
+    expect(
+      Object.prototype.hasOwnProperty.call(issue, 'providerOrderStatusCode'),
+    ).toBe(false);
   });
 });
 

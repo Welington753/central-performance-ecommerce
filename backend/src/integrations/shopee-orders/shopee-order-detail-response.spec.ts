@@ -106,7 +106,7 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
     }
   });
 
-  it('rejects an undocumented/unknown order_status, never exposing it', () => {
+  it('rejects an undocumented/unknown order_status, never exposing raw order/item data', () => {
     const result = validateShopeeOrderDetailResponseBody(
       baseBody({
         orders: [validOrder({ order_status: 'SOME_FUTURE_STATUS' })],
@@ -114,7 +114,15 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
       REQUESTED,
     );
     expect(result).toMatchObject({ valid: false });
-    expect(JSON.stringify(result)).not.toContain('SOME_FUTURE_STATUS');
+    // `providerOrderStatusCode` sanitizado (Checkpoint de diagnóstico) é o
+    // ÚNICO campo autorizado a repetir o valor bruto do status — nunca o
+    // order_sn, item, preço ou qualquer outro dado do pedido.
+    expect(result).toMatchObject({
+      issue: {
+        code: 'ORDER_STATUS_INVALID',
+        providerOrderStatusCode: 'SOME_FUTURE_STATUS',
+      },
+    });
   });
 });
 

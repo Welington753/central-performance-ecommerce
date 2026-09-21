@@ -327,6 +327,72 @@ describe('ShopeeOrdersSyncService.syncOrders - log SHOPEE_ORDER_SYNC_FAILED', ()
     expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
   });
 
+  it('invalid_response por ORDER_STATUS_INVALID: loga providerOrderStatusCode sanitizado uma unica vez', async () => {
+    const { service, persistence } = buildService({
+      client: {
+        getOrderList: jest.fn().mockResolvedValue(listSuccess(['SECRET_SN'])),
+        getOrderDetail: jest.fn().mockResolvedValue({
+          kind: 'invalid_response',
+          diagnostics: {
+            httpStatus: 200,
+            batchIndex: 6,
+            validationIssueCode: 'ORDER_STATUS_INVALID',
+            validationFieldPath: 'response.order_list[].order_status',
+            validationActualType: 'string',
+            validationOrderIndex: 49,
+            providerOrderStatusCode: 'DELIVERED',
+          },
+        }),
+      },
+    });
+
+    await expect(service.syncOrders(ACCOUNT_ID)).rejects.toMatchObject({
+      code: 'DATA_UNAVAILABLE',
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const [message, payload] = errorSpy.mock.calls[0] as [string, unknown];
+    expect(message).toBe('SHOPEE_ORDER_SYNC_FAILED');
+    expect(payload).toMatchObject({
+      failureCode: 'DATA_UNAVAILABLE',
+      stage: 'ORDER_DETAIL',
+      outcomeKind: 'invalid_response',
+      validationIssueCode: 'ORDER_STATUS_INVALID',
+      validationOrderIndex: 49,
+      providerOrderStatusCode: 'DELIVERED',
+    });
+
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain('SECRET_SN');
+    expect(serialized).not.toContain('token-abc');
+    expect(serialized).not.toContain('555444333');
+
+    expect(persistence.finalizeSyncRunFailure).toHaveBeenCalledTimes(1);
+  });
+
+  it('invalid_response por outro issue code: nunca loga providerOrderStatusCode', async () => {
+    const { service } = buildService({
+      client: {
+        getOrderList: jest.fn().mockResolvedValue(listSuccess(['A'])),
+        getOrderDetail: jest.fn().mockResolvedValue({
+          kind: 'invalid_response',
+          diagnostics: {
+            httpStatus: 200,
+            validationIssueCode: 'CURRENCY_INVALID',
+            validationFieldPath: 'response.order_list[].currency',
+            validationActualType: 'string',
+            validationOrderIndex: 0,
+          },
+        }),
+      },
+    });
+
+    await expect(service.syncOrders(ACCOUNT_ID)).rejects.toThrow();
+
+    const [, payload] = errorSpy.mock.calls[0] as [string, unknown];
+    expect(payload).not.toHaveProperty('providerOrderStatusCode');
+  });
+
   it('sucesso: nunca loga SHOPEE_ORDER_SYNC_FAILED', async () => {
     const { service } = buildService();
     await service.syncOrders(ACCOUNT_ID);
