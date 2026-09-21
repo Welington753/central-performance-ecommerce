@@ -182,11 +182,11 @@ export function BackfillAccountPanel({
           {job?.status === "SAFETY_LIMIT_REACHED" ? (
             <p className="text-xs text-foreground/60">
               Histórico completo dentro do limite de segurança do sistema —
-              isto não é uma confirmação de que{" "}
+              isso não confirma que{" "}
               {status.oldestCoveredAt
                 ? formatCalendarDate(status.oldestCoveredAt)
                 : "esta data"}{" "}
-              é o início real do histórico desta conta no Mercado Livre.
+              seja o início real do histórico desta conta.
             </p>
           ) : null}
 

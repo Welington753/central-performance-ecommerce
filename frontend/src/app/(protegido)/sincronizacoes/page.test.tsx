@@ -378,6 +378,41 @@ describe("SincronizacoesPage — Completar histórico (Fase 4, Shopee)", () => {
     expect(api.startBackfill).toHaveBeenCalledWith("shopee-1");
   });
 
+  it("cartão Shopee no limite de segurança mostra mensagem genérica, sem mencionar Mercado Livre", async () => {
+    api.fetchMarketplaceAccounts.mockResolvedValueOnce([
+      account({ id: "shopee-1", nickname: "Shopee Conectada" }),
+    ]);
+    api.fetchBackfillStatus.mockResolvedValue(
+      backfillStatus({
+        status: "SAFETY_LIMIT_REACHED",
+        oldestCoveredAt: "2026-05-01",
+        job: {
+          id: "job-1",
+          status: "SAFETY_LIMIT_REACHED",
+          chunksProcessed: 2,
+          attemptCount: 0,
+          requestedAt: "2026-09-01T00:00:00.000Z",
+          startedAt: "2026-09-01T00:00:00.000Z",
+          lastActivityAt: "2026-09-01T00:05:00.000Z",
+          nextAttemptAt: null,
+          completedAt: null,
+          lastErrorCode: null,
+          pauseRequested: false,
+        },
+      }),
+    );
+
+    render(<SincronizacoesPage />);
+
+    const panel = await screen.findByTestId(
+      "backfill-panel-Shopee — Shopee Conectada",
+    );
+    expect(
+      within(panel).getByText(/histórico completo dentro do limite/i),
+    ).toBeInTheDocument();
+    expect(within(panel).queryByText(/mercado livre/i)).not.toBeInTheDocument();
+  });
+
   it("conta Shopee desconectada nunca ganha painel de histórico nem entra no botão global", async () => {
     api.fetchMarketplaceAccounts.mockResolvedValueOnce([
       mlAccount({ id: "ml-1", nickname: "Mercado Livre 1" }),

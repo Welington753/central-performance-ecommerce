@@ -198,7 +198,7 @@ describe("SincronizacoesPage — Completar histórico (job durável, Fase 4)", (
     expect(
       within(panel).getByText(/histórico completo dentro do limite/i),
     ).toBeInTheDocument();
-    expect(within(panel).getByText(/não é uma confirmação/i)).toBeInTheDocument();
+    expect(within(panel).getByText(/isso não confirma/i)).toBeInTheDocument();
     expect(
       within(panel).queryByRole("button", { name: /histórico/i }),
     ).not.toBeInTheDocument();
