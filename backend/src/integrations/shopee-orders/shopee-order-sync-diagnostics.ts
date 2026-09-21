@@ -1,4 +1,12 @@
 import type { ShopeeOrderMappingErrorReason } from './shopee-order.mapper';
+import {
+  SHOPEE_ORDER_DETAIL_VALIDATION_FIELD_PATHS,
+  SHOPEE_ORDER_DETAIL_VALIDATION_ISSUE_CODES,
+  SHOPEE_VALIDATION_ACTUAL_TYPES,
+  type ShopeeOrderDetailValidationFieldPath,
+  type ShopeeOrderDetailValidationIssueCode,
+  type ShopeeValidationActualType,
+} from './shopee-order-detail-validation-issue';
 
 /**
  * Vocabulário fechado e sanitização da instrumentação de diagnóstico de
@@ -70,6 +78,73 @@ export interface ShopeeOrdersHttpDiagnostics {
   httpStatus?: number;
   providerErrorCode?: string;
   providerRequestId?: string;
+  validationIssueCode?: ShopeeOrderDetailValidationIssueCode;
+  validationFieldPath?: ShopeeOrderDetailValidationFieldPath;
+  validationActualType?: ShopeeValidationActualType;
+  validationOrderIndex?: number;
+}
+
+/** Campos de validação do diagnóstico — nunca montados fora de {@link sanitizeShopeeOrderDetailValidationIssue}. */
+export type ShopeeOrderValidationDiagnostics = Pick<
+  ShopeeOrdersHttpDiagnostics,
+  | 'validationIssueCode'
+  | 'validationFieldPath'
+  | 'validationActualType'
+  | 'validationOrderIndex'
+>;
+
+const VALIDATION_ISSUE_CODES: ReadonlySet<string> = new Set(
+  SHOPEE_ORDER_DETAIL_VALIDATION_ISSUE_CODES,
+);
+const VALIDATION_FIELD_PATHS: ReadonlySet<string> = new Set(
+  SHOPEE_ORDER_DETAIL_VALIDATION_FIELD_PATHS,
+);
+const VALIDATION_ACTUAL_TYPES: ReadonlySet<string> = new Set(
+  SHOPEE_VALIDATION_ACTUAL_TYPES,
+);
+
+/**
+ * Fronteira final entre o validador e o log: reconfere o issue contra os
+ * vocabulários fechados e copia campo a campo. Um `code`/`fieldPath`/
+ * `actualType` fora do vocabulário derruba o diagnóstico inteiro (fecha em
+ * `{}`, nunca propaga o valor não reconhecido), e nenhuma chave extra de um
+ * issue adulterado sobrevive à cópia — é o que garante que só metadado
+ * fechado chega a `SHOPEE_ORDER_SYNC_FAILED`.
+ */
+export function sanitizeShopeeOrderDetailValidationIssue(
+  issue: unknown,
+): ShopeeOrderValidationDiagnostics {
+  if (typeof issue !== 'object' || issue === null || Array.isArray(issue)) {
+    return {};
+  }
+  const raw = issue as Record<string, unknown>;
+
+  const code = raw.code;
+  const fieldPath = raw.fieldPath;
+  const actualType = raw.actualType;
+  if (
+    typeof code !== 'string' ||
+    !VALIDATION_ISSUE_CODES.has(code) ||
+    typeof fieldPath !== 'string' ||
+    !VALIDATION_FIELD_PATHS.has(fieldPath) ||
+    typeof actualType !== 'string' ||
+    !VALIDATION_ACTUAL_TYPES.has(actualType)
+  ) {
+    return {};
+  }
+
+  const orderIndex = raw.orderIndex;
+  const validOrderIndex =
+    typeof orderIndex === 'number' &&
+    Number.isSafeInteger(orderIndex) &&
+    orderIndex >= 0;
+
+  return {
+    validationIssueCode: code as ShopeeOrderDetailValidationIssueCode,
+    validationFieldPath: fieldPath as ShopeeOrderDetailValidationFieldPath,
+    validationActualType: actualType as ShopeeValidationActualType,
+    ...(validOrderIndex ? { validationOrderIndex: orderIndex } : {}),
+  };
 }
 
 /**
@@ -119,6 +194,10 @@ export function buildShopeeOrderSyncFailureLogPayload(input: {
     httpStatus: input.diagnostics.httpStatus,
     blockIndex: input.diagnostics.blockIndex,
     batchIndex: input.diagnostics.batchIndex,
+    validationIssueCode: input.diagnostics.validationIssueCode,
+    validationFieldPath: input.diagnostics.validationFieldPath,
+    validationActualType: input.diagnostics.validationActualType,
+    validationOrderIndex: input.diagnostics.validationOrderIndex,
   };
   const entries = Object.entries(full).filter(
     ([, value]) => value !== undefined,

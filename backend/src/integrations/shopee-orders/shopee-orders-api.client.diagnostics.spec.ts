@@ -8,6 +8,8 @@ import {
   textResponse,
   VALID_ORDER_LIST_INPUT,
   VALID_ORDER_SN_LIST,
+  validOrderDetailBody,
+  validOrderDetailOrder,
   validOrderListBody,
 } from './shopee-orders-api.client.test-helpers';
 
@@ -284,8 +286,118 @@ describe('ShopeeOrdersApiClient.getOrderDetail - diagnostico sanitizado', () => 
 
     expect(outcome).toEqual({
       kind: 'invalid_response',
-      diagnostics: { httpStatus: 200 },
+      diagnostics: {
+        httpStatus: 200,
+        validationIssueCode: 'ERROR_NOT_STRING',
+        validationFieldPath: 'error',
+        validationActualType: 'missing',
+      },
     });
     expect(JSON.stringify(outcome)).not.toContain(VALID_ORDER_SN_LIST[0]);
+  });
+
+  it('invalid_response: propaga o issue code estrutural e o indice do pedido no lote', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue(
+      jsonResponse(
+        200,
+        validOrderDetailBody({
+          orders: [validOrderDetailOrder({ total_amount: 'R$ 1.004,00' })],
+        }),
+      ),
+    );
+    const client = new ShopeeOrdersApiClient(
+      makeCredentialsService(),
+      fetchImpl,
+      fixedClock,
+    );
+
+    const outcome = await client.getOrderDetail({
+      accessToken: ACCESS_TOKEN,
+      shopId: SHOP_ID,
+      orderSnList: VALID_ORDER_SN_LIST,
+    });
+
+    expect(outcome).toEqual({
+      kind: 'invalid_response',
+      diagnostics: {
+        httpStatus: 200,
+        providerRequestId: 'req-abc123',
+        validationIssueCode: 'TOTAL_AMOUNT_INVALID',
+        validationFieldPath: 'response.order_list[].total_amount',
+        validationActualType: 'string',
+        validationOrderIndex: 0,
+      },
+    });
+    const serialized = JSON.stringify(outcome);
+    expect(serialized).not.toContain('1.004');
+    expect(serialized).not.toContain(VALID_ORDER_SN_LIST[0]);
+    expect(serialized).not.toContain('backpack');
+    expect(serialized).not.toContain('QAZ-SADOER-05');
+  });
+
+  it('invalid_response por JSON ilegivel: nunca inventa issue code de validacao', async () => {
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValue(textResponse(200, 'not-json{{'));
+    const client = new ShopeeOrdersApiClient(
+      makeCredentialsService(),
+      fetchImpl,
+      fixedClock,
+    );
+
+    const outcome = await client.getOrderDetail({
+      accessToken: ACCESS_TOKEN,
+      shopId: SHOP_ID,
+      orderSnList: VALID_ORDER_SN_LIST,
+    });
+
+    expect(outcome).toEqual({
+      kind: 'invalid_response',
+      diagnostics: { httpStatus: 200 },
+    });
+  });
+
+  it('getOrderList invalido nunca ganha campos de issue de detalhe', async () => {
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValue(jsonResponse(200, { foo: 'bar' }));
+    const client = new ShopeeOrdersApiClient(
+      makeCredentialsService(),
+      fetchImpl,
+      fixedClock,
+    );
+
+    const outcome = await client.getOrderList({
+      accessToken: ACCESS_TOKEN,
+      shopId: SHOP_ID,
+      ...VALID_ORDER_LIST_INPUT,
+    });
+
+    expect(outcome).toEqual({
+      kind: 'invalid_response',
+      diagnostics: { httpStatus: 200 },
+    });
+  });
+
+  it('sucesso de detalhe continua sem diagnostics', async () => {
+    const fetchImpl = jest
+      .fn()
+      .mockResolvedValue(jsonResponse(200, validOrderDetailBody()));
+    const client = new ShopeeOrdersApiClient(
+      makeCredentialsService(),
+      fetchImpl,
+      fixedClock,
+    );
+
+    const outcome = await client.getOrderDetail({
+      accessToken: ACCESS_TOKEN,
+      shopId: SHOP_ID,
+      orderSnList: VALID_ORDER_SN_LIST,
+    });
+
+    expect(outcome.kind).toBe('success');
+    expect(Object.prototype.hasOwnProperty.call(outcome, 'diagnostics')).toBe(
+      false,
+    );
   });
 });

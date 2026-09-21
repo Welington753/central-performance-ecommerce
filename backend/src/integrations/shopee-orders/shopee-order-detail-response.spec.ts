@@ -113,7 +113,7 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
       }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
     expect(JSON.stringify(result)).not.toContain('SOME_FUTURE_STATUS');
   });
 });
@@ -139,7 +139,7 @@ describe('validateShopeeOrderDetailResponseBody - totalAmount ausente/invalido',
         baseBody({ orders: [validOrder({ total_amount })] }),
         REQUESTED,
       );
-      expect(result).toEqual({ valid: false });
+      expect(result).toMatchObject({ valid: false });
     },
   );
 
@@ -174,7 +174,7 @@ describe('validateShopeeOrderDetailResponseBody - updateTime ausente/invalido', 
       baseBody({ orders: [validOrder({ update_time: 'not-a-number' })] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 });
 
@@ -186,7 +186,7 @@ describe('validateShopeeOrderDetailResponseBody - createTime obrigatorio', () =>
       baseBody({ orders: [order] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it.each([0, -1, 1.5, NaN])(
@@ -196,7 +196,7 @@ describe('validateShopeeOrderDetailResponseBody - createTime obrigatorio', () =>
         baseBody({ orders: [validOrder({ create_time })] }),
         REQUESTED,
       );
-      expect(result).toEqual({ valid: false });
+      expect(result).toMatchObject({ valid: false });
     },
   );
 });
@@ -220,7 +220,7 @@ describe('validateShopeeOrderDetailResponseBody - fulfillmentFlag', () => {
       baseBody({ orders: [validOrder({ fulfillment_flag: 123 })] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 });
 
@@ -230,7 +230,7 @@ describe('validateShopeeOrderDetailResponseBody - region/currency', () => {
       baseBody({ orders: [validOrder({ currency: 'VNDX' })] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('rejects a missing region', () => {
@@ -240,7 +240,7 @@ describe('validateShopeeOrderDetailResponseBody - region/currency', () => {
       baseBody({ orders: [order] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 });
 
@@ -250,7 +250,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
       baseBody({ orders: [validOrder({ item_list: {} })] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('accepts an empty item_list', () => {
@@ -302,7 +302,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
       }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('accepts model_id 0 (documented sentinel for "no variation"), never nulling it', () => {
@@ -325,7 +325,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
       }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('rejects item_id 0 (item_id must be strictly positive, unlike model_id)', () => {
@@ -335,7 +335,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
       }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it.each([0, -1, 1.5, NaN])(
@@ -351,7 +351,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
         }),
         REQUESTED,
       );
-      expect(result).toEqual({ valid: false });
+      expect(result).toMatchObject({ valid: false });
     },
   );
 
@@ -366,7 +366,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
         }),
         REQUESTED,
       );
-      expect(result).toEqual({ valid: false });
+      expect(result).toMatchObject({ valid: false });
     },
   );
 
@@ -383,7 +383,7 @@ describe('validateShopeeOrderDetailResponseBody - item_list estrutural', () => {
         }),
         REQUESTED,
       );
-      expect(result).toEqual({ valid: false });
+      expect(result).toMatchObject({ valid: false });
     },
   );
 });
@@ -411,7 +411,7 @@ describe('validateShopeeOrderDetailResponseBody - IDs int64 seguros vs. unsafe',
       JSON.parse(text) as unknown,
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('rejects a model_id that already lost int64 precision after JSON.parse', () => {
@@ -423,7 +423,7 @@ describe('validateShopeeOrderDetailResponseBody - IDs int64 seguros vs. unsafe',
       JSON.parse(text) as unknown,
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('accepts a large but still safe item_id, converting to string only after validation', () => {
@@ -476,7 +476,7 @@ describe('validateShopeeOrderDetailResponseBody - integridade do lote', () => {
       baseBody({ orders: [validOrder({ order_sn: 'NOT-REQUESTED-1' })] }),
       REQUESTED,
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('rejects a response missing a requested orderSn (no partial success)', () => {
@@ -484,7 +484,7 @@ describe('validateShopeeOrderDetailResponseBody - integridade do lote', () => {
       baseBody({ orders: [] }),
       ['2404098R48U37H', '201214JASXYXY6'],
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('rejects a response with a duplicated orderSn', () => {
@@ -494,7 +494,7 @@ describe('validateShopeeOrderDetailResponseBody - integridade do lote', () => {
       }),
       ['2404098R48U37H', '201214JASXYXY6'],
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 
   it('accepts a response matching the requested set exactly, in any order', () => {
@@ -523,15 +523,15 @@ describe('validateShopeeOrderDetailResponseBody - integridade do lote', () => {
       }),
       ['AAA'],
     );
-    expect(result).toEqual({ valid: false });
+    expect(result).toMatchObject({ valid: false });
   });
 });
 
 describe('validateShopeeOrderDetailResponseBody - envelope estruturalmente invalido', () => {
   it('rejects a null body', () => {
-    expect(validateShopeeOrderDetailResponseBody(null, REQUESTED)).toEqual({
-      valid: false,
-    });
+    expect(
+      validateShopeeOrderDetailResponseBody(null, REQUESTED),
+    ).toMatchObject({ valid: false });
   });
 
   it('rejects a body with a non-empty error', () => {
@@ -540,15 +540,15 @@ describe('validateShopeeOrderDetailResponseBody - envelope estruturalmente inval
         baseBody({ error: 'error_not_found' }),
         REQUESTED,
       ),
-    ).toEqual({ valid: false });
+    ).toMatchObject({ valid: false });
   });
 
   it('rejects a body without a response object', () => {
     const body = baseBody() as Record<string, unknown>;
     delete body.response;
-    expect(validateShopeeOrderDetailResponseBody(body, REQUESTED)).toEqual({
-      valid: false,
-    });
+    expect(
+      validateShopeeOrderDetailResponseBody(body, REQUESTED),
+    ).toMatchObject({ valid: false });
   });
 
   it('rejects order_list that is not an array', () => {
@@ -562,7 +562,7 @@ describe('validateShopeeOrderDetailResponseBody - envelope estruturalmente inval
         },
         REQUESTED,
       ),
-    ).toEqual({ valid: false });
+    ).toMatchObject({ valid: false });
   });
 
   it('rejects a missing/invalid request_id', () => {
@@ -571,6 +571,6 @@ describe('validateShopeeOrderDetailResponseBody - envelope estruturalmente inval
         baseBody({ request_id: '' }),
         REQUESTED,
       ),
-    ).toEqual({ valid: false });
+    ).toMatchObject({ valid: false });
   });
 });

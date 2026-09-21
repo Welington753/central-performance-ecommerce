@@ -280,6 +280,53 @@ describe('ShopeeOrdersSyncService.syncOrders - log SHOPEE_ORDER_SYNC_FAILED', ()
     expect(errorSpy).not.toHaveBeenCalled();
   });
 
+  it('invalid_response em get_order_detail: loga o issue code estrutural uma unica vez', async () => {
+    const { service, persistence } = buildService({
+      client: {
+        getOrderList: jest.fn().mockResolvedValue(listSuccess(['SECRET_SN'])),
+        getOrderDetail: jest.fn().mockResolvedValue({
+          kind: 'invalid_response',
+          diagnostics: {
+            httpStatus: 200,
+            providerRequestId: 'req-abc123',
+            validationIssueCode: 'TOTAL_AMOUNT_INVALID',
+            validationFieldPath: 'response.order_list[].total_amount',
+            validationActualType: 'string',
+            validationOrderIndex: 3,
+          },
+        }),
+      },
+    });
+
+    await expect(service.syncOrders(ACCOUNT_ID)).rejects.toMatchObject({
+      code: 'DATA_UNAVAILABLE',
+    });
+
+    expect(errorSpy).toHaveBeenCalledTimes(1);
+    const [message, payload] = errorSpy.mock.calls[0] as [string, unknown];
+    expect(message).toBe('SHOPEE_ORDER_SYNC_FAILED');
+    expect(payload).toMatchObject({
+      failureCode: 'DATA_UNAVAILABLE',
+      stage: 'ORDER_DETAIL',
+      outcomeKind: 'invalid_response',
+      httpStatus: 200,
+      batchIndex: 0,
+      validationIssueCode: 'TOTAL_AMOUNT_INVALID',
+      validationFieldPath: 'response.order_list[].total_amount',
+      validationActualType: 'string',
+      validationOrderIndex: 3,
+    });
+
+    const serialized = JSON.stringify(payload);
+    expect(serialized).not.toContain('SECRET_SN');
+    expect(serialized).not.toContain('token-abc');
+    expect(serialized).not.toContain('555444333');
+
+    expect(persistence.finalizeSyncRunFailure).toHaveBeenCalledTimes(1);
+    expect(persistence.persistOrders).not.toHaveBeenCalled();
+    expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
+  });
+
   it('sucesso: nunca loga SHOPEE_ORDER_SYNC_FAILED', async () => {
     const { service } = buildService();
     await service.syncOrders(ACCOUNT_ID);

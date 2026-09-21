@@ -33,10 +33,12 @@ import {
   readLimitedResponseText,
 } from './shopee-orders-http.util';
 import {
+  sanitizeShopeeOrderDetailValidationIssue,
   sanitizeShopeeOrdersProviderErrorCode,
   sanitizeShopeeOrdersProviderRequestId,
   type ShopeeOrdersHttpDiagnostics,
 } from './shopee-order-sync-diagnostics';
+import type { ShopeeOrderDetailValidationIssue } from './shopee-order-detail-validation-issue';
 
 export interface ShopeeOrderListRequest extends ShopeeOrderListInput {
   accessToken: string;
@@ -151,7 +153,9 @@ export class ShopeeOrdersApiClient {
     maxBytes: number,
     validate: (
       json: unknown,
-    ) => { valid: true; result: TResult } | { valid: false },
+    ) =>
+      | { valid: true; result: TResult }
+      | { valid: false; issue?: ShopeeOrderDetailValidationIssue },
   ): Promise<ShopeeOrdersTransportOutcome<TResult>> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), httpTimeoutMs);
@@ -227,6 +231,7 @@ export class ShopeeOrdersApiClient {
           diagnostics: {
             httpStatus,
             ...(providerRequestId !== undefined ? { providerRequestId } : {}),
+            ...sanitizeShopeeOrderDetailValidationIssue(validation.issue),
           },
         };
       }

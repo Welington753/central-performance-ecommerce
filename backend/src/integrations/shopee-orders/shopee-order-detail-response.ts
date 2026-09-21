@@ -1,3 +1,10 @@
+import {
+  shopeeOrderDetailValidationIssue,
+  withShopeeOrderIndex,
+  type ShopeeOrderDetailValidationIssue,
+  type ShopeeOrderDetailValidationIssueCode,
+} from './shopee-order-detail-validation-issue';
+
 /**
  * Vocabulário fechado de `order_status` (Checkpoint CP2K-2) - extraído da
  * documentação oficial (`v2.order.get_order_list`, único ponto onde a
@@ -58,7 +65,24 @@ export interface ShopeeOrderDetailResult {
 }
 
 export type ShopeeOrderDetailValidation =
-  { valid: true; result: ShopeeOrderDetailResult } | { valid: false };
+  | { valid: true; result: ShopeeOrderDetailResult }
+  | { valid: false; issue: ShopeeOrderDetailValidationIssue };
+
+type OrderValidation =
+  | { valid: true; order: ShopeeOrderDetailOrder }
+  | { valid: false; issue: ShopeeOrderDetailValidationIssue };
+
+type ItemValidation =
+  | { valid: true; item: ShopeeOrderDetailItem }
+  | { valid: false; issue: ShopeeOrderDetailValidationIssue };
+
+/** Rejeição com diagnóstico fechado — `value` só deriva `actualType`, nunca é retido. */
+function reject(
+  code: ShopeeOrderDetailValidationIssueCode,
+  value: unknown,
+): { valid: false; issue: ShopeeOrderDetailValidationIssue } {
+  return { valid: false, issue: shopeeOrderDetailValidationIssue(code, value) };
+}
 
 const MAX_ORDER_SN_LENGTH = 64;
 const MAX_REGION_LENGTH = 8;
@@ -97,56 +121,73 @@ function normalizeNullableString(
   return { valid: true, value: value.length === 0 ? null : value };
 }
 
-function validateItem(
-  raw: unknown,
-): { valid: true; item: ShopeeOrderDetailItem } | { valid: false } {
+function validateItem(raw: unknown): ItemValidation {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return { valid: false };
+    return reject('ITEM_NOT_OBJECT', raw);
   }
   const item = raw as Record<string, unknown>;
 
   // `item_id` é sempre > 0 na Shopee (nunca o sentinela "0" de "sem
   // variação" - esse é exclusivo de `model_id`).
-  if (!isPositiveSafeInteger(item.item_id)) return { valid: false };
+  if (!isPositiveSafeInteger(item.item_id)) {
+    return reject('ITEM_ID_INVALID', item.item_id);
+  }
   const itemId = String(item.item_id);
 
-  if (typeof item.item_name !== 'string' || item.item_name.length === 0) {
-    return { valid: false };
+  if (
+    typeof item.item_name !== 'string' ||
+    item.item_name.length === 0 ||
+    item.item_name.length > MAX_ITEM_NAME_LENGTH
+  ) {
+    return reject('ITEM_NAME_INVALID', item.item_name);
   }
-  if (item.item_name.length > MAX_ITEM_NAME_LENGTH) return { valid: false };
   const itemName = item.item_name;
 
   const itemSkuResult = normalizeNullableString(item.item_sku, MAX_SKU_LENGTH);
-  if (!itemSkuResult.valid) return { valid: false };
+  if (!itemSkuResult.valid) return reject('ITEM_SKU_INVALID', item.item_sku);
 
   // `model_id` pode ser 0 (documentado: sentinela de "sem variação") -
   // nunca decidido/traduzido para `null` neste checkpoint.
-  if (!isNonNegativeSafeInteger(item.model_id)) return { valid: false };
+  if (!isNonNegativeSafeInteger(item.model_id)) {
+    return reject('MODEL_ID_INVALID', item.model_id);
+  }
   const modelId = String(item.model_id);
 
   const modelNameResult = normalizeNullableString(
     item.model_name,
     MAX_ITEM_NAME_LENGTH,
   );
-  if (!modelNameResult.valid) return { valid: false };
+  if (!modelNameResult.valid) {
+    return reject('MODEL_NAME_INVALID', item.model_name);
+  }
 
   const modelSkuResult = normalizeNullableString(
     item.model_sku,
     MAX_SKU_LENGTH,
   );
-  if (!modelSkuResult.valid) return { valid: false };
+  if (!modelSkuResult.valid) return reject('MODEL_SKU_INVALID', item.model_sku);
 
   if (
     typeof item.model_quantity_purchased !== 'number' ||
     !Number.isInteger(item.model_quantity_purchased) ||
     item.model_quantity_purchased <= 0
   ) {
-    return { valid: false };
+    return reject(
+      'MODEL_QUANTITY_PURCHASED_INVALID',
+      item.model_quantity_purchased,
+    );
   }
   const quantity = item.model_quantity_purchased;
 
-  if (!isValidMoneyValue(item.model_original_price)) return { valid: false };
-  if (!isValidMoneyValue(item.model_discounted_price)) return { valid: false };
+  if (!isValidMoneyValue(item.model_original_price)) {
+    return reject('MODEL_ORIGINAL_PRICE_INVALID', item.model_original_price);
+  }
+  if (!isValidMoneyValue(item.model_discounted_price)) {
+    return reject(
+      'MODEL_DISCOUNTED_PRICE_INVALID',
+      item.model_discounted_price,
+    );
+  }
 
   return {
     valid: true,
@@ -164,11 +205,9 @@ function validateItem(
   };
 }
 
-function validateOrder(
-  raw: unknown,
-): { valid: true; order: ShopeeOrderDetailOrder } | { valid: false } {
+function validateOrder(raw: unknown): OrderValidation {
   if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
-    return { valid: false };
+    return reject('ORDER_NOT_OBJECT', raw);
   }
   const order = raw as Record<string, unknown>;
 
@@ -178,7 +217,7 @@ function validateOrder(
     orderSn.length === 0 ||
     orderSn.length > MAX_ORDER_SN_LENGTH
   ) {
-    return { valid: false };
+    return reject('ORDER_SN_INVALID', orderSn);
   }
 
   const region = order.region;
@@ -187,12 +226,12 @@ function validateOrder(
     region.length === 0 ||
     region.length > MAX_REGION_LENGTH
   ) {
-    return { valid: false };
+    return reject('REGION_INVALID', region);
   }
 
   const currency = order.currency;
   if (typeof currency !== 'string' || currency.length !== CURRENCY_LENGTH) {
-    return { valid: false };
+    return reject('CURRENCY_INVALID', currency);
   }
 
   const orderStatus = order.order_status;
@@ -200,21 +239,27 @@ function validateOrder(
     typeof orderStatus !== 'string' ||
     !ORDER_STATUS_VALUES.has(orderStatus)
   ) {
-    return { valid: false };
+    return reject('ORDER_STATUS_INVALID', orderStatus);
   }
 
   let totalAmount: number | null = null;
   if ('total_amount' in order) {
-    if (!isValidMoneyValue(order.total_amount)) return { valid: false };
+    if (!isValidMoneyValue(order.total_amount)) {
+      return reject('TOTAL_AMOUNT_INVALID', order.total_amount);
+    }
     totalAmount = order.total_amount;
   }
 
-  if (!isPositiveSafeInteger(order.create_time)) return { valid: false };
+  if (!isPositiveSafeInteger(order.create_time)) {
+    return reject('CREATE_TIME_INVALID', order.create_time);
+  }
   const createTime = order.create_time;
 
   let updateTime: number | null = null;
   if ('update_time' in order) {
-    if (!isPositiveSafeInteger(order.update_time)) return { valid: false };
+    if (!isPositiveSafeInteger(order.update_time)) {
+      return reject('UPDATE_TIME_INVALID', order.update_time);
+    }
     updateTime = order.update_time;
   }
 
@@ -224,16 +269,20 @@ function validateOrder(
       order.fulfillment_flag,
       MAX_FULFILLMENT_FLAG_LENGTH,
     );
-    if (!result.valid) return { valid: false };
+    if (!result.valid) {
+      return reject('FULFILLMENT_FLAG_INVALID', order.fulfillment_flag);
+    }
     fulfillmentFlag = result.value;
   }
 
   const itemListRaw = order.item_list;
-  if (!Array.isArray(itemListRaw)) return { valid: false };
+  if (!Array.isArray(itemListRaw)) {
+    return reject('ITEM_LIST_NOT_ARRAY', itemListRaw);
+  }
   const items: ShopeeOrderDetailItem[] = [];
   for (const rawItem of itemListRaw) {
     const itemResult = validateItem(rawItem);
-    if (!itemResult.valid) return { valid: false };
+    if (!itemResult.valid) return itemResult;
     items.push(itemResult.item);
   }
 
@@ -274,18 +323,20 @@ export function validateShopeeOrderDetailResponseBody(
   requestedOrderSnList: string[],
 ): ShopeeOrderDetailValidation {
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    return { valid: false };
+    return reject('ROOT_NOT_OBJECT', body);
   }
   const raw = body as Record<string, unknown>;
 
   const error = raw.error;
-  if (typeof error !== 'string') return { valid: false };
-  if (typeof raw.message !== 'string') return { valid: false };
-  if (error.length > 0) return { valid: false };
+  if (typeof error !== 'string') return reject('ERROR_NOT_STRING', error);
+  if (typeof raw.message !== 'string') {
+    return reject('MESSAGE_NOT_STRING', raw.message);
+  }
+  if (error.length > 0) return reject('ERROR_NOT_EMPTY', error);
 
   const requestId = raw.request_id;
   if (typeof requestId !== 'string' || !REQUEST_ID_PATTERN.test(requestId)) {
-    return { valid: false };
+    return reject('REQUEST_ID_INVALID', requestId);
   }
 
   const response = raw.response;
@@ -294,31 +345,56 @@ export function validateShopeeOrderDetailResponseBody(
     response === null ||
     Array.isArray(response)
   ) {
-    return { valid: false };
+    return reject('RESPONSE_NOT_OBJECT', response);
   }
   const responseRaw = response as Record<string, unknown>;
 
   const orderListRaw = responseRaw.order_list;
-  if (!Array.isArray(orderListRaw)) return { valid: false };
+  if (!Array.isArray(orderListRaw)) {
+    return reject('ORDER_LIST_NOT_ARRAY', orderListRaw);
+  }
 
   // Tamanho deve bater EXATAMENTE com o solicitado - cobre "mais que 50"/
   // "mais que o pedido" e é pré-condição necessária (não suficiente sozinha)
   // para a checagem de conjunto abaixo.
   if (orderListRaw.length !== requestedOrderSnList.length) {
-    return { valid: false };
+    return reject('ORDER_LIST_LENGTH_MISMATCH', orderListRaw);
   }
 
   const requestedSet = new Set(requestedOrderSnList);
   const seenOrderSn = new Set<string>();
   const orders: ShopeeOrderDetailOrder[] = [];
 
-  for (const rawOrder of orderListRaw) {
-    const orderResult = validateOrder(rawOrder);
-    if (!orderResult.valid) return { valid: false };
+  for (let orderIndex = 0; orderIndex < orderListRaw.length; orderIndex += 1) {
+    const orderResult = validateOrder(orderListRaw[orderIndex]);
+    if (!orderResult.valid) {
+      return {
+        valid: false,
+        issue: withShopeeOrderIndex(orderResult.issue, orderIndex),
+      };
+    }
 
     const { orderSn } = orderResult.order;
-    if (!requestedSet.has(orderSn)) return { valid: false };
-    if (seenOrderSn.has(orderSn)) return { valid: false };
+    if (!requestedSet.has(orderSn)) {
+      return {
+        valid: false,
+        issue: shopeeOrderDetailValidationIssue(
+          'ORDER_SN_NOT_REQUESTED',
+          orderSn,
+          orderIndex,
+        ),
+      };
+    }
+    if (seenOrderSn.has(orderSn)) {
+      return {
+        valid: false,
+        issue: shopeeOrderDetailValidationIssue(
+          'ORDER_SN_DUPLICATED',
+          orderSn,
+          orderIndex,
+        ),
+      };
+    }
     seenOrderSn.add(orderSn);
 
     orders.push(orderResult.order);
