@@ -51,8 +51,11 @@ export class ShopeeOrderMappingError extends Error {
  *   independente do estágio logístico. `TO_CONFIRM_RECEIVE` é o estado
  *   posterior ao envio em que o comprador ainda não confirmou o recebimento —
  *   financeiramente equivalente a `SHIPPED`, nunca a `pending`.
- * - `CANCELLED` → `cancelled`: cancelamento CONFIRMADO pelo provedor (nunca
- *   `IN_CANCEL`, que ainda está em andamento).
+ * - `CANCELLED`/`TO_RETURN` → `cancelled`: `CANCELLED` é cancelamento
+ *   CONFIRMADO pelo provedor (nunca `IN_CANCEL`, que ainda está em
+ *   andamento). `TO_RETURN` é o fluxo de devolução iniciado pelo comprador —
+ *   nunca compõe faturamento/pedidos pagos, mesmo com `totalAmount`
+ *   preenchido.
  *
  * `Record` (não `switch`) garante, em tempo de compilação, que todo valor de
  * `ShopeeOrderStatus` tem uma entrada — um valor fora do vocabulário fechado
@@ -72,6 +75,7 @@ const SHOPEE_STATUS_TO_CANONICAL: Record<
   TO_CONFIRM_RECEIVE: PAID_ORDER_STATUS,
   COMPLETED: PAID_ORDER_STATUS,
   CANCELLED: CANCELLED_ORDER_STATUS,
+  TO_RETURN: CANCELLED_ORDER_STATUS,
 };
 
 function mapShopeeOrderStatusToCanonical(

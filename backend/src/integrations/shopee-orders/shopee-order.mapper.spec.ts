@@ -15,6 +15,7 @@ const ALL_ORDER_STATUSES: ShopeeOrderStatus[] = [
   'CANCELLED',
   'INVOICE_PENDING',
   'TO_CONFIRM_RECEIVE',
+  'TO_RETURN',
 ];
 
 function validItem(
@@ -96,6 +97,7 @@ describe('mapShopeeOrder', () => {
     COMPLETED: 'paid',
     TO_CONFIRM_RECEIVE: 'paid',
     CANCELLED: 'cancelled',
+    TO_RETURN: 'cancelled',
   };
 
   it('mapeia TO_CONFIRM_RECEIVE para paid, preservando o bruto em sourceStatus', () => {
@@ -105,6 +107,16 @@ describe('mapShopeeOrder', () => {
     );
     expect(result.status).toBe('paid');
     expect(result.sourceStatus).toBe('TO_CONFIRM_RECEIVE');
+  });
+
+  it('mapeia TO_RETURN para cancelled, preservando o bruto em sourceStatus — devolução nunca compõe faturamento pago', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ orderStatus: 'TO_RETURN' }),
+    );
+    expect(result.status).toBe('cancelled');
+    expect(result.status).not.toBe('paid');
+    expect(result.sourceStatus).toBe('TO_RETURN');
   });
 
   it.each(ALL_ORDER_STATUSES)(

@@ -15,6 +15,10 @@ import {
  * `ORDER_STATUS_INVALID` + `providerOrderStatusCode: TO_CONFIRM_RECEIVE`) e
  * entra aqui como valor fechado; a lista segue fechada — qualquer outro valor
  * continua rejeitado com diagnóstico sanitizado.
+ *
+ * `TO_RETURN` foi confirmado da mesma forma (diagnóstico `ORDER_STATUS_INVALID`
+ * + `providerOrderStatusCode: TO_RETURN`) — fluxo de devolução, mapeado para
+ * `cancelled` (ver `shopee-order.mapper.ts`), nunca `paid`.
  */
 export type ShopeeOrderStatus =
   | 'UNPAID'
@@ -22,6 +26,7 @@ export type ShopeeOrderStatus =
   | 'PROCESSED'
   | 'SHIPPED'
   | 'TO_CONFIRM_RECEIVE'
+  | 'TO_RETURN'
   | 'COMPLETED'
   | 'IN_CANCEL'
   | 'CANCELLED'
@@ -33,6 +38,7 @@ const ORDER_STATUS_VALUES: ReadonlySet<string> = new Set<ShopeeOrderStatus>([
   'PROCESSED',
   'SHIPPED',
   'TO_CONFIRM_RECEIVE',
+  'TO_RETURN',
   'COMPLETED',
   'IN_CANCEL',
   'CANCELLED',

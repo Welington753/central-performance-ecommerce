@@ -96,6 +96,7 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
     'CANCELLED',
     'INVOICE_PENDING',
     'TO_CONFIRM_RECEIVE',
+    'TO_RETURN',
   ] as const)('accepts documented order_status %s', (order_status) => {
     const result = validateShopeeOrderDetailResponseBody(
       baseBody({ orders: [validOrder({ order_status })] }),
@@ -112,6 +113,17 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
       baseBody({
         orders: [validOrder({ order_status: 'TO_CONFIRM_RECEIVE' })],
       }),
+      REQUESTED,
+    );
+    expect(result.valid).toBe(true);
+    expect(result).not.toMatchObject({
+      issue: { code: 'ORDER_STATUS_INVALID' },
+    });
+  });
+
+  it('accepts TO_RETURN — status Live confirmado, nunca mais invalid_response', () => {
+    const result = validateShopeeOrderDetailResponseBody(
+      baseBody({ orders: [validOrder({ order_status: 'TO_RETURN' })] }),
       REQUESTED,
     );
     expect(result.valid).toBe(true);
