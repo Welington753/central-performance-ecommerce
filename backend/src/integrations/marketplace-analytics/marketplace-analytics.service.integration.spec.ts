@@ -2009,26 +2009,135 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
       expect(dto.full?.comparison).toBeNull();
     });
 
-    it('is structurally present (never undefined) even for an Amazon-only scope with no Full concept', async () => {
-      const accountId = await seedAccount({ marketplace: Marketplace.AMAZON });
+    /**
+     * Correção da auditoria Full. A versão anterior deste teste exigia que
+     * `full` viesse PRESENTE mesmo num escopo Amazon — e era justamente o
+     * defeito: com Amazon/Shopee selecionados, o dashboard exibia um
+     * cabeçalho "Mercado Livre Full" e o aviso de cobertura dizendo que os
+     * pedidos seriam classificados numa próxima sincronização, o que nunca
+     * aconteceria (esses conectores jamais preenchem
+     * `logistics_classification`). Agora o agregado é `null` fora do escopo
+     * Mercado Livre — nunca um bloco de zeros nem um aviso enganoso.
+     */
+    it.each([Marketplace.AMAZON, Marketplace.SHOPEE])(
+      'is null for a %s-only scope — the Mercado Livre Full section never applies there',
+      async (marketplace) => {
+        const accountId = await seedAccount({ marketplace });
+        await seedOrder({
+          accountId,
+          externalOrderId: 'outro-1',
+          status: 'paid',
+          totalAmount: '10.00',
+          dateCreated: IN_CURRENT,
+          items: [],
+        });
+
+        const byAccount = toMarketplaceAnalyticsResponse(
+          await analyticsService.getAggregate({ accountId }, REFERENCE_NOW),
+        );
+        expect(byAccount.full).toBeNull();
+
+        const byMarketplace = toMarketplaceAnalyticsResponse(
+          await analyticsService.getAggregate({ marketplace }, REFERENCE_NOW),
+        );
+        expect(byMarketplace.full).toBeNull();
+      },
+    );
+
+    it('with marketplace=ALL, computes Full only over the Mercado Livre accounts', async () => {
+      const mlAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const amazonAccountId = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+
       await seedOrder({
-        accountId,
+        accountId: mlAccountId,
+        externalOrderId: 'ml-full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      // Pedido Amazon: `logistics_classification` é `UNKNOWN` por
+      // construção. Antes da correção, ele entrava no denominador de
+      // cobertura do Full e o derrubava para "parcial".
+      await seedOrder({
+        accountId: amazonAccountId,
         externalOrderId: 'amz-1',
         status: 'paid',
-        totalAmount: '10.00',
+        totalAmount: '900.00',
         dateCreated: IN_CURRENT,
         items: [],
       });
 
-      const aggregate = await analyticsService.getAggregate(
-        { accountId },
-        REFERENCE_NOW,
+      const dto = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate({}, REFERENCE_NOW),
       );
-      const dto = toMarketplaceAnalyticsResponse(aggregate);
 
       expect(dto.full).not.toBeNull();
-      expect(dto.full?.coverage).toBe('unknown');
-      expect(dto.full?.summary).toBeNull();
+      // Cobertura completa: só o pedido Mercado Livre foi considerado.
+      expect(dto.full?.coverage).toBe('complete');
+      expect(dto.full?.classifiedOrders).toBe(1);
+      expect(dto.full?.unclassifiedOrders).toBe(0);
+      // O total geral da seção Full nunca inclui os R$ 900,00 da Amazon.
+      expect(dto.full?.totalSummary?.paidRevenue).toBe('100.00');
+      expect(dto.full?.summary?.shareOfPaidRevenuePct).toBe(100);
+    });
+
+    it('restricts Full to a single Mercado Livre account when one is selected', async () => {
+      const firstAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const secondAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+
+      await seedOrder({
+        accountId: firstAccountId,
+        externalOrderId: 'meli1-full',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: secondAccountId,
+        externalOrderId: 'meli2-full',
+        status: 'paid',
+        totalAmount: '70.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const scoped = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: firstAccountId },
+          REFERENCE_NOW,
+        ),
+      );
+      // Revisão crítica: confirma o INVERSO também — Meli 2 nunca vê o
+      // total de Meli 1 nem o consolidado, só o seu próprio.
+      const scopedSecond = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: secondAccountId },
+          REFERENCE_NOW,
+        ),
+      );
+      const consolidated = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { marketplace: Marketplace.MERCADO_LIVRE },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(scoped.full?.summary?.paidRevenue).toBe('100.00');
+      expect(scopedSecond.full?.summary?.paidRevenue).toBe('70.00');
+      expect(consolidated.full?.summary?.paidRevenue).toBe('170.00');
     });
   });
 

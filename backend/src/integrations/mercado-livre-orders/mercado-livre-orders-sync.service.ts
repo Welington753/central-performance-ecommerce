@@ -3,6 +3,7 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
@@ -18,9 +19,18 @@ import {
   ORDERS_PAGE_LIMIT,
   MercadoLivreOrdersHttpClient,
 } from './mercado-livre-orders-http.client';
-import { MercadoLivreShipmentClient } from './mercado-livre-shipment.client';
+import { MercadoLivreShipmentLookupService } from './mercado-livre-shipment-lookup.service';
+import type { FetchShipmentOutcome } from './mercado-livre-shipment.client';
 import { classifyLogisticType } from './mercado-livre-logistics.util';
-import { LOGISTICS_UNKNOWN } from '../marketplace-orders/logistics-classification';
+import {
+  LOGISTICS_UNKNOWN,
+  type LogisticsClassification,
+} from '../marketplace-orders/logistics-classification';
+import {
+  createLogisticsDiagnostics,
+  hasPendingReclassification,
+  type LogisticsClassificationDiagnostics,
+} from '../marketplace-orders/logistics-classification-diagnostics';
 import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
@@ -107,18 +117,97 @@ export interface SyncOrdersSummary {
   itemsPersisted: number;
   periodFrom: string;
   periodTo: string;
+  /**
+   * Diagnóstico sanitizado da classificação logística desta execução
+   * (correção da auditoria Full). Também é gravado em
+   * `sync_runs.logistics_diagnostics` — aqui ele existe para que o chamador
+   * (backfill, auto-sync, controller) saiba, sem consultar o banco, se a
+   * execução deixou pendência logística.
+   */
+  logisticsDiagnostics: LogisticsClassificationDiagnostics;
+  /**
+   * `true` quando esta execução deixou pedidos `UNKNOWN` (teto de consultas
+   * atingido, 429 persistente, timeout ou `logistic_type` não reconhecido).
+   * O backfill de PEDIDOS continua avançando normalmente — os pedidos foram
+   * importados —, e `status` continua `SUCCESS` (revisão crítica: isto NUNCA
+   * altera `SyncRunStatus`, em especial nunca usa `PARTIAL`, que já tem
+   * outro significado — ver comentário de `HARD_SAFETY_OFFSET_CAP`/
+   * `DEFAULT_MAX_SHIPMENT_LOOKUPS_PER_SYNC` acima). Este campo é só
+   * informativo no corpo da resposta de `POST .../sync-orders`; a garantia
+   * real de que o pedido continua elegível à reclassificação é a escrita
+   * CONDICIONAL do serviço dedicado, não este booleano.
+   */
+  hasPendingLogisticsReclassification: boolean;
 }
 
 // Protege contra um `paging.total` incorreto/absurdo devolvido pelo
 // provedor — nunca um loop infinito de paginação.
 const HARD_SAFETY_OFFSET_CAP = 20000;
 
-// Limite defensivo (Fase 4, "Full") de consultas a `GET /shipments/{id}` por
-// chamada de sincronização — nunca uma chamada HTTP extra por pedido sem
-// limite. Acima do teto, os pedidos restantes ficam `UNKNOWN` (nunca perdem
-// o pedido) e o contador sanitizado (`shipmentLookupsSkipped`) registra
-// quantos foram pulados, sem nenhum identificador de envio/pedido.
-const MAX_SHIPMENT_LOOKUPS_PER_SYNC = 200;
+/**
+ * Limite defensivo (Fase 4, "Full") de consultas a `GET /shipments/{id}` por
+ * chamada de sincronização — nunca uma chamada HTTP extra por pedido sem
+ * limite. O teto PROTEGE tempo de execução e cota da API e por isso foi
+ * mantido; a correção da auditoria Full não o removeu nem o inflou.
+ *
+ * O que mudou: acima do teto, os pedidos restantes continuam `UNKNOWN`
+ * (nunca se perde o pedido), mas agora isso é CONTADO e gravado em
+ * `sync_runs.logistics_diagnostics` (`lookupsSkippedByCap` /
+ * `ordersLeftUnclassified`) e sinalizado no resultado da sincronização
+ * (`hasPendingLogisticsReclassification`).
+ *
+ * O que isto NÃO faz (revisão crítica, para não superestimar a garantia):
+ * `SyncOrdersSummary.status` continua `SUCCESS` mesmo com pendência
+ * logística — os PEDIDOS foram importados com sucesso; só a classificação
+ * `Full` de parte deles ficou pendente, um problema ortogonal. Nenhum
+ * `SyncRunStatus` diferente é usado (em especial NUNCA `PARTIAL`: esse
+ * status já tem semântica própria e incompatível — cobertura de JANELA DE
+ * DATA para a prova de exaustão do backfill, ver
+ * `marketplace-analytics.service.ts` — reaproveitá-lo aqui corromperia
+ * aquela lógica). A garantia real de "nunca perder a pendência" é a escrita
+ * CONDICIONAL do serviço de reclassificação
+ * (`WHERE logistics_classification = 'UNKNOWN'`), não um status de
+ * execução. `logisticsDiagnostics` fica gravado e consultável via
+ * `GET /sync-runs` (mapeado em `SyncRun.logisticsDiagnostics`) para quem
+ * quiser auditar; nenhum job automático hoje lê esse campo para agir.
+ *
+ * Configurável por ambiente (`ML_MAX_SHIPMENT_LOOKUPS_PER_SYNC`) para que o
+ * operador possa ajustar o custo por execução sem alterar código — sempre
+ * limitado a um teto absoluto.
+ */
+const DEFAULT_MAX_SHIPMENT_LOOKUPS_PER_SYNC = 200;
+const HARD_MAX_SHIPMENT_LOOKUPS_PER_SYNC = 2000;
+
+/**
+ * Traduz o vocabulário FECHADO de resultados de `GET /shipments/{id}` em
+ * contadores. `success` não incrementa nenhuma falha — a distinção entre
+ * "resolvido" e "`logistic_type` não reconhecido" é feita pelo chamador, a
+ * partir da classificação canônica.
+ */
+function countShipmentOutcome(
+  diagnostics: LogisticsClassificationDiagnostics,
+  kind: FetchShipmentOutcome['kind'],
+): void {
+  switch (kind) {
+    case 'rate_limited':
+      diagnostics.failuresRateLimited += 1;
+      return;
+    case 'provider_unavailable':
+      diagnostics.failuresProviderUnavailable += 1;
+      return;
+    case 'not_found':
+      diagnostics.failuresNotFound += 1;
+      return;
+    case 'unauthorized':
+      diagnostics.failuresUnauthorized += 1;
+      return;
+    case 'invalid_response':
+      diagnostics.failuresInvalidResponse += 1;
+      return;
+    case 'success':
+      return;
+  }
+}
 
 @Injectable()
 export class MercadoLivreOrdersSyncService {
@@ -126,9 +215,21 @@ export class MercadoLivreOrdersSyncService {
     private readonly marketplaceAccountsService: MarketplaceAccountsService,
     private readonly oauthService: MercadoLivreOAuthService,
     private readonly httpClient: MercadoLivreOrdersHttpClient,
-    private readonly shipmentClient: MercadoLivreShipmentClient,
+    private readonly shipmentLookup: MercadoLivreShipmentLookupService,
     private readonly persistence: MarketplaceOrdersPersistenceService,
+    private readonly configService: ConfigService,
   ) {}
+
+  private get maxShipmentLookupsPerSync(): number {
+    const configured = this.configService.get<number>(
+      'ML_MAX_SHIPMENT_LOOKUPS_PER_SYNC',
+      DEFAULT_MAX_SHIPMENT_LOOKUPS_PER_SYNC,
+    );
+    if (!Number.isFinite(configured) || configured < 1) {
+      return DEFAULT_MAX_SHIPMENT_LOOKUPS_PER_SYNC;
+    }
+    return Math.min(Math.floor(configured), HARD_MAX_SHIPMENT_LOOKUPS_PER_SYNC);
+  }
 
   /**
    * `windowOverride`/`type` (Fase 4, "Histórico completo") existem só para o
@@ -208,7 +309,11 @@ export class MercadoLivreOrdersSyncService {
         throw error;
       }
 
-      await this.classifyLogistics(accessToken, rawOrders, mappedOrders);
+      const logisticsDiagnostics = await this.classifyLogistics(
+        accessToken,
+        rawOrders,
+        mappedOrders,
+      );
 
       const persistResult = await this.persistence.persistOrders(mappedOrders);
       const finishedAt = new Date();
@@ -223,6 +328,7 @@ export class MercadoLivreOrdersSyncService {
           itemsPersisted: persistResult.itemsPersisted,
         },
         finishedAt,
+        logisticsDiagnostics,
       );
       await this.persistence.markAccountSynced(accountId, finishedAt);
 
@@ -237,6 +343,9 @@ export class MercadoLivreOrdersSyncService {
         itemsPersisted: persistResult.itemsPersisted,
         periodFrom: periodFrom.toISOString(),
         periodTo: periodTo.toISOString(),
+        logisticsDiagnostics,
+        hasPendingLogisticsReclassification:
+          hasPendingReclassification(logisticsDiagnostics),
       };
     } catch (error) {
       const code = resolveSyncErrorCode(error);
@@ -257,21 +366,28 @@ export class MercadoLivreOrdersSyncService {
    * `mappedOrders`, na MESMA ordem/índice de `rawOrders` (garantido por
    * `Array.prototype.map` em `mapMercadoLivreOrder`, chamado logo acima).
    * Deduplica por `shippingId` — pedidos do mesmo envio (ex.: mesmo `packId`)
-   * fazem UMA única consulta a `GET /shipments/{id}`. Respeita
-   * `MAX_SHIPMENT_LOOKUPS_PER_SYNC`: além do teto, a classificação
-   * permanece `UNKNOWN` sem nenhuma chamada adicional — o pedido continua
-   * sendo persistido normalmente. Qualquer falha de rede/resposta também
-   * vira `UNKNOWN` para aquele envio, nunca lança (nunca perde o pedido).
+   * fazem UMA única consulta a `GET /shipments/{id}`. Respeita o teto de
+   * consultas: além dele, a classificação permanece `UNKNOWN` sem nenhuma
+   * chamada adicional — o pedido continua sendo persistido normalmente.
+   * Qualquer falha de rede/resposta também vira `UNKNOWN` para aquele envio,
+   * nunca lança (nunca perde o pedido) e NUNCA vira `SELLER_FULFILLED`.
+   *
+   * Devolve o diagnóstico sanitizado da etapa (correção da auditoria Full):
+   * contagens por causa, para que o volume deixado `UNKNOWN` deixe de ser
+   * invisível. Nenhum identificador de envio/pedido entra no diagnóstico.
    */
   private async classifyLogistics(
     accessToken: string,
     rawOrders: RawMercadoLivreOrder[],
     mappedOrders: MappedOrderRecord[],
-  ): Promise<void> {
+  ): Promise<LogisticsClassificationDiagnostics> {
+    const diagnostics = createLogisticsDiagnostics();
+    const maxLookups = this.maxShipmentLookupsPerSync;
     const classificationByShipmentId = new Map<
       string,
-      { classification: string; logisticType: string | null }
+      { classification: LogisticsClassification; logisticType: string | null }
     >();
+    const shipmentsSkippedByCap = new Set<string>();
     let lookupsUsed = 0;
 
     for (let i = 0; i < rawOrders.length; i += 1) {
@@ -280,29 +396,51 @@ export class MercadoLivreOrdersSyncService {
 
       let resolved = classificationByShipmentId.get(shippingId);
       if (!resolved) {
-        if (lookupsUsed >= MAX_SHIPMENT_LOOKUPS_PER_SYNC) continue;
+        if (lookupsUsed >= maxLookups) {
+          // Pendência explícita: este envio NUNCA foi consultado. Contado
+          // uma única vez por envio distinto, sem nenhum identificador.
+          shipmentsSkippedByCap.add(shippingId);
+          continue;
+        }
         lookupsUsed += 1;
-        const outcome = await this.shipmentClient.fetchShipment(
+        diagnostics.lookupsPerformed += 1;
+
+        const { outcome, attempts } = await this.shipmentLookup.lookup(
           accessToken,
           shippingId,
         );
+        diagnostics.httpAttempts += attempts;
+        countShipmentOutcome(diagnostics, outcome.kind);
+
         const logisticType =
           outcome.kind === 'success' ? outcome.logisticType : null;
-        resolved = {
-          classification: classifyLogisticType(logisticType),
-          logisticType,
-        };
+        const classification = classifyLogisticType(logisticType);
+        if (classification === LOGISTICS_UNKNOWN) {
+          diagnostics.classificationsUnknown += 1;
+        } else {
+          diagnostics.classificationsResolved += 1;
+        }
+
+        resolved = { classification, logisticType };
         classificationByShipmentId.set(shippingId, resolved);
       }
 
-      mappedOrders[i].logisticsClassification =
-        resolved.classification as MappedOrderRecord['logisticsClassification'];
+      mappedOrders[i].logisticsClassification = resolved.classification;
       mappedOrders[i].logisticsType = resolved.logisticType;
     }
 
     for (const order of mappedOrders) {
       order.logisticsClassification ??= LOGISTICS_UNKNOWN;
+      if (order.logisticsClassification === LOGISTICS_UNKNOWN) {
+        diagnostics.ordersLeftUnclassified += 1;
+      }
     }
+
+    diagnostics.distinctShipments =
+      classificationByShipmentId.size + shipmentsSkippedByCap.size;
+    diagnostics.lookupsSkippedByCap = shipmentsSkippedByCap.size;
+
+    return diagnostics;
   }
 
   private async fetchAllPages(input: {

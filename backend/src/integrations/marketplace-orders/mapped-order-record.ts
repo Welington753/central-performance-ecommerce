@@ -29,6 +29,13 @@ export interface MappedOrderRecord {
   logisticsClassification?: LogisticsClassification;
   logisticsType?: string | null;
   /**
+   * `shipping.id` do Mercado Livre (Correção da auditoria Full) — persistido
+   * para que um pedido deixado `UNKNOWN` possa ser reclassificado depois sem
+   * refazer o backfill. Só o mapper do Mercado Livre o define; ausente, fica
+   * `null` no banco.
+   */
+  externalShipmentId?: string | null;
+  /**
    * Campos financeiros confirmados do Mercado Livre (CP2K-7D) — string
    * monetária decimal (mesma convenção de `totalAmount`), nunca centavos.
    * `buyerShippingCostAmount` é o frete COBRADO DO COMPRADOR

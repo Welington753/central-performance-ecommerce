@@ -373,6 +373,23 @@ export class MarketplaceAnalyticsService {
     );
 
     const scopedAccountIds = scopedAccounts.map((a) => a.id);
+    /**
+     * Escopo do "Mercado Livre Full" (correção da auditoria Full): SEMPRE o
+     * subconjunto Mercado Livre das contas já filtradas por
+     * marketplace/conta — nunca `scopedAccountIds` inteiro.
+     *
+     * Antes, com `marketplace = ALL`, pedidos Amazon/Shopee entravam na
+     * consulta e caíam no balde "não classificado" (a coluna
+     * `logistics_classification` é `UNKNOWN` por construção nesses
+     * conectores), diluindo a cobertura e os percentuais do Full e gerando
+     * um aviso sugerindo que seriam classificados numa próxima
+     * sincronização — o que nunca aconteceria. Com o filtro Amazon/Shopee
+     * selecionado, a lista fica vazia e o agregado Full inteiro vira `null`,
+     * então a seção nunca é renderizada para esses marketplaces.
+     */
+    const mercadoLivreScopedAccountIds = scopedAccounts
+      .filter((a) => a.marketplace === Marketplace.MERCADO_LIVRE)
+      .map((a) => a.id);
     const allClassifiedIds = [...classifiedByAccountId.values()].map(
       (a) => a.id,
     );
@@ -539,8 +556,18 @@ export class MarketplaceAnalyticsService {
       this.fetchSourceCoverage(scopedAccounts, windows),
       // O comparativo Full x sem Full x total é sempre calculado no cenário
       // completo — nunca filtrado pelo `logisticsScope` do resto do
-      // dashboard (ver doc de `AnalyticsFullAggregate`).
-      this.fetchFullAggregate(scopedAccountIds, windows, allTime),
+      // dashboard (ver doc de `AnalyticsFullAggregate`) — e SEMPRE restrito
+      // às contas Mercado Livre do escopo (ver
+      // `mercadoLivreScopedAccountIds` acima). Sem nenhuma conta Mercado
+      // Livre no escopo, o agregado inteiro é `null`: nunca um bloco de
+      // zeros que pareceria dado real.
+      mercadoLivreScopedAccountIds.length === 0
+        ? Promise.resolve(null)
+        : this.fetchFullAggregate(
+            mercadoLivreScopedAccountIds,
+            windows,
+            allTime,
+          ),
     ]);
 
     const dataCoverage = computeConsolidatedCoverage(

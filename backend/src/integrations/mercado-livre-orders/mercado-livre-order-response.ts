@@ -177,7 +177,16 @@ function validatePaymentEntry(value: unknown): RawMercadoLivrePayment | null {
   };
 }
 
-function validateOrderEntry(value: unknown): RawMercadoLivreOrder | null {
+/**
+ * Exportada para reúso pelo fallback de recuperação de `shipping.id` via
+ * `GET /orders/{id}` (correção da auditoria Full, revisão crítica —
+ * `mercado-livre-order-detail.client.ts`): o corpo de um pedido individual
+ * tem exatamente este formato, então a mesma validação já testada (nunca
+ * uma segunda implementação divergente) decide se a resposta é aceita.
+ */
+export function validateOrderEntry(
+  value: unknown,
+): RawMercadoLivreOrder | null {
   if (typeof value !== 'object' || value === null) return null;
   const raw = value as Record<string, unknown>;
 

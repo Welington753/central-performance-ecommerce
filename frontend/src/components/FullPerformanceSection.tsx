@@ -41,9 +41,9 @@ function ComparisonLine({ pct }: { pct: number | null }) {
         formatted === null
           ? "text-foreground/40"
           : isPositive
-            ? "text-green-600"
+            ? "text-positive"
             : isNegative
-              ? "text-red-600"
+              ? "text-negative"
               : "text-foreground/60"
       }`}
     >
@@ -60,7 +60,7 @@ function CoverageNotice({ full }: { full: MarketplaceAnalyticsFull }) {
     return (
       <div
         role="status"
-        className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
+        className="rounded-md border border-notice/40 bg-notice/10 px-4 py-3 text-sm text-notice"
       >
         Ainda não foi possível identificar a modalidade logística de nenhum
         pedido deste período — os números do Full abaixo podem estar
@@ -72,7 +72,7 @@ function CoverageNotice({ full }: { full: MarketplaceAnalyticsFull }) {
   return (
     <div
       role="status"
-      className="rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
+      className="rounded-md border border-notice/40 bg-notice/10 px-4 py-3 text-sm text-notice"
     >
       Cobertura parcial da classificação Full: {full.classifiedOrders} de{" "}
       {full.classifiedOrders + full.unclassifiedOrders} pedidos do período já
@@ -152,7 +152,7 @@ function GroupComparisonTable({ full }: { full: MarketplaceAnalyticsFull }) {
 function UnknownIndicator({ full }: { full: MarketplaceAnalyticsFull }) {
   if (full.unclassifiedOrders === 0) {
     return (
-      <p className="text-sm text-green-700">
+      <p className="text-sm text-positive">
         Nenhum pedido não classificado no período — Full + vendas sem Full =
         total das vendas.
       </p>
@@ -163,7 +163,7 @@ function UnknownIndicator({ full }: { full: MarketplaceAnalyticsFull }) {
   return (
     <div
       role="status"
-      className="flex flex-col gap-1 rounded-md border border-amber-500/40 bg-amber-500/10 px-4 py-3 text-sm text-amber-800"
+      className="flex flex-col gap-1 rounded-md border border-notice/40 bg-notice/10 px-4 py-3 text-sm text-notice"
     >
       <p>
         {full.unclassifiedOrders} pedido(s) ainda não classificado(s) neste

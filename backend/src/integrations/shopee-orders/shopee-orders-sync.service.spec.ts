@@ -377,6 +377,47 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
     expect(persistence.getAccountSyncCoverage).not.toHaveBeenCalled();
   });
 
+  /**
+   * Lacuna apontada pela auditoria Full: nada provava que o backfill
+   * histórico da Shopee percorre o MESMO caminho de detalhe do pedido — o
+   * único lugar de onde o `fulfillment_flag` vem. Sem isto, o histórico
+   * poderia estar sem o campo sem que nenhum teste percebesse.
+   *
+   * NENHUM valor literal é interpretado aqui como "Shopee Full/FBS": o
+   * campo é apenas transportado fielmente até a persistência.
+   */
+  it('o backfill histórico percorre o mesmo caminho de detalhe — o fulfillment_flag chega à persistência', async () => {
+    const detailOrder = {
+      ...validDetailOrder('SN-1'),
+      fulfillmentFlag: 'fulfilled_by_local_seller',
+    };
+    const { service, client, persistence } = buildService({
+      client: {
+        getOrderList: jest.fn().mockResolvedValue(listSuccess(['SN-1'])),
+        getOrderDetail: jest
+          .fn()
+          .mockResolvedValue(detailSuccess([detailOrder])),
+      },
+    });
+
+    await service.syncOrders(ACCOUNT_ID, {
+      windowOverride: {
+        from: new Date('2020-01-01T00:00:00.000Z'),
+        to: new Date('2020-01-31T00:00:00.000Z'),
+      },
+      type: SyncRunType.INITIAL,
+      timeRangeField: 'create_time',
+    });
+
+    expect(client.getOrderDetail).toHaveBeenCalledTimes(1);
+    const [persistedOrders] = persistence.persistOrders.mock.calls[0] as [
+      Array<{ fulfillmentChannel?: string | null }>,
+    ];
+    expect(persistedOrders[0].fulfillmentChannel).toBe(
+      'fulfilled_by_local_seller',
+    );
+  });
+
   it('sem windowOverride: continua usando update_time (padrão da sincronização normal, nunca create_time por engano)', async () => {
     const { client } = await (async () => {
       const built = buildService();

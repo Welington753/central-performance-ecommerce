@@ -65,6 +65,7 @@ describe('mapMercadoLivreOrder', () => {
       dateCreated: new Date('2026-08-15T10:00:00.000-04:00'),
       dateClosed: new Date('2026-08-15T10:05:00.000-04:00'),
       marketplaceLastUpdated: new Date('2026-08-15T10:05:00.000-04:00'),
+      externalShipmentId: null,
       marketplaceFeeAmount: null,
       buyerShippingCostAmount: null,
       taxesAmount: null,
@@ -98,6 +99,10 @@ describe('mapMercadoLivreOrder', () => {
       'dateCreated',
       'dateClosed',
       'marketplaceLastUpdated',
+      // Correção da auditoria Full: `shipping.id` passa a ser PERSISTIDO,
+      // para permitir reclassificar depois um pedido deixado `UNKNOWN`.
+      // Identificador do ENVIO — nunca dado de comprador.
+      'externalShipmentId',
       'marketplaceFeeAmount',
       'buyerShippingCostAmount',
       'taxesAmount',

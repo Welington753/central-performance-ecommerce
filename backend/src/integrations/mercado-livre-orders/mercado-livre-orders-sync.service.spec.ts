@@ -1,5 +1,7 @@
 import { ConflictException, NotFoundException } from '@nestjs/common';
+import type { ConfigService } from '@nestjs/config';
 import { Marketplace } from '../contracts/marketplace.enum';
+import { MercadoLivreShipmentLookupService } from './mercado-livre-shipment-lookup.service';
 import {
   MarketplaceAccount,
   MarketplaceAccountStatus,
@@ -72,6 +74,7 @@ function buildService(
     httpClient?: Record<string, jest.Mock>;
     shipmentClient?: Record<string, jest.Mock>;
     persistence?: Record<string, jest.Mock>;
+    configValues?: Record<string, unknown>;
   } = {},
 ) {
   const marketplaceAccountsService = {
@@ -116,12 +119,28 @@ function buildService(
     ...overrides.persistence,
   };
 
+  // Serviço de retry REAL (nunca um mock) sobre o cliente HTTP mockado: é o
+  // que o serviço de sincronização usa em produção. A espera é instantânea,
+  // então o comportamento de retry é exercitado sem nenhum atraso real.
+  const configValues: Record<string, unknown> = {
+    ...overrides.configValues,
+  };
+  const configService = {
+    get: (key: string, fallback?: unknown) => configValues[key] ?? fallback,
+  } as unknown as ConfigService;
+  const shipmentLookup = new MercadoLivreShipmentLookupService(
+    shipmentClient as never,
+    configService,
+    () => Promise.resolve(),
+  );
+
   const service = new MercadoLivreOrdersSyncService(
     marketplaceAccountsService as never,
     oauthService as never,
     httpClient as never,
-    shipmentClient as never,
+    shipmentLookup,
     persistence as never,
+    configService,
   );
 
   return {
@@ -130,6 +149,7 @@ function buildService(
     oauthService,
     httpClient,
     shipmentClient,
+    shipmentLookup,
     persistence,
   };
 }
@@ -387,8 +407,18 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
         'itemsPersisted',
         'periodFrom',
         'periodTo',
+        // Correção da auditoria Full: diagnóstico sanitizado da
+        // classificação logística. Entra na allowlist por ser contrato novo,
+        // e o teste abaixo prova que ele é só contagem — nunca texto.
+        'logisticsDiagnostics',
+        'hasPendingLogisticsReclassification',
       ].sort(),
     );
+    // A allowlist por si só não bastaria: o diagnóstico também nunca pode
+    // carregar string (id de envio, id de pedido, mensagem do provedor).
+    for (const value of Object.values(summary.logisticsDiagnostics)) {
+      expect(typeof value).toBe('number');
+    }
   });
 
   it('marks the account as synced only after a successful persistence', async () => {

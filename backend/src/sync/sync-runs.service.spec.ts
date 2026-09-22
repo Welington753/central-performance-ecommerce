@@ -25,6 +25,7 @@ function buildSyncRun(overrides: Partial<SyncRun>): SyncRun {
     errorSummary: null,
     pagesFetched: 0,
     itemsPersisted: 0,
+    logisticsDiagnostics: null,
     createdAt: new Date(),
     ...overrides,
   };

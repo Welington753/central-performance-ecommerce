@@ -4,6 +4,10 @@ import { DataSource } from 'typeorm';
 import type { Marketplace } from '../contracts/marketplace.enum';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
 import { mergeIntervals, type SyncedInterval } from './coverage-interval.util';
+import {
+  sanitizeLogisticsDiagnostics,
+  type LogisticsClassificationDiagnostics,
+} from './logistics-classification-diagnostics';
 import type { MappedOrderRecord } from './mapped-order-record';
 
 export interface AccountSyncCoverage {
@@ -100,6 +104,14 @@ export class MarketplaceOrdersPersistenceService {
     }
   }
 
+  /**
+   * `logisticsDiagnostics` (correção da auditoria Full) é OPCIONAL e
+   * aditivo: os chamadores que não classificam logística (Amazon, Shopee)
+   * continuam chamando exatamente como antes e a coluna fica `NULL`.
+   * O objeto é sanitizado aqui, no último ponto antes da escrita — só
+   * inteiros, vocabulário de chaves fechado, nunca identificador nem texto
+   * do provedor (ver `logistics-classification-diagnostics.ts`).
+   */
   async finalizeSyncRunSuccess(
     syncRunId: string,
     counts: {
@@ -110,12 +122,14 @@ export class MarketplaceOrdersPersistenceService {
       itemsPersisted: number;
     },
     finishedAt: Date,
+    logisticsDiagnostics?: LogisticsClassificationDiagnostics,
   ): Promise<void> {
     await this.dataSource.query(
       `UPDATE sync_runs
           SET status = $2, finished_at = $3, records_read = $4,
               records_created = $5, records_updated = $6, records_failed = 0,
-              pages_fetched = $7, items_persisted = $8
+              pages_fetched = $7, items_persisted = $8,
+              logistics_diagnostics = $9
         WHERE id = $1`,
       [
         syncRunId,
@@ -126,6 +140,9 @@ export class MarketplaceOrdersPersistenceService {
         counts.ordersUpdated,
         counts.pagesFetched,
         counts.itemsPersisted,
+        logisticsDiagnostics
+          ? JSON.stringify(sanitizeLogisticsDiagnostics(logisticsDiagnostics))
+          : null,
       ],
     );
   }
@@ -418,6 +435,18 @@ export class MarketplaceOrdersPersistenceService {
    * financeiro já conhecido. Um valor NOVO NÃO NULO (incluindo `"0.00"`,
    * nunca confundido com ausência) sempre substitui o antigo normalmente —
    * só um `null` recebido nunca sobrescreve um valor já persistido.
+   *
+   * `external_shipment_id` (correção da auditoria Full) usa exatamente o
+   * mesmo `COALESCE`: um payload sem `shipping.id` nunca apaga um
+   * identificador de envio já conhecido — apagá-lo removeria o pedido da
+   * fila de reclassificação sem que nada tivesse sido resolvido.
+   *
+   * `fulfillment_channel` passou a usar o mesmo `COALESCE` pelo mesmo
+   * motivo (defeito encontrado pelo teste de persistência da Shopee
+   * acrescentado nesta rodada): uma ressincronização cujo detalhe não
+   * trouxesse o campo apagava silenciosamente o `fulfillment_flag` da
+   * Shopee — ou o canal FBA/FBM da Amazon — já persistido. Um valor NOVO
+   * não nulo continua substituindo o antigo normalmente.
    */
   async persistOrders(
     orders: MappedOrderRecord[],
@@ -448,11 +477,12 @@ export class MarketplaceOrdersPersistenceService {
                total_amount, pack_id, date_created, date_closed,
                marketplace_last_updated, source_status, fulfillment_channel,
                external_marketplace_id, logistics_classification, logistics_type,
+               external_shipment_id,
                marketplace_fee_amount, buyer_shipping_cost_amount, taxes_amount,
                coupon_amount, refunded_amount,
                updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                     $15, $16, $17, $18, $19, now())
+                     $15, $16, $17, $18, $19, $20, now())
             ON CONFLICT (marketplace_account_id, external_order_id) DO UPDATE
               SET status = EXCLUDED.status,
                   currency_id = EXCLUDED.currency_id,
@@ -462,7 +492,7 @@ export class MarketplaceOrdersPersistenceService {
                   date_closed = EXCLUDED.date_closed,
                   marketplace_last_updated = EXCLUDED.marketplace_last_updated,
                   source_status = EXCLUDED.source_status,
-                  fulfillment_channel = EXCLUDED.fulfillment_channel,
+                  fulfillment_channel = COALESCE(EXCLUDED.fulfillment_channel, marketplace_orders.fulfillment_channel),
                   external_marketplace_id = EXCLUDED.external_marketplace_id,
                   logistics_classification = CASE
                     WHEN EXCLUDED.logistics_classification = 'UNKNOWN'
@@ -476,6 +506,7 @@ export class MarketplaceOrdersPersistenceService {
                     THEN marketplace_orders.logistics_type
                     ELSE EXCLUDED.logistics_type
                   END,
+                  external_shipment_id = COALESCE(EXCLUDED.external_shipment_id, marketplace_orders.external_shipment_id),
                   marketplace_fee_amount = COALESCE(EXCLUDED.marketplace_fee_amount, marketplace_orders.marketplace_fee_amount),
                   buyer_shipping_cost_amount = COALESCE(EXCLUDED.buyer_shipping_cost_amount, marketplace_orders.buyer_shipping_cost_amount),
                   taxes_amount = COALESCE(EXCLUDED.taxes_amount, marketplace_orders.taxes_amount),
@@ -501,6 +532,7 @@ export class MarketplaceOrdersPersistenceService {
             order.externalMarketplaceId ?? null,
             order.logisticsClassification ?? 'UNKNOWN',
             order.logisticsType ?? null,
+            order.externalShipmentId ?? null,
             order.marketplaceFeeAmount ?? null,
             order.buyerShippingCostAmount ?? null,
             order.taxesAmount ?? null,

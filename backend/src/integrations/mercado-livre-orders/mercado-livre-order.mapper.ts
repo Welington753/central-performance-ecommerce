@@ -91,6 +91,10 @@ export function mapMercadoLivreOrder(
     dateCreated,
     dateClosed: toDateOrNull(raw.dateClosed),
     marketplaceLastUpdated: toDateOrNull(raw.lastUpdated),
+    // Correção da auditoria Full: o `shipping.id` passa a ser PERSISTIDO,
+    // não só usado em memória — sem ele, um pedido deixado `UNKNOWN` só
+    // poderia ser reclassificado refazendo o backfill de pedidos.
+    externalShipmentId: raw.shippingId,
     marketplaceFeeAmount: sumEligiblePaymentField(
       raw.payments,
       'marketplaceFee',

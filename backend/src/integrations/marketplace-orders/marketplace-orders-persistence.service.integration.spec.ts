@@ -1086,6 +1086,231 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
       expect(order.logistics_classification).toBe('MARKETPLACE_FULFILLED');
       expect(order.logistics_type).toBe('fulfillment');
     });
+
+    /**
+     * Lacuna apontada pela auditoria Full: só existia a prova do caminho
+     * anti-regressão (`UNKNOWN` não sobrescreve resolvido). O caminho
+     * inverso — um pedido que ficou `UNKNOWN` (teto de consultas, 429) e é
+     * CORRIGIDO por um evento posterior — nunca tinha sido provado.
+     */
+    it('lets a later resolved classification correct an order left UNKNOWN', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+          logisticsClassification: 'UNKNOWN',
+          logisticsType: null,
+          externalShipmentId: 'ship-1',
+        }),
+      ]);
+
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+          logisticsClassification: 'MARKETPLACE_FULFILLED',
+          logisticsType: 'fulfillment',
+          externalShipmentId: 'ship-1',
+        }),
+      ]);
+
+      const [order] = await dataSource.query<MarketplaceOrderRow[]>(
+        'SELECT * FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.logistics_classification).toBe('MARKETPLACE_FULFILLED');
+      expect(order.logistics_type).toBe('fulfillment');
+    });
+  });
+
+  describe('external_shipment_id (correção da auditoria Full)', () => {
+    it('persists the shipment identifier so the order can be reclassified later', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          logisticsClassification: 'UNKNOWN',
+          externalShipmentId: 'ship-42',
+        }),
+      ]);
+
+      const [order] = await dataSource.query<
+        Array<{ external_shipment_id: string | null }>
+      >(
+        'SELECT external_shipment_id FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.external_shipment_id).toBe('ship-42');
+    });
+
+    it('never erases a known shipment identifier with a payload that lacks it', async () => {
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-01T10:00:00.000Z'),
+          externalShipmentId: 'ship-42',
+        }),
+      ]);
+
+      await service.persistOrders([
+        orderRecord({
+          marketplaceAccountId: accountId,
+          marketplaceLastUpdated: new Date('2026-08-02T10:00:00.000Z'),
+          externalShipmentId: null,
+        }),
+      ]);
+
+      const [order] = await dataSource.query<
+        Array<{ external_shipment_id: string | null }>
+      >(
+        'SELECT external_shipment_id FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.external_shipment_id).toBe('ship-42');
+    });
+
+    it('leaves the identifier NULL for a connector that never provides one', async () => {
+      await service.persistOrders([
+        orderRecord({ marketplaceAccountId: accountId }),
+      ]);
+
+      const [order] = await dataSource.query<
+        Array<{ external_shipment_id: string | null }>
+      >(
+        'SELECT external_shipment_id FROM marketplace_orders WHERE marketplace_account_id = $1',
+        [accountId],
+      );
+      expect(order.external_shipment_id).toBeNull();
+    });
+  });
+
+  describe('sync_runs.logistics_diagnostics (correção da auditoria Full)', () => {
+    async function runIdForDiagnostics(): Promise<string> {
+      return service.beginSyncRun({
+        marketplaceAccountId: accountId,
+        marketplace: Marketplace.MERCADO_LIVRE,
+        periodFrom: new Date('2026-07-01T00:00:00.000Z'),
+        periodTo: new Date('2026-08-30T00:00:00.000Z'),
+        startedAt: new Date(),
+      });
+    }
+
+    const counts = {
+      ordersFetched: 5,
+      ordersCreated: 5,
+      ordersUpdated: 0,
+      pagesFetched: 1,
+      itemsPersisted: 5,
+    };
+
+    it('records the sanitized counters on a successful run', async () => {
+      const runId = await runIdForDiagnostics();
+
+      await service.finalizeSyncRunSuccess(runId, counts, new Date(), {
+        distinctShipments: 5,
+        lookupsPerformed: 3,
+        lookupsSkippedByCap: 2,
+        httpAttempts: 4,
+        classificationsResolved: 3,
+        classificationsUnknown: 0,
+        failuresRateLimited: 1,
+        failuresProviderUnavailable: 0,
+        failuresNotFound: 0,
+        failuresUnauthorized: 0,
+        failuresInvalidResponse: 0,
+        ordersLeftUnclassified: 2,
+      });
+
+      const [row] = await dataSource.query<
+        Array<{ logistics_diagnostics: Record<string, number> | null }>
+      >('SELECT logistics_diagnostics FROM sync_runs WHERE id = $1', [runId]);
+      expect(row.logistics_diagnostics).toEqual(
+        expect.objectContaining({
+          lookupsSkippedByCap: 2,
+          ordersLeftUnclassified: 2,
+          failuresRateLimited: 1,
+        }),
+      );
+    });
+
+    // Revisão crítica: antes desta coluna existir também no `SyncRun`
+    // entity (não só gravada por SQL cru), `GET /sync-runs`
+    // (`SyncRunsService.findAll`) nunca a devolvia — o dado ficava preso no
+    // banco, sem nenhum consumidor real. Este teste lê pelo MESMO caminho
+    // que o endpoint real usa (`Repository<SyncRun>.find`), não SQL cru.
+    it('is readable through the SyncRun entity/repository — the same path GET /sync-runs uses', async () => {
+      const runId = await runIdForDiagnostics();
+      await service.finalizeSyncRunSuccess(runId, counts, new Date(), {
+        distinctShipments: 5,
+        lookupsPerformed: 3,
+        lookupsSkippedByCap: 2,
+        httpAttempts: 4,
+        classificationsResolved: 3,
+        classificationsUnknown: 0,
+        failuresRateLimited: 1,
+        failuresProviderUnavailable: 0,
+        failuresNotFound: 0,
+        failuresUnauthorized: 0,
+        failuresInvalidResponse: 0,
+        ordersLeftUnclassified: 2,
+      });
+
+      const row = await dataSource
+        .getRepository(SyncRun)
+        .findOneByOrFail({ id: runId });
+
+      expect(row.logisticsDiagnostics).toEqual(
+        expect.objectContaining({
+          lookupsSkippedByCap: 2,
+          ordersLeftUnclassified: 2,
+        }),
+      );
+    });
+
+    it('stays NULL for connectors that never classify logistics', async () => {
+      const runId = await runIdForDiagnostics();
+
+      await service.finalizeSyncRunSuccess(runId, counts, new Date());
+
+      const [row] = await dataSource.query<
+        Array<{ logistics_diagnostics: unknown }>
+      >('SELECT logistics_diagnostics FROM sync_runs WHERE id = $1', [runId]);
+      expect(row.logistics_diagnostics).toBeNull();
+    });
+
+    it('never stores a string — an extra key is dropped at the write boundary', async () => {
+      const runId = await runIdForDiagnostics();
+
+      await service.finalizeSyncRunSuccess(runId, counts, new Date(), {
+        ...{
+          distinctShipments: 1,
+          lookupsPerformed: 1,
+          lookupsSkippedByCap: 0,
+          httpAttempts: 1,
+          classificationsResolved: 1,
+          classificationsUnknown: 0,
+          failuresRateLimited: 0,
+          failuresProviderUnavailable: 0,
+          failuresNotFound: 0,
+          failuresUnauthorized: 0,
+          failuresInvalidResponse: 0,
+          ordersLeftUnclassified: 0,
+        },
+        shipmentId: 'ship-42',
+        accessToken: 'secret-token-value',
+      } as never);
+
+      const [row] = await dataSource.query<
+        Array<{ logistics_diagnostics: Record<string, unknown> }>
+      >('SELECT logistics_diagnostics FROM sync_runs WHERE id = $1', [runId]);
+      const serialized = JSON.stringify(row.logistics_diagnostics);
+      expect(serialized).not.toContain('ship-42');
+      expect(serialized).not.toContain('secret-token-value');
+      expect(
+        Object.values(row.logistics_diagnostics).every(
+          (value) => typeof value === 'number',
+        ),
+      ).toBe(true);
+    });
   });
 
   describe('markAccountSynced', () => {

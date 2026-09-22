@@ -49,7 +49,7 @@ describe('MercadoLivreShipmentClient.fetchShipment', () => {
     });
   });
 
-  it('maps HTTP 429 to "rate_limited"', async () => {
+  it('maps HTTP 429 to "rate_limited" with no Retry-After when the header is absent', async () => {
     const fetchImpl = jest.fn().mockResolvedValue({
       ok: false,
       status: 429,
@@ -59,8 +59,75 @@ describe('MercadoLivreShipmentClient.fetchShipment', () => {
 
     expect(await client.fetchShipment('token', '1')).toEqual({
       kind: 'rate_limited',
+      retryAfterMs: null,
     });
   });
+
+  it('surfaces Retry-After (seconds) from a 429 as milliseconds', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name === 'retry-after' ? '2' : null) },
+      json: () => Promise.resolve({}),
+    });
+    const client = new MercadoLivreShipmentClient(configService(), fetchImpl);
+
+    expect(await client.fetchShipment('token', '1')).toEqual({
+      kind: 'rate_limited',
+      retryAfterMs: 2000,
+    });
+  });
+
+  it('caps an absurd Retry-After instead of honouring an unbounded wait', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: {
+        get: (name: string) => (name === 'retry-after' ? '86400' : null),
+      },
+      json: () => Promise.resolve({}),
+    });
+    const client = new MercadoLivreShipmentClient(configService(), fetchImpl);
+
+    expect(await client.fetchShipment('token', '1')).toEqual({
+      kind: 'rate_limited',
+      retryAfterMs: 60000,
+    });
+  });
+
+  it('ignores a non-numeric Retry-After instead of guessing a delay', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: {
+        get: (name: string) =>
+          name === 'retry-after' ? 'Wed, 21 Oct 2026 07:28:00 GMT' : null,
+      },
+      json: () => Promise.resolve({}),
+    });
+    const client = new MercadoLivreShipmentClient(configService(), fetchImpl);
+
+    expect(await client.fetchShipment('token', '1')).toEqual({
+      kind: 'rate_limited',
+      retryAfterMs: null,
+    });
+  });
+
+  it.each([401, 403])(
+    'maps HTTP %i to "unauthorized" — never retried, never a provider outage',
+    async (status) => {
+      const fetchImpl = jest.fn().mockResolvedValue({
+        ok: false,
+        status,
+        json: () => Promise.resolve({}),
+      });
+      const client = new MercadoLivreShipmentClient(configService(), fetchImpl);
+
+      expect(await client.fetchShipment('token', '1')).toEqual({
+        kind: 'unauthorized',
+      });
+    },
+  );
 
   it.each([500, 502, 503])(
     'maps HTTP %i to "provider_unavailable"',

@@ -120,6 +120,17 @@ export const envValidationSchema = Joi.object({
     }, 'ML_OAUTH_PROCESSING_STALE_AFTER_MS safety margin'),
   ML_TOKEN_REFRESH_LEEWAY_MS: Joi.number().integer().min(1).default(900000),
 
+  // Classificação logística Full (correção da auditoria Full). Todas
+  // opcionais com padrão seguro: a ausência nunca impede o boot e nunca
+  // muda regra de negócio — só o custo/tempo por execução. Os tetos
+  // absolutos ficam no código, então nem um valor absurdo aqui pode gerar
+  // espera indefinida (ver `mercado-livre-shipment-lookup.service.ts` e
+  // `mercado-livre-orders-sync.service.ts`).
+  ML_MAX_SHIPMENT_LOOKUPS_PER_SYNC: Joi.number().integer().min(1).default(200),
+  ML_SHIPMENT_MAX_ATTEMPTS: Joi.number().integer().min(1).default(3),
+  ML_SHIPMENT_RETRY_BASE_DELAY_MS: Joi.number().integer().min(1).default(500),
+  ML_SHIPMENT_RETRY_MAX_DELAY_MS: Joi.number().integer().min(1).default(5000),
+
   // --- Amazon SP-API (Fase 4, fundação de autenticação) ------------------
   // Nenhuma tem `.required()` nem valor padrão: a ausência de qualquer uma
   // delas NUNCA pode impedir o backend de subir. Só uma operação Amazon

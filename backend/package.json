@@ -23,7 +23,8 @@
     "migration:generate": "npm run typeorm -- migration:generate",
     "migration:run": "npm run typeorm -- migration:run",
     "migration:revert": "npm run typeorm -- migration:revert",
-    "seed:admin": "ts-node --transpile-only -r tsconfig-paths/register src/database/seeds/create-admin.seed.ts"
+    "seed:admin": "ts-node --transpile-only -r tsconfig-paths/register src/database/seeds/create-admin.seed.ts",
+    "reclassify:ml-logistics": "ts-node --transpile-only -r tsconfig-paths/register src/database/tools/reclassify-ml-logistics/reclassify-ml-logistics.cli.ts"
   },
   "dependencies": {
     "@nestjs/common": "^11.0.1",

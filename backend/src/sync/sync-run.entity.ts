@@ -111,6 +111,21 @@ export class SyncRun {
   @Column({ type: 'text', nullable: true })
   errorSummary!: string | null;
 
+  /**
+   * Diagnóstico sanitizado da classificação logística `Marketplace Full`
+   * (correção da auditoria Full, migration 1789000000000) — só contagens,
+   * vocabulário de chaves fechado (ver
+   * `logistics-classification-diagnostics.ts`), nunca token/URL/id de
+   * pedido/envio/dado de comprador. `null` para toda execução anterior à
+   * migration e para qualquer marketplace/tipo de run que não classifica
+   * logística. Revisão crítica: antes desta coluna existir no ENTITY, o
+   * valor já era gravado pela persistência (SQL cru), mas ficava invisível
+   * para `GET /sync-runs` — mapeá-la aqui é o que o torna de fato
+   * consultável, sem inventar nenhum endpoint novo.
+   */
+  @Column({ type: 'jsonb', nullable: true })
+  logisticsDiagnostics!: Record<string, number> | null;
+
   @Index()
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -14,6 +14,7 @@ import { FinancialKpiCards } from "@/components/FinancialKpiCards";
 import { FullPerformanceSection } from "@/components/FullPerformanceSection";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
 import { LogisticsScopeFilter } from "@/components/LogisticsScopeFilter";
+import { LogisticsScopeCoverageNotice } from "@/components/LogisticsScopeCoverageNotice";
 import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { OperationalKpiCards } from "@/components/OperationalKpiCards";
 import { ProductRankingTabs } from "@/components/ProductRankingTabs";
@@ -837,10 +838,16 @@ function DashboardContent() {
       />
 
       {marketplace === "MERCADO_LIVRE" ? (
-        <LogisticsScopeFilter
-          value={logisticsScope}
-          onChange={handleLogisticsScopeChange}
-        />
+        <>
+          <LogisticsScopeFilter
+            value={logisticsScope}
+            onChange={handleLogisticsScopeChange}
+          />
+          <LogisticsScopeCoverageNotice
+            logisticsScope={logisticsScope}
+            full={displayData?.full ?? null}
+          />
+        </>
       ) : null}
 
       {effectivePeriod ? (
@@ -1019,7 +1026,21 @@ function DashboardContent() {
                     />
                   </div>
 
-                  {displayData.full ? (
+                  {/*
+                    Correção da auditoria Full: a seção só existe dentro do
+                    escopo Mercado Livre. O backend já devolve `full: null`
+                    para Amazon/Shopee, mas o gate aqui é explícito e
+                    independente — nenhum escopo Amazon/Shopee pode renderizar
+                    um cabeçalho "Mercado Livre Full" nem o aviso sugerindo
+                    que os pedidos seriam classificados numa próxima
+                    sincronização (o que nunca aconteceria). Mesma regra já
+                    aplicada ao `LogisticsScopeFilter` acima; com
+                    `marketplace = ALL` a seção aparece e o backend calcula
+                    tudo só sobre as contas Mercado Livre.
+                  */}
+                  {displayData.full &&
+                  effectiveFinancialMarketplace !== "AMAZON" &&
+                  effectiveFinancialMarketplace !== "SHOPEE" ? (
                     <FullPerformanceSection full={displayData.full} />
                   ) : null}
                 </div>

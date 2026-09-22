@@ -125,6 +125,18 @@ export class MarketplaceOrder {
   logisticsType!: string | null;
 
   /**
+   * `shipping.id` do Mercado Livre, preservado para permitir RECLASSIFICAR
+   * depois um pedido que ficou `UNKNOWN` (teto de consultas atingido, 429,
+   * timeout) sem precisar refazer o backfill de pedidos. `null` para
+   * Amazon/Shopee (conceito inexistente ali), para pedidos sem envio e para
+   * toda linha anterior à migration 1789000000000 — ausência aqui nunca é
+   * inferida nem inventada: apenas exclui a linha da fila de reclassificação
+   * automática, e ela é contada à parte no relatório.
+   */
+  @Column({ type: 'varchar', nullable: true })
+  externalShipmentId!: string | null;
+
+  /**
    * Campos financeiros confirmados do Mercado Livre (CP2K-7D) — mesma
    * convenção decimal de `totalAmount` (`numeric(14,2)`, string decimal,
    * nunca centavos nesta camada). Todos nullable, sem default: ausência

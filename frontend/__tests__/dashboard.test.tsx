@@ -799,6 +799,150 @@ describe("DashboardPage", () => {
         screen.getByText(/Full \+ vendas sem Full = total das vendas/),
       ).toBeInTheDocument();
     });
+
+    /**
+     * Correção da auditoria Full: a seção "Mercado Livre Full" nunca pode
+     * aparecer num escopo Amazon/Shopee. Antes, com um desses marketplaces
+     * selecionado, o dashboard exibia o cabeçalho e o aviso âmbar dizendo
+     * que os pedidos seriam classificados numa próxima sincronização — o que
+     * nunca aconteceria, porque esses conectores jamais preenchem a
+     * classificação logística.
+     *
+     * O `full` é enviado preenchido de propósito nestes testes: o gate do
+     * frontend precisa valer por si, independentemente do backend (que
+     * agora também devolve `null` nesse escopo).
+     */
+    it.each(["AMAZON", "SHOPEE"] as const)(
+      "never renders the Mercado Livre Full section under a %s scope",
+      async (marketplace) => {
+        mockSearchParams({ marketplace });
+        (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+          analyticsDto({
+            full: fullDto(),
+            scope: { marketplace, accountId: null, allTime: false, logisticsScope: "ALL" },
+          }),
+        );
+        render(<DashboardPage />);
+        await screen.findByText(/Última sincronização/);
+
+        expect(screen.queryByText("Mercado Livre Full")).not.toBeInTheDocument();
+        expect(
+          screen.queryByTestId("full-kpi-card-paid-revenue"),
+        ).not.toBeInTheDocument();
+        expect(
+          screen.queryByText(/modalidade logística/i),
+        ).not.toBeInTheDocument();
+      },
+    );
+
+    it("still renders the Full section under the ALL scope", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({ full: fullDto() }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+    });
+
+    it("renders the Full section for a Mercado Livre account scope", async () => {
+      mockSearchParams({ marketplace: "MERCADO_LIVRE", accountId: "acc-1" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          full: fullDto(),
+          scope: {
+            marketplace: "MERCADO_LIVRE",
+            accountId: "acc-1",
+            allTime: false,
+            logisticsScope: "ALL",
+          },
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+    });
+
+    /**
+     * Revisão crítica: cada conta Mercado Livre deve mostrar SÓ os próprios
+     * números — nunca os de outra conta nem o consolidado. O gate/fetch
+     * usam `accountId` da URL; este teste prova que o valor renderizado é
+     * exatamente o que a API devolveu PARA aquela conta, forwardando o
+     * `accountId` correto na chamada.
+     */
+    it.each([
+      { accountId: "acc-1", label: "Meli 1", paidRevenue: "111.00" },
+      { accountId: "acc-2", label: "Meli 2", paidRevenue: "222.00" },
+    ])(
+      "$label (accountId=$accountId) renders only its own Full numbers, never another account's",
+      async ({ accountId, paidRevenue }) => {
+        mockSearchParams({ marketplace: "MERCADO_LIVRE", accountId });
+        (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+          analyticsDto({
+            full: fullDto({ summary: { ...fullDto().summary!, paidRevenue } }),
+            scope: {
+              marketplace: "MERCADO_LIVRE",
+              accountId,
+              allTime: false,
+              logisticsScope: "ALL",
+            },
+          }),
+        );
+        render(<DashboardPage />);
+        await screen.findByText("Mercado Livre Full");
+
+        expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith(
+          expect.objectContaining({ marketplace: "MERCADO_LIVRE", accountId }),
+        );
+        expect(
+          screen.getByTestId("full-kpi-card-paid-revenue"),
+        ).toHaveTextContent(paidRevenue.replace(".", ","));
+      },
+    );
+
+    /**
+     * Correção da auditoria Full: os avisos usavam `text-amber-800`/
+     * `text-green-700` fixos, que não acompanham o tema — sobre a superfície
+     * escura o contraste caía abaixo do mínimo do WCAG AA. Agora usam
+     * tokens redefinidos no bloco `prefers-color-scheme: dark`.
+     */
+    it("uses theme-aware tokens on the notices — never a fixed palette colour", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          full: fullDto({
+            coverage: "partial",
+            classifiedOrders: 3,
+            unclassifiedOrders: 2,
+          }),
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+
+      const notice = screen
+        .getByText(/Cobertura parcial da classificação Full/)
+        .closest("div")!;
+      expect(notice.className).toContain("text-notice");
+      expect(notice.className).toContain("bg-notice/10");
+      expect(notice.className).not.toMatch(/text-amber-\d/);
+      expect(notice.className).not.toMatch(/bg-amber-\d/);
+
+      const unknownIndicator = screen
+        .getByText(/2 pedido\(s\) ainda não classificado/)
+        .closest("div")!;
+      expect(unknownIndicator.className).not.toMatch(/text-amber-\d/);
+    });
+
+    it("uses a theme-aware token on the 'no unclassified order' confirmation", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({ full: fullDto({ unclassifiedOrders: 0 }) }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText("Mercado Livre Full");
+
+      const confirmation = screen.getByText(
+        /Full \+ vendas sem Full = total das vendas/,
+      );
+      expect(confirmation.className).toContain("text-positive");
+      expect(confirmation.className).not.toMatch(/text-green-\d/);
+    });
   });
 
   describe("filtro Tipo de venda / logisticsScope (Fase 4)", () => {
@@ -819,6 +963,100 @@ describe("DashboardPage", () => {
       render(<DashboardPage />);
       await screen.findByText(/Última sincronização/);
       expect(screen.queryByRole("group", { name: "Tipo de venda" })).not.toBeInTheDocument();
+    });
+
+    /**
+     * Correção da auditoria Full: com "Somente Full" ou "Vendas sem Full"
+     * selecionado, os pedidos `UNKNOWN` saem dos DOIS lados. O único aviso
+     * sobre isso ficava dentro da seção Full, muito abaixo do filtro — quem
+     * trocasse o filtro via os números mudarem sem nenhuma explicação.
+     */
+    function fullWithUnclassified(unclassifiedOrders: number) {
+      return {
+        coverage: unclassifiedOrders > 0 ? ("partial" as const) : ("complete" as const),
+        classifiedOrders: 8,
+        unclassifiedOrders,
+        summary: null,
+        comparison: null,
+        dailySeries: [],
+        ranking: [],
+        nonFullSummary: null,
+        unknownSummary: null,
+        totalSummary: null,
+      };
+    }
+
+    it.each(["FULL", "NON_FULL"] as const)(
+      "shows the coverage notice next to the filter when %s is selected and UNKNOWN orders exist",
+      async (logistics) => {
+        mockSearchParams({ marketplace: "MERCADO_LIVRE", logistics });
+        (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+          analyticsDto({
+            full: fullWithUnclassified(2),
+            scope: {
+              marketplace: "MERCADO_LIVRE",
+              accountId: null,
+              allTime: false,
+              logisticsScope: logistics,
+            },
+          }),
+        );
+        render(<DashboardPage />);
+        await screen.findByText(/Última sincronização/);
+
+        const notice = await screen.findByTestId(
+          "logistics-scope-coverage-notice",
+        );
+        expect(notice).toHaveTextContent(/2 pedido\(s\)/);
+        expect(notice).toHaveTextContent(/ficaram FORA do filtro/);
+        // UNKNOWN nunca é apresentado como "sem Full", zero ou seller.
+        expect(notice).toHaveTextContent(
+          /não classificado não é o mesmo que "sem Full"/,
+        );
+        expect(notice.className).toContain("text-notice");
+      },
+    );
+
+    it("does not show the coverage notice when every order is classified", async () => {
+      mockSearchParams({ marketplace: "MERCADO_LIVRE", logistics: "FULL" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          full: fullWithUnclassified(0),
+          scope: {
+            marketplace: "MERCADO_LIVRE",
+            accountId: null,
+            allTime: false,
+            logisticsScope: "FULL",
+          },
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+
+      expect(
+        screen.queryByTestId("logistics-scope-coverage-notice"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("does not show the coverage notice while the filter is on 'Todas as vendas'", async () => {
+      mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
+        analyticsDto({
+          full: fullWithUnclassified(5),
+          scope: {
+            marketplace: "MERCADO_LIVRE",
+            accountId: null,
+            allTime: false,
+            logisticsScope: "ALL",
+          },
+        }),
+      );
+      render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+
+      expect(
+        screen.queryByTestId("logistics-scope-coverage-notice"),
+      ).not.toBeInTheDocument();
     });
 
     it("clicking 'Somente Full' updates the URL and forwards logisticsScope=FULL to the fetch", async () => {
