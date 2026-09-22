@@ -188,14 +188,26 @@ describe("Ausência de KPIs fictícios", () => {
     expect(screen.queryByText(/R\$\s?0,00/)).not.toBeInTheDocument();
   });
 
-  it("/dashboard nunca calcula ou exibe margem, lucro ou resultado líquido em lugar nenhum", async () => {
+  it("/dashboard nunca calcula ou exibe margem, lucro ou resultado líquido como se fosse um KPI real — só é permitido dentro de um aviso que NEGA explicitamente essa leitura", async () => {
     (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(analyticsDto());
 
     render(<DashboardPage />);
     await screen.findByTestId("kpi-card-gross-revenue");
 
+    // Correção pós-revisão (tarefa "Despesas e resultado"): o aviso
+    // obrigatório do resultado parcial precisa dizer "Ainda não representa
+    // lucro" — a regra continua proibindo qualquer AFIRMAÇÃO positiva
+    // ("Lucro: R$ 500,00", um card chamado "Margem"), mas nunca pode barrar
+    // a própria negação que avisa o usuário do contrário.
+    const negationPhrases = [/não representa/i, /nunca representa/i];
     for (const forbidden of [/margem/i, /lucro/i, /resultado líquido/i]) {
-      expect(screen.queryByText(forbidden)).not.toBeInTheDocument();
+      for (const element of screen.queryAllByText(forbidden)) {
+        const text = element.textContent ?? "";
+        const isExplicitNegation = negationPhrases.some((negation) =>
+          negation.test(text),
+        );
+        expect(isExplicitNegation).toBe(true);
+      }
     }
   });
 

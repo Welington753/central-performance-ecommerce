@@ -25,6 +25,10 @@ const baseSummary: AnalyticsSummary = {
   shippingCost: "150.00",
   couponAmount: "45.90",
   refundedAmount: "80.00",
+  knownAdjustmentsAmount: "45.90",
+  knownAdjustmentsPctOfGrossRevenue: 4.6,
+  resultAfterKnownAdjustments: "954.10",
+  marginAfterKnownAdjustmentsPct: 95.4,
 };
 
 describe("FinancialKpiCards", () => {

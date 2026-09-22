@@ -1,8 +1,22 @@
 "use client";
 
 import { useMemo, useState } from "react";
-import { EmptyStateIcon } from "@/components/EmptyState";
-import { formatBRL, formatDecimal } from "@/lib/kpi-format";
+import {
+  ProductListingRankingTable,
+  listingColumnValue,
+  type ListingSortColumn,
+} from "@/components/ProductListingRankingTable";
+import {
+  ProductSkuRankingTable,
+  skuColumnValue,
+  type SkuSortColumn,
+} from "@/components/ProductSkuRankingTable";
+import {
+  sortRows,
+  toggleSort,
+  withPositions,
+  type SortState,
+} from "@/lib/ranking-sort";
 import type { AnalyticsTopListing, AnalyticsTopProductBySku } from "@/types/marketplace-analytics";
 
 interface ProductRankingTabsProps {
@@ -26,31 +40,62 @@ export function ProductRankingTabs({
   const [tab, setTab] = useState<RankingTab>("sku");
   const [search, setSearch] = useState("");
   const [topN, setTopN] = useState<TopN>(10);
+  const [skuSort, setSkuSort] = useState<SortState<SkuSortColumn>>({
+    column: "position",
+    direction: "asc",
+  });
+  const [listingSort, setListingSort] = useState<SortState<ListingSortColumn>>({
+    column: "position",
+    direction: "asc",
+  });
 
   const normalizedSearch = normalizeSearch(search);
 
-  const filteredBySku = useMemo(() => {
+  const skuWithPositions = useMemo(() => withPositions(bySku), [bySku]);
+  const listingWithPositions = useMemo(
+    () => withPositions(byListing),
+    [byListing],
+  );
+
+  // Sequência obrigatória: busca/filtro -> ordenação -> Top N. Nunca recorta
+  // o Top N antes de ordenar (perderia linhas que só entrariam no Top N
+  // depois de reordenadas).
+  const visibleBySku = useMemo(() => {
     const filtered = normalizedSearch
-      ? bySku.filter(
+      ? skuWithPositions.filter(
           (row) =>
             (row.sku ?? "").toLowerCase().includes(normalizedSearch) ||
             row.title.toLowerCase().includes(normalizedSearch),
         )
-      : bySku;
-    return filtered.slice(0, topN);
-  }, [bySku, normalizedSearch, topN]);
+      : skuWithPositions;
+    const sorted = sortRows(
+      filtered,
+      skuSort.column,
+      skuSort.direction,
+      skuColumnValue,
+      (row) => row.sku ?? row.title,
+    );
+    return sorted.slice(0, topN);
+  }, [skuWithPositions, normalizedSearch, skuSort, topN]);
 
-  const filteredByListing = useMemo(() => {
+  const visibleByListing = useMemo(() => {
     const filtered = normalizedSearch
-      ? byListing.filter(
+      ? listingWithPositions.filter(
           (row) =>
             (row.sku ?? "").toLowerCase().includes(normalizedSearch) ||
             row.title.toLowerCase().includes(normalizedSearch) ||
             row.listingId.toLowerCase().includes(normalizedSearch),
         )
-      : byListing;
-    return filtered.slice(0, topN);
-  }, [byListing, normalizedSearch, topN]);
+      : listingWithPositions;
+    const sorted = sortRows(
+      filtered,
+      listingSort.column,
+      listingSort.direction,
+      listingColumnValue,
+      (row) => row.listingId,
+    );
+    return sorted.slice(0, topN);
+  }, [listingWithPositions, normalizedSearch, listingSort, topN]);
 
   return (
     <div className="flex flex-col gap-4">
@@ -116,130 +161,20 @@ export function ProductRankingTabs({
       </div>
 
       {tab === "sku" ? (
-        <SkuTable rows={filteredBySku} />
+        <ProductSkuRankingTable
+          rows={visibleBySku}
+          sort={skuSort}
+          onSort={(column) => setSkuSort((current) => toggleSort(current, column))}
+        />
       ) : (
-        <ListingTable rows={filteredByListing} />
+        <ProductListingRankingTable
+          rows={visibleByListing}
+          sort={listingSort}
+          onSort={(column) =>
+            setListingSort((current) => toggleSort(current, column))
+          }
+        />
       )}
-    </div>
-  );
-}
-
-function EmptyRanking() {
-  return (
-    <div className="flex flex-col items-center justify-center gap-4 rounded-xl border border-dashed border-border-subtle bg-surface px-6 py-16 text-center">
-      <EmptyStateIcon />
-      <p className="text-sm text-foreground/60">
-        Nenhum produto vendido no período (ou nenhum resultado para esta
-        busca).
-      </p>
-    </div>
-  );
-}
-
-function SkuTable({
-  rows,
-}: {
-  rows: AnalyticsTopProductBySku[];
-}) {
-  if (rows.length === 0) return <EmptyRanking />;
-
-  return (
-    <div className="overflow-x-auto rounded-xl border border-border-subtle bg-surface">
-      <table className="w-full min-w-[720px] text-left text-sm">
-        <thead>
-          <tr className="border-b border-border-subtle text-xs uppercase tracking-wide text-foreground/50">
-            <th scope="col" className="px-4 py-3 font-medium">
-              #
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              SKU
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Produto
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Anúncios
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Unidades
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Valor bruto
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              % das unidades
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr
-              key={row.sku ?? `sem-sku-${row.title}-${index}`}
-              className="border-b border-border-subtle last:border-0"
-            >
-              <td className="px-4 py-3">{index + 1}</td>
-              <td className="px-4 py-3">{row.sku ?? "Sem SKU"}</td>
-              <td className="px-4 py-3">{row.title}</td>
-              <td className="px-4 py-3">{row.distinctListings}</td>
-              <td className="px-4 py-3">{row.units}</td>
-              <td className="px-4 py-3">{formatBRL(row.grossRevenue)}</td>
-              <td className="px-4 py-3">{formatDecimal(row.unitsSharePct)}%</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-function ListingTable({
-  rows,
-}: {
-  rows: AnalyticsTopListing[];
-}) {
-  if (rows.length === 0) return <EmptyRanking />;
-
-  return (
-    <div className="overflow-x-auto rounded-xl border border-border-subtle bg-surface">
-      <table className="w-full min-w-[640px] text-left text-sm">
-        <thead>
-          <tr className="border-b border-border-subtle text-xs uppercase tracking-wide text-foreground/50">
-            <th scope="col" className="px-4 py-3 font-medium">
-              #
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Anúncio
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              SKU
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Produto
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Unidades
-            </th>
-            <th scope="col" className="px-4 py-3 font-medium">
-              Valor bruto
-            </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map((row, index) => (
-            <tr
-              key={row.listingId}
-              className="border-b border-border-subtle last:border-0"
-            >
-              <td className="px-4 py-3">{index + 1}</td>
-              <td className="px-4 py-3">{row.listingId}</td>
-              <td className="px-4 py-3">{row.sku ?? "Sem SKU"}</td>
-              <td className="px-4 py-3">{row.title}</td>
-              <td className="px-4 py-3">{row.units}</td>
-              <td className="px-4 py-3">{formatBRL(row.grossRevenue)}</td>
-            </tr>
-          ))}
-        </tbody>
-      </table>
     </div>
   );
 }

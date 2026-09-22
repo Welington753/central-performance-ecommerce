@@ -56,6 +56,31 @@ export interface AnalyticsKpiSummary {
   shippingCost: string;
   couponAmount: string;
   refundedAmount: string;
+  /**
+   * "Despesas e ajustes conhecidos" (correção pós-revisão: ver relatório da
+   * tarefa) — hoje soma SOMENTE `couponAmount` acima. `couponAmount` usa a
+   * MESMA população `paid` de `grossRevenue` e está confirmado (comentário do
+   * card existente, CP2K-8D) que ainda não é descontado do valor bruto —
+   * seguro somar.
+   *
+   * `refundedAmount` NUNCA entra aqui: seus pedidos têm status
+   * `partially_refunded`, população DISJUNTA da de `grossRevenue` (nunca
+   * contam como `paid`). Não há, no código/fixtures/testes deste
+   * repositório, prova de que `total_amount` desses pedidos já reflita ou
+   * não o reembolso — somar arriscaria excluir a receita do pedido da base
+   * E ainda descontar o reembolso (dupla penalização). Por isso
+   * `refundedAmount` permanece só como indicador informativo, à parte.
+   *
+   * NUNCA chamado de lucro líquido/bruto — comissão, tarifas, impostos, Ads,
+   * frete do vendedor e custo dos produtos ficam de fora desliberadamente.
+   */
+  knownAdjustmentsAmount: string;
+  /** `despesas_e_ajustes_conhecidos / grossRevenue * 100` — `0` quando `grossRevenue` é zero (nunca NaN/Infinity). */
+  knownAdjustmentsPctOfGrossRevenue: number;
+  /** `grossRevenue - knownAdjustmentsAmount` — "resultado parcial", nunca lucro (frete do vendedor/comissão/tarifas/impostos/Ads/custo de produto ficam de fora). */
+  resultAfterKnownAdjustments: string;
+  /** `resultAfterKnownAdjustments / grossRevenue * 100` — `0` quando `grossRevenue` é zero. */
+  marginAfterKnownAdjustmentsPct: number;
 }
 
 export interface AnalyticsKpiComparison {
@@ -98,6 +123,16 @@ export interface AnalyticsTopProductBySku {
   units: number;
   grossRevenue: string;
   unitsSharePct: number;
+  /**
+   * `grossRevenue` da linha / soma do MESMO `quantity * unit_price` de TODOS
+   * os itens de pedidos `paid` do período (nunca só as linhas do Top
+   * N/busca) — auditoria pós-revisão: o denominador precisa usar a mesma
+   * expressão financeira do numerador (`totals.itemsGrossRevenueCents`,
+   * já usado em `avgUnitPrice`), nunca `grossRevenue`/`total_amount` do
+   * pedido, que pode divergir de `quantity * unit_price` por cupom, desconto
+   * ou arredondamento. Mesma população/denominador de `unitsSharePct`.
+   */
+  grossRevenueSharePct: number;
 }
 
 export interface AnalyticsTopListing {
@@ -108,6 +143,8 @@ export interface AnalyticsTopListing {
   title: string;
   units: number;
   grossRevenue: string;
+  /** Mesma regra de `AnalyticsTopProductBySku.grossRevenueSharePct` — ver comentário lá. */
+  grossRevenueSharePct: number;
 }
 
 export interface AnalyticsBreakdownSummary {

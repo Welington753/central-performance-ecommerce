@@ -53,6 +53,17 @@ export interface AnalyticsSummary {
   shippingCost: string;
   couponAmount: string;
   refundedAmount: string;
+  /**
+   * "Despesas e ajustes conhecidos" — hoje soma só `couponAmount` (mesma
+   * população de `grossRevenue`, confirmado que ainda não é descontado do
+   * valor bruto). `refundedAmount` fica de fora: seus pedidos têm status
+   * diferente (partially_refunded), população disjunta de `grossRevenue` —
+   * ver `ExpensesAndResultSection`.
+   */
+  knownAdjustmentsAmount: string;
+  knownAdjustmentsPctOfGrossRevenue: number;
+  resultAfterKnownAdjustments: string;
+  marginAfterKnownAdjustmentsPct: number;
 }
 
 export interface AnalyticsComparison {
@@ -95,6 +106,8 @@ export interface AnalyticsTopProductBySku {
   units: number;
   grossRevenue: string;
   unitsSharePct: number;
+  /** Mesma população/denominador de `unitsSharePct` (todos os pedidos pagos do período, nunca só as linhas do Top N/busca). */
+  grossRevenueSharePct: number;
 }
 
 export interface AnalyticsTopListing {
@@ -105,6 +118,7 @@ export interface AnalyticsTopListing {
   title: string;
   units: number;
   grossRevenue: string;
+  grossRevenueSharePct: number;
 }
 
 export interface AnalyticsBreakdownSummary {

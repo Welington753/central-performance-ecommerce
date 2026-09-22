@@ -184,6 +184,232 @@ describe('toMarketplaceAnalyticsResponse', () => {
     });
   });
 
+  describe('despesas e ajustes conhecidos / resultado (correção pós-revisão)', () => {
+    it('sums only couponAmount into knownAdjustmentsAmount — refundedAmount never enters (populações disjuntas: paid x partially_refunded)', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({
+            grossRevenueCents: 100000n, // R$ 1000,00 — só pedidos "paid"
+            couponAmountCents: 5000n, // R$ 50,00 — mesma população "paid"
+            refundedAmountCents: 30000n, // R$ 300,00 — população "partially_refunded", nunca contou para grossRevenue
+          }),
+        }),
+      );
+      expect(dto.summary?.knownAdjustmentsAmount).toBe('50.00');
+      expect(dto.summary?.resultAfterKnownAdjustments).toBe('950.00');
+    });
+
+    it('computes knownAdjustmentsPctOfGrossRevenue and marginAfterKnownAdjustmentsPct correctly', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({
+            grossRevenueCents: 100000n,
+            couponAmountCents: 10000n,
+          }),
+        }),
+      );
+      expect(dto.summary?.knownAdjustmentsPctOfGrossRevenue).toBe(10);
+      expect(dto.summary?.resultAfterKnownAdjustments).toBe('900.00');
+      expect(dto.summary?.marginAfterKnownAdjustmentsPct).toBe(90);
+    });
+
+    it('never NaN/Infinity when grossRevenue is zero — pct and margin are both 0', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({ grossRevenueCents: 0n, couponAmountCents: 0n }),
+        }),
+      );
+      expect(dto.summary?.knownAdjustmentsPctOfGrossRevenue).toBe(0);
+      expect(dto.summary?.resultAfterKnownAdjustments).toBe('0.00');
+      expect(dto.summary?.marginAfterKnownAdjustmentsPct).toBe(0);
+      expect(Number.isNaN(dto.summary?.knownAdjustmentsPctOfGrossRevenue)).toBe(
+        false,
+      );
+    });
+
+    /**
+     * Exemplo numérico do relatório da tarefa: um pedido `paid` (conta para
+     * `grossRevenue`) e um pedido `partially_refunded` COMPLETAMENTE
+     * diferente (nunca contou para `grossRevenue`) com reembolso alto. O
+     * resultado NUNCA pode cair para menos que `grossRevenue`, porque
+     * `refundedAmount` fica de fora do cálculo — nunca "exclui da base E
+     * ainda desconta" o mesmo dinheiro duas vezes.
+     */
+    it('a large refundedAmount on an unrelated partially_refunded order never drags resultAfterKnownAdjustments down (no double penalty)', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({
+            grossRevenueCents: 10000n, // pedido A, "paid", R$ 100,00 — o único que compõe grossRevenue
+            couponAmountCents: 0n,
+            partiallyRefundedOrders: 1,
+            partiallyRefundedGrossAmountCents: 20000n, // pedido B, "partially_refunded", R$ 200,00 — nunca em grossRevenue
+            refundedAmountCents: 5000n, // R$ 50,00 devolvidos no pedido B
+          }),
+        }),
+      );
+      expect(dto.summary?.grossRevenue).toBe('100.00');
+      // Reembolso do pedido B continua visível, só que separado (indicador informativo).
+      expect(dto.summary?.refundedAmount).toBe('50.00');
+      // Resultado usa só a base real (pedido A) — nunca 100.00 - 50.00 = 50.00.
+      expect(dto.summary?.knownAdjustmentsAmount).toBe('0.00');
+      expect(dto.summary?.resultAfterKnownAdjustments).toBe('100.00');
+    });
+  });
+
+  describe('grossRevenueSharePct do ranking (Top SKU / Top anúncio) — auditoria pós-revisão', () => {
+    /**
+     * O denominador precisa usar `itemsGrossRevenueCents`
+     * (`SUM(quantity * unit_price)`, MESMA expressão/população/filtros do
+     * numerador de cada linha do ranking) — NUNCA `grossRevenueCents`
+     * (`SUM(total_amount)` do pedido), que pode divergir por cupom, desconto
+     * ou arredondamento. Ver `AnalyticsTopProductBySku.grossRevenueSharePct`
+     * no DTO para a auditoria completa.
+     */
+    it('uses itemsGrossRevenueCents (quantity*unit_price) as denominator — NEVER grossRevenueCents (order total_amount), which can diverge by coupon/desconto/arredondamento', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({
+            // Pedido único com cupom: total_amount (grossRevenueCents) é
+            // R$ 800,00 (após desconto), mas quantity*unit_price da linha
+            // (itemsGrossRevenueCents) é R$ 1000,00 — valores DIFERENTES de
+            // propósito, para provar que o share usa o segundo, não o primeiro.
+            grossRevenueCents: 80000n,
+            itemsGrossRevenueCents: 100000n,
+            couponAmountCents: 20000n,
+          }),
+          topProductsBySku: [
+            {
+              sku: 'SKU-A',
+              title: 'Produto A',
+              distinctListings: 1,
+              units: 2,
+              grossRevenueCents: 30000n, // 30% de itemsGrossRevenueCents (100000n) — nunca 37,5% de grossRevenueCents (80000n)
+            },
+          ],
+          topListings: [
+            {
+              marketplace: Marketplace.MERCADO_LIVRE,
+              accountId: 'acc-1',
+              externalItemId: 'MLB1',
+              variationId: null,
+              sku: 'SKU-A',
+              title: 'Produto A',
+              units: 2,
+              grossRevenueCents: 30000n,
+            },
+          ],
+        }),
+      );
+      expect(dto.topProductsBySku[0].grossRevenueSharePct).toBe(30);
+      expect(dto.topListings[0].grossRevenueSharePct).toBe(30);
+    });
+
+    it('SKU: a soma de grossRevenueSharePct de TODAS as linhas do ranking soma aproximadamente 100% quando elas cobrem o itemsGrossRevenueCents inteiro do período', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({ itemsGrossRevenueCents: 100000n }),
+          topProductsBySku: [
+            {
+              sku: 'SKU-A',
+              title: 'Produto A',
+              distinctListings: 1,
+              units: 6,
+              grossRevenueCents: 50000n,
+            },
+            {
+              sku: 'SKU-B',
+              title: 'Produto B',
+              distinctListings: 1,
+              units: 3,
+              grossRevenueCents: 30000n,
+            },
+            {
+              sku: 'SKU-C',
+              title: 'Produto C',
+              distinctListings: 1,
+              units: 1,
+              grossRevenueCents: 20000n,
+            },
+          ],
+        }),
+      );
+      const sum = dto.topProductsBySku.reduce(
+        (acc, row) => acc + row.grossRevenueSharePct,
+        0,
+      );
+      // Tolerância de arredondamento: cada participação é arredondada a 1 casa decimal.
+      expect(sum).toBeGreaterThanOrEqual(99.5);
+      expect(sum).toBeLessThanOrEqual(100.5);
+    });
+
+    it('anúncio: a soma de grossRevenueSharePct de TODAS as linhas do ranking soma aproximadamente 100%', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({ itemsGrossRevenueCents: 100000n }),
+          topListings: [
+            {
+              marketplace: Marketplace.MERCADO_LIVRE,
+              accountId: 'acc-1',
+              externalItemId: 'MLB1',
+              variationId: null,
+              sku: 'SKU-A',
+              title: 'Produto A',
+              units: 6,
+              grossRevenueCents: 50000n,
+            },
+            {
+              marketplace: Marketplace.MERCADO_LIVRE,
+              accountId: 'acc-1',
+              externalItemId: 'MLB2',
+              variationId: null,
+              sku: 'SKU-B',
+              title: 'Produto B',
+              units: 3,
+              grossRevenueCents: 30000n,
+            },
+            {
+              marketplace: Marketplace.MERCADO_LIVRE,
+              accountId: 'acc-1',
+              externalItemId: 'MLB3',
+              variationId: null,
+              sku: 'SKU-C',
+              title: 'Produto C',
+              units: 1,
+              grossRevenueCents: 20000n,
+            },
+          ],
+        }),
+      );
+      const sum = dto.topListings.reduce(
+        (acc, row) => acc + row.grossRevenueSharePct,
+        0,
+      );
+      expect(sum).toBeGreaterThanOrEqual(99.5);
+      expect(sum).toBeLessThanOrEqual(100.5);
+    });
+
+    it('never NaN/Infinity when the period itemsGrossRevenueCents is zero', () => {
+      const dto = toMarketplaceAnalyticsResponse(
+        aggregate({
+          current: totals({ itemsGrossRevenueCents: 0n }),
+          topProductsBySku: [
+            {
+              sku: 'SKU-A',
+              title: 'Produto A',
+              distinctListings: 1,
+              units: 0,
+              grossRevenueCents: 0n,
+            },
+          ],
+        }),
+      );
+      expect(dto.topProductsBySku[0].grossRevenueSharePct).toBe(0);
+      expect(Number.isNaN(dto.topProductsBySku[0].grossRevenueSharePct)).toBe(
+        false,
+      );
+    });
+  });
+
   it('never divides by zero for gross-sales averages when there are zero gross-sales orders/units', () => {
     const dto = toMarketplaceAnalyticsResponse(aggregate());
     expect(dto.summary?.grossSalesAverageTicket).toBe('0.00');

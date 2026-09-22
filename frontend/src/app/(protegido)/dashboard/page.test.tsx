@@ -116,6 +116,10 @@ function financialSummary(overrides: Partial<AnalyticsSummary> = {}): AnalyticsS
     shippingCost: "15.00",
     couponAmount: "5.00",
     refundedAmount: "8.00",
+    knownAdjustmentsAmount: "5.00",
+    knownAdjustmentsPctOfGrossRevenue: 5,
+    resultAfterKnownAdjustments: "95.00",
+    marginAfterKnownAdjustmentsPct: 95,
     ...overrides,
   };
 }
@@ -425,6 +429,10 @@ describe("DashboardPage — Todo o período (Fase 4)", () => {
           shippingCost: "0.00",
           couponAmount: "0.00",
           refundedAmount: "0.00",
+          knownAdjustmentsAmount: "0.00",
+          knownAdjustmentsPctOfGrossRevenue: 0,
+          resultAfterKnownAdjustments: "100.00",
+          marginAfterKnownAdjustmentsPct: 100,
         },
         comparison: null,
       }),

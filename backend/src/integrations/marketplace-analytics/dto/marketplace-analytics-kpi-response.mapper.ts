@@ -18,7 +18,12 @@ import type {
   MarketplaceAnalyticsAggregate,
 } from '../marketplace-analytics.service';
 import { toFullAggregate } from './marketplace-analytics-full-response.mapper';
-import { roundTo, shareOf } from './marketplace-analytics-response-math.util';
+import {
+  knownAdjustmentsAndResult,
+  roundTo,
+  shareOf,
+  shareOfCents,
+} from './marketplace-analytics-response-math.util';
 import type {
   AccountBreakdownEntry,
   AnalyticsBestDay,
@@ -61,7 +66,11 @@ export function toMarketplaceAnalyticsResponse(
     bestDay: aggregate.bestDay ? toBestDay(aggregate.bestDay) : null,
     dailySeries: aggregate.dailySeries.map(toDailyPoint),
     topProductsBySku: aggregate.topProductsBySku.map((row) =>
-      toTopProductBySku(row, aggregate.current?.units ?? 0),
+      toTopProductBySku(
+        row,
+        aggregate.current?.units ?? 0,
+        aggregate.current?.itemsGrossRevenueCents ?? 0n,
+      ),
     ),
     topListings: aggregate.topListings.map((row) => ({
       listingId: row.variationId
@@ -73,6 +82,10 @@ export function toMarketplaceAnalyticsResponse(
       title: row.title,
       units: row.units,
       grossRevenue: centsToDecimalString(row.grossRevenueCents),
+      grossRevenueSharePct: shareOfCents(
+        row.grossRevenueCents,
+        aggregate.current?.itemsGrossRevenueCents ?? 0n,
+      ),
     })),
     breakdownByMarketplace: aggregate.breakdownByMarketplace.map((entry) => ({
       marketplace: entry.marketplace,
@@ -141,6 +154,24 @@ function toSummary(totals: AnalyticsPeriodTotals): AnalyticsKpiSummary {
     shippingCost: centsToDecimalString(totals.shippingCostCents),
     couponAmount: centsToDecimalString(totals.couponAmountCents),
     refundedAmount: centsToDecimalString(totals.refundedAmountCents),
+    ...toKnownAdjustmentsSummary(totals),
+  };
+}
+
+function toKnownAdjustmentsSummary(totals: AnalyticsPeriodTotals): {
+  knownAdjustmentsAmount: string;
+  knownAdjustmentsPctOfGrossRevenue: number;
+  resultAfterKnownAdjustments: string;
+  marginAfterKnownAdjustmentsPct: number;
+} {
+  const result = knownAdjustmentsAndResult(totals);
+  return {
+    knownAdjustmentsAmount: centsToDecimalString(result.knownAdjustmentsAmount),
+    knownAdjustmentsPctOfGrossRevenue: result.knownAdjustmentsPctOfGrossRevenue,
+    resultAfterKnownAdjustments: centsToDecimalString(
+      result.resultAfterKnownAdjustmentsCents,
+    ),
+    marginAfterKnownAdjustmentsPct: result.marginAfterKnownAdjustmentsPct,
   };
 }
 
@@ -260,6 +291,7 @@ function toTopProductBySku(
     grossRevenueCents: bigint;
   },
   totalUnitsInPeriod: number,
+  totalItemsGrossRevenueCentsInPeriod: bigint,
 ): AnalyticsTopProductBySku {
   return {
     sku: row.sku,
@@ -268,6 +300,10 @@ function toTopProductBySku(
     units: row.units,
     grossRevenue: centsToDecimalString(row.grossRevenueCents),
     unitsSharePct: shareOf(row.units, totalUnitsInPeriod),
+    grossRevenueSharePct: shareOfCents(
+      row.grossRevenueCents,
+      totalItemsGrossRevenueCentsInPeriod,
+    ),
   };
 }
 

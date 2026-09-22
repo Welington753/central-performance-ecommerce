@@ -9,6 +9,7 @@ import { DailyRevenueChart } from "@/components/DailyRevenueChart";
 import { DataCoverageBanner } from "@/components/DataCoverageBanner";
 import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
+import { ExpensesAndResultSection } from "@/components/ExpensesAndResultSection";
 import { FinancialKpiCards } from "@/components/FinancialKpiCards";
 import { FullPerformanceSection } from "@/components/FullPerformanceSection";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
@@ -981,6 +982,11 @@ function DashboardContent() {
                   />
 
                   <FinancialKpiCards
+                    summary={displayData.summary}
+                    effectiveMarketplace={effectiveFinancialMarketplace}
+                  />
+
+                  <ExpensesAndResultSection
                     summary={displayData.summary}
                     effectiveMarketplace={effectiveFinancialMarketplace}
                   />

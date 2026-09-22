@@ -25,6 +25,10 @@ const baseSummary: AnalyticsSummary = {
   shippingCost: "0.00",
   couponAmount: "0.00",
   refundedAmount: "0.00",
+  knownAdjustmentsAmount: "0.00",
+  knownAdjustmentsPctOfGrossRevenue: 0,
+  resultAfterKnownAdjustments: "1000.00",
+  marginAfterKnownAdjustmentsPct: 100,
 };
 
 const baseComparison: AnalyticsComparison = {
