@@ -20,6 +20,11 @@ import type { ReclassificationAccountReport } from './logistics-reclassification
  * MESMA rotina da fila principal (`applyShipmentLookupOutcome`), sob o
  * MESMO orçamento de requisições. Pedido sem envio associado
  * (`shipmentId: null`) permanece `UNKNOWN` sem nenhuma segunda chamada.
+ *
+ * `startCursor` (correção "sem starvation", worker do backend): MESMA razão
+ * de `drainShipmentIdQueue` — sem isto, um tick de orçamento pequeno sempre
+ * reexaminaria os mesmos primeiros pedidos, nunca alcançando pedidos
+ * válidos mais adiante quando os primeiros são permanentemente inválidos.
  */
 export async function drainRecoveryQueue(
   marketplaceAccountId: string,
@@ -33,12 +38,13 @@ export async function drainRecoveryQueue(
   context: {
     report: ReclassificationAccountReport;
     batchSize: number;
+    startCursor: string | null;
   },
 ): Promise<void> {
   const { repository, orderDetailLookup, shipmentLookup, budgetExhausted } =
     deps;
-  const { report, batchSize } = context;
-  let cursor: string | null = null;
+  const { report, batchSize, startCursor } = context;
+  let cursor: string | null = startCursor;
   const transientFailureState = { consecutive: 0 };
 
   for (;;) {
@@ -47,15 +53,23 @@ export async function drainRecoveryQueue(
       limit: batchSize,
       afterId: cursor,
     });
-    if (batch.length === 0) return;
+    if (batch.length === 0) {
+      report.queue2EndCursor = cursor;
+      report.queue2Exhausted = true;
+      return;
+    }
 
     for (const order of batch) {
       if (budgetExhausted(report)) {
         report.outcome = 'STOPPED_MAX_REQUESTS';
+        report.queue2EndCursor = cursor;
+        report.queue2Exhausted = false;
         return;
       }
 
-      // Cursor avança SEMPRE — nunca relê a mesma linha na execução atual.
+      // Cursor avança SEMPRE — nunca relê a mesma linha NESTA execução.
+      // Persistido pelo chamador (`queue2EndCursor`), impede o mesmo laço
+      // entre chamadas/ticks também.
       cursor = order.id;
       report.ordersExamined += 1;
       report.orderDetailRequests += 1;
@@ -67,11 +81,15 @@ export async function drainRecoveryQueue(
 
       if (outcome.kind === 'unauthorized') {
         report.outcome = 'ABORTED_UNAUTHORIZED';
+        report.queue2EndCursor = cursor;
+        report.queue2Exhausted = false;
         return;
       }
       if (outcome.kind === 'rate_limited') {
         report.leftUnknownTransientFailure += 1;
         report.outcome = 'STOPPED_RATE_LIMITED';
+        report.queue2EndCursor = cursor;
+        report.queue2Exhausted = false;
         return;
       }
       if (outcome.kind === 'provider_unavailable') {
@@ -82,6 +100,8 @@ export async function drainRecoveryQueue(
           CONSECUTIVE_TRANSIENT_FAILURE_LIMIT
         ) {
           report.outcome = 'STOPPED_PROVIDER_UNAVAILABLE';
+          report.queue2EndCursor = cursor;
+          report.queue2Exhausted = false;
           return;
         }
         continue;
@@ -112,6 +132,8 @@ export async function drainRecoveryQueue(
 
       if (budgetExhausted(report)) {
         report.outcome = 'STOPPED_MAX_REQUESTS';
+        report.queue2EndCursor = cursor;
+        report.queue2Exhausted = false;
         return;
       }
       report.shipmentRequests += 1;
@@ -127,7 +149,11 @@ export async function drainRecoveryQueue(
         repository,
         transientFailureState,
       });
-      if (result !== 'CONTINUE') return;
+      if (result !== 'CONTINUE') {
+        report.queue2EndCursor = cursor;
+        report.queue2Exhausted = false;
+        return;
+      }
     }
   }
 }

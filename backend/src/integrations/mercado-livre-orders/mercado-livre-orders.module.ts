@@ -19,6 +19,10 @@ import { MercadoLivreOrderDetailLookupService } from './mercado-livre-order-deta
 import { MercadoLivreLogisticsReclassificationService } from './mercado-livre-logistics-reclassification.service';
 import { MercadoLivreOrdersKpiService } from './mercado-livre-orders-kpi.service';
 import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.service';
+import { MlLogisticsReclassificationJobsPersistenceService } from './ml-logistics-reclassification-jobs-persistence.service';
+import { MlLogisticsReclassificationWorkerService } from './ml-logistics-reclassification-worker.service';
+import { MlLogisticsReclassificationService } from './ml-logistics-reclassification.service';
+import { MlLogisticsReclassificationController } from './ml-logistics-reclassification.controller';
 
 /**
  * Módulo da Fase 3 (coleta real de pedidos e KPIs de vendas do Mercado
@@ -43,6 +47,7 @@ import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.servi
   controllers: [
     MercadoLivreOrdersSyncController,
     MercadoLivreOrdersKpisController,
+    MlLogisticsReclassificationController,
   ],
   providers: [
     { provide: ML_FETCH, useValue: fetch },
@@ -67,10 +72,19 @@ import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.servi
     AdvisoryLockService,
     MercadoLivreOrdersSyncService,
     MercadoLivreOrdersKpiService,
-    // Reclassificação de histórico `UNKNOWN` (correção da auditoria Full).
-    // É apenas um provider — NUNCA roda sozinho no boot, nunca é agendado e
-    // nenhum controller o expõe: só a CLI operacional dedicada o aciona.
+    // Reclassificação de histórico `UNKNOWN` (correção da auditoria Full). É
+    // um provider reaproveitado por DOIS acionadores hoje: a CLI operacional
+    // dedicada (`--apply` manual) e, desde a correção "Render free sem
+    // Shell", `MlLogisticsReclassificationWorkerService` abaixo — nenhum dos
+    // dois é uma cópia, os dois chamam `apply()`.
     MercadoLivreLogisticsReclassificationService,
+    // Estado persistente + orquestração + worker do backend (correção da
+    // auditoria Full, "Render free sem Shell") — worker NUNCA inicia um job
+    // sozinho, só processa jobs já criados por ação explícita do usuário
+    // (`start`/`startAll`), igual ao design do `MarketplaceBackfillWorkerService`.
+    MlLogisticsReclassificationJobsPersistenceService,
+    MlLogisticsReclassificationService,
+    MlLogisticsReclassificationWorkerService,
   ],
   // `MercadoLivreOrdersSyncService` exportado (Fase 4) para o backfill
   // histórico e o orquestrador de sincronização automática reaproveitarem a

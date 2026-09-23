@@ -53,6 +53,20 @@ export interface ReclassificationAccountReport {
   shipmentIdsRecovered: number;
   /** `GET /orders/{id}` devolveu 404 — permanece `UNKNOWN`, sem shipment id. */
   leftUnknownOrderNotFound: number;
+  /**
+   * Cursor durável (correção "sem starvation", worker do backend) — onde a
+   * fila 1 (com `external_shipment_id`) parou nesta chamada. Eco do cursor
+   * de ENTRADA (`queue1AfterId`) quando a fila 1 nem chega a rodar (ex.:
+   * conta desconectada). O CHAMADOR (worker) é quem decide persistir isto
+   * entre ticks — este serviço nunca grava cursor em lugar nenhum.
+   */
+  queue1EndCursor: string | null;
+  /** `true` quando o último lote lido da fila 1 nesta chamada veio vazio — cursor alcançou o fim de tudo que hoje é `UNKNOWN` com shipment id, a partir de onde começou. */
+  queue1Exhausted: boolean;
+  /** Mesma semântica de `queue1EndCursor`, para a fila 2 (recuperação, sem `external_shipment_id`). */
+  queue2EndCursor: string | null;
+  /** Mesma semântica de `queue1Exhausted`, para a fila 2. */
+  queue2Exhausted: boolean;
 }
 
 export interface ReclassificationPlanAccountReport extends Pick<
@@ -79,10 +93,24 @@ export interface ReclassificationApplyOptions {
   batchSize?: number;
   /** Teto de consultas `GET /shipments/{id}` desta execução, por conta. */
   maxRequestsPerAccount?: number;
+  /**
+   * Cursor durável de ENTRADA (correção "sem starvation", worker do
+   * backend) — de onde a fila 1/fila 2 devem retomar, em vez de sempre
+   * `null` (início). Só faz sentido com `accountId` de UMA conta específica
+   * — a CLI (múltiplas contas, `accountId: null`) nunca os informa, e o
+   * comportamento sem eles é IDÊNTICO ao de antes desta correção (sempre
+   * começa do zero).
+   */
+  queue1AfterId?: string | null;
+  queue2AfterId?: string | null;
 }
 
 export function emptyAccountReport(
   nickname: string | null,
+  initialCursors: {
+    queue1AfterId?: string | null;
+    queue2AfterId?: string | null;
+  } = {},
 ): ReclassificationAccountReport {
   return {
     nickname,
@@ -99,5 +127,9 @@ export function emptyAccountReport(
     orderDetailRequests: 0,
     shipmentIdsRecovered: 0,
     leftUnknownOrderNotFound: 0,
+    queue1EndCursor: initialCursors.queue1AfterId ?? null,
+    queue1Exhausted: false,
+    queue2EndCursor: initialCursors.queue2AfterId ?? null,
+    queue2Exhausted: false,
   };
 }

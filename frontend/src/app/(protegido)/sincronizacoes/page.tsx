@@ -7,17 +7,27 @@ import {
   fetchAmazonSetupStatus,
   fetchBackfillStatus,
   fetchMarketplaceAccounts,
+  fetchMlLogisticsReclassificationStatus,
   pauseBackfill,
+  pauseMlLogisticsReclassification,
   resumeBackfill,
+  resumeMlLogisticsReclassification,
+  startAllMlLogisticsReclassification,
   startBackfill,
+  startMlLogisticsReclassification,
   syncAmazonOrders,
   syncMercadoLivreOrders,
   syncShopeeOrders,
 } from "@/lib/api";
 import { SyncTable } from "@/components/SyncTable";
 import { BackfillAccountPanel } from "@/components/BackfillAccountPanel";
+import {
+  ACTIVE_ML_RECLASSIFICATION_STATUSES,
+  MlLogisticsReclassificationPanel,
+} from "@/components/MlLogisticsReclassificationPanel";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 import type { BackfillStatusDto } from "@/types/marketplace-backfill";
+import type { MlLogisticsReclassificationAccountStatusDto } from "@/types/ml-logistics-reclassification";
 import type { SyncRun } from "@/types/sync-run";
 
 /** Estados do job em que ele ainda está "andando" (worker do backend). */
@@ -124,6 +134,28 @@ export default function SincronizacoesPage() {
   const [runningAllBackfill, setRunningAllBackfill] = useState(false);
   const backfillActionPendingRef = useRef<Record<string, boolean>>({});
 
+  // "Corrigir histórico Full do Mercado Livre" (correção da auditoria Full,
+  // "Render free sem Shell") — seção SEPARADA de "Completar histórico":
+  // nunca dispara `syncMercadoLivreOrders`/backfill, nunca compartilha
+  // estado com eles. Só contas Mercado Livre conectadas.
+  const [mlReclassAccounts, setMlReclassAccounts] = useState<
+    Array<{ accountId: string; label: string }>
+  >([]);
+  const [mlReclassStatuses, setMlReclassStatuses] = useState<
+    Record<string, MlLogisticsReclassificationAccountStatusDto | null>
+  >({});
+  const [mlReclassLoadErrors, setMlReclassLoadErrors] = useState<
+    Record<string, boolean>
+  >({});
+  const [mlReclassErrors, setMlReclassErrors] = useState<
+    Record<string, string | null>
+  >({});
+  const [mlReclassActionPending, setMlReclassActionPending] = useState<
+    Record<string, boolean>
+  >({});
+  const [runningAllMlReclass, setRunningAllMlReclass] = useState(false);
+  const mlReclassActionPendingRef = useRef<Record<string, boolean>>({});
+
   const loadBackfillStatus = useCallback(async (accountId: string) => {
     try {
       const status = await fetchBackfillStatus(accountId);
@@ -225,6 +257,114 @@ export default function SincronizacoesPage() {
     return () => clearInterval(intervalId);
   }, [anyJobActive, backfillAccounts, loadBackfillStatus]);
 
+  const loadMlReclassStatus = useCallback(async (accountId: string) => {
+    try {
+      const status = await fetchMlLogisticsReclassificationStatus(accountId);
+      setMlReclassStatuses((prev) => ({ ...prev, [accountId]: status }));
+      setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: false }));
+      return status;
+    } catch {
+      setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: true }));
+      return null;
+    }
+  }, []);
+
+  const setMlReclassActionPendingFor = useCallback(
+    (accountId: string, pending: boolean) => {
+      mlReclassActionPendingRef.current = {
+        ...mlReclassActionPendingRef.current,
+        [accountId]: pending,
+      };
+      setMlReclassActionPending(mlReclassActionPendingRef.current);
+    },
+    [],
+  );
+
+  const runMlReclassAction = useCallback(
+    async (
+      accountId: string,
+      action: (
+        id: string,
+      ) => Promise<MlLogisticsReclassificationAccountStatusDto>,
+    ) => {
+      if (mlReclassActionPendingRef.current[accountId]) return;
+      setMlReclassActionPendingFor(accountId, true);
+      setMlReclassErrors((prev) => ({ ...prev, [accountId]: null }));
+      try {
+        const status = await action(accountId);
+        setMlReclassStatuses((prev) => ({ ...prev, [accountId]: status }));
+        setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: false }));
+      } catch (error) {
+        const message =
+          error instanceof ApiFetchError
+            ? error.message
+            : "Não foi possível atualizar a correção de histórico Full.";
+        setMlReclassErrors((prev) => ({ ...prev, [accountId]: message }));
+      } finally {
+        setMlReclassActionPendingFor(accountId, false);
+      }
+    },
+    [setMlReclassActionPendingFor],
+  );
+
+  const handleStartMlReclass = useCallback(
+    (accountId: string) =>
+      runMlReclassAction(accountId, startMlLogisticsReclassification),
+    [runMlReclassAction],
+  );
+  const handlePauseMlReclass = useCallback(
+    (accountId: string) =>
+      runMlReclassAction(accountId, pauseMlLogisticsReclassification),
+    [runMlReclassAction],
+  );
+  const handleResumeMlReclass = useCallback(
+    (accountId: string) =>
+      runMlReclassAction(accountId, resumeMlLogisticsReclassification),
+    [runMlReclassAction],
+  );
+
+  // "Corrigir histórico Full de todas as lojas": só ENFILEIRA (chama
+  // `startAll`) — o worker do backend decide como processar cada conta.
+  async function handleStartAllMlReclass() {
+    if (mlReclassAccounts.length === 0) return;
+    setRunningAllMlReclass(true);
+    try {
+      const statuses = await startAllMlLogisticsReclassification();
+      setMlReclassStatuses((prev) => {
+        const next = { ...prev };
+        for (const status of statuses) next[status.accountId] = status;
+        return next;
+      });
+    } catch {
+      // Erro global não bloqueia o painel individual — cada conta continua
+      // com seus próprios botões/erros.
+    } finally {
+      setRunningAllMlReclass(false);
+    }
+  }
+
+  // Polling leve só para acompanhamento — nunca dirige o processamento (o
+  // worker roda no backend). Continua enquanto QUALQUER conta tiver
+  // RUNNING/WAITING_RETRY; fechar a aba nunca pausa o job.
+  const anyMlReclassActive = mlReclassAccounts.some((account) => {
+    const status = mlReclassStatuses[account.accountId];
+    return (
+      status !== null &&
+      status !== undefined &&
+      ACTIVE_ML_RECLASSIFICATION_STATUSES.includes(status.status)
+    );
+  });
+
+  useEffect(() => {
+    if (!anyMlReclassActive || mlReclassAccounts.length === 0) return;
+    const intervalId = setInterval(() => {
+      mlReclassAccounts.forEach((account) => {
+        void loadMlReclassStatus(account.accountId);
+      });
+    }, BACKFILL_POLL_INTERVAL_MS);
+    return () => clearInterval(intervalId);
+  }, [anyMlReclassActive, mlReclassAccounts, loadMlReclassStatus]);
+
   const loadSyncRuns = useCallback(async () => {
     try {
       const response = await apiFetch("/sync-runs", { method: "GET" });
@@ -321,10 +461,22 @@ export default function SincronizacoesPage() {
       await Promise.all(
         nextBackfillAccounts.map((item) => loadBackfillStatus(item.accountId)),
       );
+
+      // "Corrigir histórico Full do Mercado Livre": só contas ML conectadas
+      // (o recurso não existe para Shopee/Amazon) — rótulo sem prefixo,
+      // igual ao painel de backfill do ML.
+      const nextMlReclassAccounts = connectedMl.map((item) => ({
+        accountId: item.id,
+        label: accountLabel(item),
+      }));
+      setMlReclassAccounts(nextMlReclassAccounts);
+      await Promise.all(
+        nextMlReclassAccounts.map((item) => loadMlReclassStatus(item.accountId)),
+      );
     } catch {
       setRowsLoadError(true);
     }
-  }, [loadBackfillStatus]);
+  }, [loadBackfillStatus, loadMlReclassStatus]);
 
   useEffect(() => {
     void (async () => {
@@ -513,6 +665,70 @@ export default function SincronizacoesPage() {
                 }
                 onResume={() =>
                   void handleResumeBackfill(backfillAccount.accountId)
+                }
+              />
+            ))}
+          </div>
+        )}
+      </section>
+
+      <section className="flex flex-col gap-4 rounded-xl border border-border-subtle bg-surface p-6">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div>
+            <h2 className="text-lg font-semibold">
+              Corrigir histórico Full do Mercado Livre
+            </h2>
+            <p className="mt-1 text-sm text-foreground/60">
+              Classifica retroativamente pedidos com modalidade logística
+              ainda não identificada (UNKNOWN) — diferente de &quot;Completar
+              histórico&quot;, nunca busca vendas novas nem dispara uma
+              sincronização; os pedidos já existem, só a classificação Full é
+              corrigida.
+            </p>
+          </div>
+          {mlReclassAccounts.length > 1 ? (
+            <button
+              type="button"
+              onClick={() => void handleStartAllMlReclass()}
+              disabled={runningAllMlReclass}
+              className="rounded-md border border-brand bg-brand/10 px-4 py-2 text-sm font-semibold text-brand transition-colors hover:bg-brand/20 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              {runningAllMlReclass
+                ? "Iniciando..."
+                : "Corrigir histórico Full de todas as lojas"}
+            </button>
+          ) : null}
+        </div>
+
+        {mlReclassAccounts.length === 0 ? (
+          <p className="text-sm text-foreground/60">
+            Nenhuma conta do Mercado Livre conectada ainda.
+          </p>
+        ) : (
+          <div className="flex flex-col gap-3">
+            {mlReclassAccounts.map((mlReclassAccount) => (
+              <MlLogisticsReclassificationPanel
+                key={mlReclassAccount.accountId}
+                label={mlReclassAccount.label}
+                status={mlReclassStatuses[mlReclassAccount.accountId] ?? null}
+                loadError={
+                  mlReclassLoadErrors[mlReclassAccount.accountId] ?? false
+                }
+                actionPending={
+                  mlReclassActionPending[mlReclassAccount.accountId] ?? false
+                }
+                disabled={runningAllMlReclass}
+                errorMessage={
+                  mlReclassErrors[mlReclassAccount.accountId] ?? null
+                }
+                onStart={() =>
+                  void handleStartMlReclass(mlReclassAccount.accountId)
+                }
+                onPause={() =>
+                  void handlePauseMlReclass(mlReclassAccount.accountId)
+                }
+                onResume={() =>
+                  void handleResumeMlReclass(mlReclassAccount.accountId)
                 }
               />
             ))}

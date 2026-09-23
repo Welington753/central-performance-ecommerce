@@ -36,6 +36,7 @@ import type {
   BackfillChunkResultDto,
   BackfillStatusDto,
 } from "@/types/marketplace-backfill";
+import type { MlLogisticsReclassificationAccountStatusDto } from "@/types/ml-logistics-reclassification";
 
 /**
  * Normaliza a base da API: `undefined`/vazia vira `""` (same-origin,
@@ -598,6 +599,123 @@ export async function runBackfillNextChunk(
     );
   }
   return (await response.json()) as BackfillChunkResultDto;
+}
+
+// Vocabulário fechado dos erros de `MlLogisticsReclassificationController`
+// (correção da auditoria Full, "Render free sem Shell") — nunca o código cru
+// nem detalhe interno.
+export const ML_LOGISTICS_RECLASSIFICATION_ERROR_MESSAGES: Record<
+  string,
+  string
+> = {
+  ACCOUNT_NOT_MERCADO_LIVRE:
+    "Esta conta não é do Mercado Livre — a correção de histórico Full só existe para esse marketplace.",
+};
+
+/**
+ * Reclassificação histórica Full do Mercado Livre (correção da auditoria
+ * Full, "Render free sem Shell") — o worker do BACKEND processa dali em
+ * diante, mesmo com a aba fechada; esta função só consulta/dispara ações,
+ * nunca faz o trabalho de classificação no navegador. Nunca vem token,
+ * `external_shipment_id`, `external_order_id` ou resposta do marketplace
+ * nesta resposta — só contadores e timestamps já sanitizados pelo backend.
+ */
+export async function fetchMlLogisticsReclassificationStatus(
+  accountId: string,
+): Promise<MlLogisticsReclassificationAccountStatusDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/logistics-reclassification/status`,
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível carregar o status da correção de histórico Full.",
+    );
+  }
+  return (await response.json()) as MlLogisticsReclassificationAccountStatusDto;
+}
+
+export async function fetchMlLogisticsReclassificationStatusAll(): Promise<
+  MlLogisticsReclassificationAccountStatusDto[]
+> {
+  const response = await apiFetch(
+    "/marketplace-accounts/mercado-livre/logistics-reclassification/status",
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível carregar o status da correção de histórico Full.",
+    );
+  }
+  return (await response.json()) as MlLogisticsReclassificationAccountStatusDto[];
+}
+
+async function postMlLogisticsReclassificationAction(
+  accountId: string,
+  action: "start" | "pause" | "resume",
+): Promise<MlLogisticsReclassificationAccountStatusDto> {
+  const response = await apiFetch(
+    `/marketplace-accounts/${accountId}/logistics-reclassification/${action}`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    const code = await parseSanitizedErrorCode(response);
+    throw new ApiFetchError(
+      (code && ML_LOGISTICS_RECLASSIFICATION_ERROR_MESSAGES[code]) ||
+        "Não foi possível atualizar a correção de histórico Full agora.",
+      code,
+    );
+  }
+  return (await response.json()) as MlLogisticsReclassificationAccountStatusDto;
+}
+
+export async function startMlLogisticsReclassification(
+  accountId: string,
+): Promise<MlLogisticsReclassificationAccountStatusDto> {
+  return postMlLogisticsReclassificationAction(accountId, "start");
+}
+
+export async function pauseMlLogisticsReclassification(
+  accountId: string,
+): Promise<MlLogisticsReclassificationAccountStatusDto> {
+  return postMlLogisticsReclassificationAction(accountId, "pause");
+}
+
+export async function resumeMlLogisticsReclassification(
+  accountId: string,
+): Promise<MlLogisticsReclassificationAccountStatusDto> {
+  return postMlLogisticsReclassificationAction(accountId, "resume");
+}
+
+async function postMlLogisticsReclassificationAllAction(
+  action: "start" | "pause" | "resume",
+): Promise<MlLogisticsReclassificationAccountStatusDto[]> {
+  const response = await apiFetch(
+    `/marketplace-accounts/mercado-livre/logistics-reclassification/${action}`,
+    { method: "POST" },
+  );
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível atualizar a correção de histórico Full agora.",
+    );
+  }
+  return (await response.json()) as MlLogisticsReclassificationAccountStatusDto[];
+}
+
+export async function startAllMlLogisticsReclassification(): Promise<
+  MlLogisticsReclassificationAccountStatusDto[]
+> {
+  return postMlLogisticsReclassificationAllAction("start");
+}
+
+export async function pauseAllMlLogisticsReclassification(): Promise<
+  MlLogisticsReclassificationAccountStatusDto[]
+> {
+  return postMlLogisticsReclassificationAllAction("pause");
+}
+
+export async function resumeAllMlLogisticsReclassification(): Promise<
+  MlLogisticsReclassificationAccountStatusDto[]
+> {
+  return postMlLogisticsReclassificationAllAction("resume");
 }
 
 /**

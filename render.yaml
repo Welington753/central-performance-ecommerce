@@ -18,6 +18,25 @@
 # sozinho. Mantê-lo "false" junto com o auto-sync foi um erro de blueprint:
 # deixava qualquer backfill manual preso em "Aguardando" para sempre. Fica
 # "true" desde já, mesmo com o auto-sync ainda desligado.
+#
+# `ML_LOGISTICS_RECLASSIFICATION_WORKER_ENABLED` (correção da auditoria
+# Full, "Render free sem Shell") é IGUALMENTE independente das duas flags
+# acima — controla só se o worker processa jobs de "Corrigir histórico Full
+# do Mercado Livre" já criados por ação EXPLÍCITA do usuário em
+# Sincronizações (ver
+# backend/src/integrations/mercado-livre-orders/ml-logistics-reclassification-worker-config.util.ts).
+# Revisão crítica pós-implementação: nenhum job começa sozinho (o worker só
+# processa jobs já criados por clique explícito em "Iniciar"/"Retomar" —
+# `MlLogisticsReclassificationService.start`/`resume` FALHAM com
+# `WORKER_DISABLED` sem essa flag, então nunca existe uma linha "RUNNING"
+# órfã esperando um worker que nunca vai reivindicá-la). Por isso fica
+# "true" desde já, mesmo sendo a primeira vez que este worker roda contra
+# produção (até 20.608 chamadas estimadas pela auditoria — Meli 1: 7.933
+# UNKNOWN, Meli 2: 2.371 UNKNOWN): o botão continua a autorização explícita
+# exigida pelo design §4, por conta, e o orçamento baixo por tick
+# (`ML_LOGISTICS_RECLASSIFICATION_WORKER_MAX_CALLS_PER_TICK`, abaixo) evita
+# qualquer rajada. O padrão code-level continua "false" quando a variável
+# está ausente (nunca liga sozinho fora deste blueprint).
 
 databases:
   - name: cpe-avaliacao-shopee-db
@@ -62,6 +81,24 @@ services:
         value: "false"
       - key: BACKFILL_WORKER_ENABLED
         value: "true"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_ENABLED
+        value: "true"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_TICK_MS
+        value: "8000"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_BATCH_SIZE
+        value: "20"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_MAX_CALLS_PER_TICK
+        value: "20"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_MAX_CONCURRENT_JOBS
+        value: "2"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_LEASE_MS
+        value: "120000"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_RATE_LIMIT_BACKOFF_MS
+        value: "60000"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_PROVIDER_UNAVAILABLE_BACKOFF_MS
+        value: "30000"
+      - key: ML_LOGISTICS_RECLASSIFICATION_WORKER_TOKEN_UNAVAILABLE_BACKOFF_MS
+        value: "30000"
       - key: SHOPEE_ENVIRONMENT
         value: PRODUCTION
       - key: ACCESS_TOKEN_TTL_SECONDS

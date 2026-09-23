@@ -144,6 +144,8 @@ export class MercadoLivreLogisticsReclassificationService {
           },
           batchSize,
           maxRequests,
+          options.queue1AfterId ?? null,
+          options.queue2AfterId ?? null,
         ),
       );
     }
@@ -158,8 +160,13 @@ export class MercadoLivreLogisticsReclassificationService {
     },
     batchSize: number,
     maxRequests: number,
+    queue1AfterId: string | null,
+    queue2AfterId: string | null,
   ): Promise<ReclassificationAccountReport> {
-    const report = emptyAccountReport(account.nickname);
+    const report = emptyAccountReport(account.nickname, {
+      queue1AfterId,
+      queue2AfterId,
+    });
 
     if (account.status !== MarketplaceAccountStatus.CONNECTED) {
       report.outcome = 'SKIPPED_NOT_CONNECTED';
@@ -195,6 +202,7 @@ export class MercadoLivreLogisticsReclassificationService {
         report,
         batchSize,
         maxRequests,
+        startCursor: queue1AfterId,
       });
       // Só tenta o fallback de recuperação se a fila direta terminou de
       // forma NÃO terminal (nunca depois de um abort/parada — o mesmo
@@ -212,7 +220,7 @@ export class MercadoLivreLogisticsReclassificationService {
             shipmentLookup: this.shipmentLookup,
             budgetExhausted: (r) => this.budgetExhausted(r, maxRequests),
           },
-          { report, batchSize },
+          { report, batchSize, startCursor: queue2AfterId },
         );
       }
       return report;
@@ -228,6 +236,17 @@ export class MercadoLivreLogisticsReclassificationService {
     return report.shipmentRequests + report.orderDetailRequests >= maxRequests;
   }
 
+  /**
+   * `startCursor` (correção "sem starvation", worker do backend): em vez de
+   * sempre `null`, o CHAMADOR pode informar de onde retomar — o cursor
+   * durável persistido entre ticks. Sem isto, um tick com orçamento pequeno
+   * SEMPRE reexaminaria os mesmos primeiros pedidos (ordenados por `id`) a
+   * cada chamada; se os primeiros forem permanentemente inválidos
+   * (`not_found`/resposta inválida), pedidos válidos mais adiante na fila
+   * NUNCA seriam alcançados. A CLI (`--apply` de uma vez, orçamento alto)
+   * nunca precisou disto e continua passando `null` (comportamento
+   * idêntico ao de antes desta correção).
+   */
   private async drainShipmentIdQueue(
     marketplaceAccountId: string,
     accessToken: string,
@@ -235,10 +254,11 @@ export class MercadoLivreLogisticsReclassificationService {
       report: ReclassificationAccountReport;
       batchSize: number;
       maxRequests: number;
+      startCursor: string | null;
     },
   ): Promise<void> {
-    const { report, batchSize, maxRequests } = context;
-    let cursor: string | null = null;
+    const { report, batchSize, maxRequests, startCursor } = context;
+    let cursor: string | null = startCursor;
     const transientFailureState = { consecutive: 0 };
 
     for (;;) {
@@ -250,17 +270,23 @@ export class MercadoLivreLogisticsReclassificationService {
       if (batch.length === 0) {
         report.outcome =
           report.ordersExamined === 0 ? 'SKIPPED_NOTHING_PENDING' : 'COMPLETED';
+        report.queue1EndCursor = cursor;
+        report.queue1Exhausted = true;
         return;
       }
 
       for (const order of batch) {
         if (this.budgetExhausted(report, maxRequests)) {
           report.outcome = 'STOPPED_MAX_REQUESTS';
+          report.queue1EndCursor = cursor;
+          report.queue1Exhausted = false;
           return;
         }
 
         // O cursor avança SEMPRE, inclusive quando o pedido continua
-        // `UNKNOWN` — é o que impede laço infinito sobre a mesma linha.
+        // `UNKNOWN` — é o que impede laço infinito sobre a mesma linha
+        // NESTA chamada. Persistido pelo chamador (`queue1EndCursor`),
+        // impede o MESMO laço entre chamadas/ticks também.
         cursor = order.id;
         report.ordersExamined += 1;
         report.shipmentRequests += 1;
@@ -276,7 +302,11 @@ export class MercadoLivreLogisticsReclassificationService {
           repository: this.repository,
           transientFailureState,
         });
-        if (result !== 'CONTINUE') return;
+        if (result !== 'CONTINUE') {
+          report.queue1EndCursor = cursor;
+          report.queue1Exhausted = false;
+          return;
+        }
       }
     }
   }
