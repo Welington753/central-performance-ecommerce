@@ -1,8 +1,7 @@
 "use client";
 
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useRef, useState } from "react";
 import Link from "next/link";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { AdditionalKpiCards } from "@/components/AdditionalKpiCards";
 import { CancellationsPanel } from "@/components/CancellationsPanel";
 import { DailyRevenueChart } from "@/components/DailyRevenueChart";
@@ -11,7 +10,6 @@ import { DateRangeFilter } from "@/components/DateRangeFilter";
 import { EmptyStateIcon } from "@/components/EmptyState";
 import { ExpensesAndResultSection } from "@/components/ExpensesAndResultSection";
 import { FinancialKpiCards } from "@/components/FinancialKpiCards";
-import { FullPerformanceSection } from "@/components/FullPerformanceSection";
 import { KpiSummaryCards } from "@/components/KpiSummaryCards";
 import { LogisticsScopeFilter } from "@/components/LogisticsScopeFilter";
 import { LogisticsScopeCoverageNotice } from "@/components/LogisticsScopeCoverageNotice";
@@ -19,24 +17,16 @@ import { MarketplacePanel } from "@/components/MarketplacePanel";
 import { OperationalKpiCards } from "@/components/OperationalKpiCards";
 import { ProductRankingTabs } from "@/components/ProductRankingTabs";
 import { ScopeFilters } from "@/components/ScopeFilters";
-import {
-  ApiFetchError,
-  UnauthorizedAnalyticsApiError,
-  fetchMarketplaceAnalyticsKpis,
-  syncMercadoLivreOrders,
-} from "@/lib/api";
-import {
-  DATE_RANGE_ERROR_MESSAGES,
-  dateOnlyToString,
-  resolvePreset,
-  validateDateRangeStrings,
-} from "@/lib/date-range";
+import { ApiFetchError, syncMercadoLivreOrders } from "@/lib/api";
 import { formatDateTimeSaoPaulo } from "@/lib/kpi-format";
+import {
+  defaultPeriodStrings,
+  marketplaceSupportsLogisticsScope,
+  useMarketplaceAnalyticsScope,
+} from "@/hooks/useMarketplaceAnalyticsScope";
 import type {
   AccountBreakdownEntry,
   AnalyticsComparison,
-  LogisticsScopeFilter as LogisticsScopeValue,
-  MarketplaceAnalyticsKpisDto,
   MarketplaceFilter,
 } from "@/types/marketplace-analytics";
 
@@ -63,13 +53,6 @@ const EMPTY_COMPARISON: AnalyticsComparison = {
   cancelledUnitsPct: null,
   cancelledRevenuePct: null,
 };
-
-const MARKETPLACE_FILTER_VALUES: MarketplaceFilter[] = [
-  "ALL",
-  "MERCADO_LIVRE",
-  "AMAZON",
-  "SHOPEE",
-];
 
 // Mensagens específicas por código sanitizado devolvido pelo backend (ver
 // `SyncOrdersErrorCode` em `mercado-livre-orders-sync.service.ts`) — nunca
@@ -130,97 +113,6 @@ function ErrorBlock({
   );
 }
 
-type PeriodState =
-  | { kind: "default" }
-  | { kind: "valid"; from: string; to: string }
-  | { kind: "invalid"; message: string };
-
-function readPeriodFromSearchParams(
-  searchParams: URLSearchParams,
-): PeriodState {
-  const from = searchParams.get("from");
-  const to = searchParams.get("to");
-
-  if (!from && !to) return { kind: "default" };
-  if (!from || !to) {
-    return {
-      kind: "invalid",
-      message:
-        'Informe as duas datas ("de" e "até") na URL, ou nenhuma delas.',
-    };
-  }
-  const result = validateDateRangeStrings(from, to);
-  if (!result.valid) {
-    return { kind: "invalid", message: DATE_RANGE_ERROR_MESSAGES[result.error] };
-  }
-  return {
-    kind: "valid",
-    from: dateOnlyToString(result.range.from),
-    to: dateOnlyToString(result.range.to),
-  };
-}
-
-function resolveEffectivePeriod(period: PeriodState): {
-  from: string;
-  to: string;
-} | null {
-  if (period.kind === "invalid") return null;
-  if (period.kind === "valid") return { from: period.from, to: period.to };
-  const defaultRange = resolvePreset("last30");
-  return {
-    from: dateOnlyToString(defaultRange.from),
-    to: dateOnlyToString(defaultRange.to),
-  };
-}
-
-function defaultPeriodStrings(): { from: string; to: string } {
-  const range = resolvePreset("last30");
-  return { from: dateOnlyToString(range.from), to: dateOnlyToString(range.to) };
-}
-
-function readMarketplaceFromParams(searchParams: URLSearchParams): MarketplaceFilter {
-  const raw = searchParams.get("marketplace");
-  if (raw && (MARKETPLACE_FILTER_VALUES as string[]).includes(raw)) {
-    return raw as MarketplaceFilter;
-  }
-  // Seleção inválida (ou ausente) é tratada como o padrão, sem quebrar a tela.
-  return "ALL";
-}
-
-function readAccountIdFromParams(searchParams: URLSearchParams): string | null {
-  return searchParams.get("accountId") || null;
-}
-
-function readAllTimeFromParams(searchParams: URLSearchParams): boolean {
-  return searchParams.get("period") === "all";
-}
-
-const LOGISTICS_SCOPE_VALUES: LogisticsScopeValue[] = ["ALL", "FULL", "NON_FULL"];
-
-/**
- * `FULL`/`NON_FULL` só existem dentro do escopo Mercado Livre ou Shopee
- * (Fase 4, item 2; correção da auditoria Full estendeu à Shopee) — qualquer
- * outro marketplace (ou "Todos os marketplaces") sempre restaura `ALL`,
- * mesmo que a URL traga um valor diferente.
- */
-function marketplaceSupportsLogisticsScope(
-  marketplace: MarketplaceFilter,
-): boolean {
-  return marketplace === "MERCADO_LIVRE" || marketplace === "SHOPEE";
-}
-
-function readLogisticsScopeFromParams(
-  searchParams: URLSearchParams,
-  marketplace: MarketplaceFilter,
-): LogisticsScopeValue {
-  if (!marketplaceSupportsLogisticsScope(marketplace)) return "ALL";
-  const raw = searchParams.get("logistics");
-  if (raw && (LOGISTICS_SCOPE_VALUES as string[]).includes(raw)) {
-    return raw as LogisticsScopeValue;
-  }
-  return "ALL";
-}
-
 function scopeTitle(marketplace: MarketplaceFilter): string {
   switch (marketplace) {
     case "ALL":
@@ -234,86 +126,10 @@ function scopeTitle(marketplace: MarketplaceFilter): string {
   }
 }
 
-/**
- * Marketplace efetivo dos três cartões financeiros (CP2K-8D, item 6): com
- * `marketplace` = ALL e uma conta selecionada, é o marketplace DESSA conta
- * (não "ALL") — nunca finge que uma conta Amazon/Shopee tem dado financeiro
- * só porque o filtro geral está em "Todos".
- */
-function resolveEffectiveMarketplace(
-  marketplace: MarketplaceFilter,
-  accountId: string | null,
-  accounts: AccountBreakdownEntry[],
-): MarketplaceFilter {
-  if (marketplace !== "ALL") return marketplace;
-  if (!accountId) return "ALL";
-  const selected = accounts.find((a) => a.accountId === accountId);
-  return selected ? selected.marketplace : "ALL";
-}
-
 function accountDisplayLabel(account: AccountBreakdownEntry): string {
   if (account.nickname) return account.nickname;
   if (account.externalSellerId) return `Conta ${account.externalSellerId}`;
   return `Conta ${account.accountId.slice(0, 8)}`;
-}
-
-/**
- * Chave canônica do escopo de uma consulta de KPIs (marketplace, conta,
- * tipo de período, `from`/`to`, `allTime` e filtro logístico) — usada para
- * nunca reaproveitar (nem exibir como se fosse atual) um resultado obtido
- * para um escopo diferente. `accountId: null` identifica o slot "sem conta"
- * (visão agregada usada para o painel/dropdown), distinto do slot da conta
- * selecionada.
- */
-function buildScopeKey(input: {
-  marketplace: MarketplaceFilter;
-  accountId: string | null;
-  allTime: boolean;
-  from: string | null;
-  to: string | null;
-  logisticsScope: LogisticsScopeValue;
-}): string {
-  const periodPart = input.allTime
-    ? "ALLTIME"
-    : `RANGE|${input.from ?? ""}|${input.to ?? ""}`;
-  return [
-    input.marketplace,
-    input.accountId ?? "",
-    periodPart,
-    input.logisticsScope,
-  ].join("|");
-}
-
-interface ScopeSlotState {
-  data: MarketplaceAnalyticsKpisDto | null;
-  /** Chave do escopo ao qual `data` pertence (null enquanto nada foi carregado). */
-  dataKey: string | null;
-  /** ISO 8601 de quando `data` foi carregado com sucesso — rótulo "Dados carregados em". */
-  dataLoadedAt: string | null;
-  /** Chave da última requisição concluída (sucesso ou falha), para saber se já há uma resposta assentada para o escopo atual. */
-  lastRequestKey: string | null;
-  lastRequestFailed: boolean;
-  /** 401/403: nunca deve ser tratado como "atualização que falhou, mantém dado antigo". */
-  lastRequestAuthError: boolean;
-  /** Chave da requisição em voo agora, ou null se nenhuma está pendente. */
-  pendingKey: string | null;
-}
-
-const INITIAL_SCOPE_SLOT: ScopeSlotState = {
-  data: null,
-  dataKey: null,
-  dataLoadedAt: null,
-  lastRequestKey: null,
-  lastRequestFailed: false,
-  lastRequestAuthError: false,
-  pendingKey: null,
-};
-
-/** "DD/MM/AAAA às HH:mm" — nunca "DD/MM/AAAA, HH:mm" (formato padrão do Intl pt-BR). */
-function formatLoadedAtLabel(iso: string | null): string | null {
-  const formatted = formatDateTimeSaoPaulo(iso);
-  if (!formatted) return null;
-  return formatted.replace(", ", " às ");
 }
 
 function StaleDataBanner({
@@ -344,350 +160,38 @@ function StaleDataBanner({
 }
 
 function DashboardContent() {
-  const router = useRouter();
-  const pathname = usePathname();
-  const searchParams = useSearchParams();
-
-  const [scopeSlot, setScopeSlot] = useState<ScopeSlotState>(INITIAL_SCOPE_SLOT);
-  const [accountScopedSlot, setAccountScopedSlot] =
-    useState<ScopeSlotState>(INITIAL_SCOPE_SLOT);
-
   const [syncing, setSyncing] = useState(false);
   const [syncError, setSyncError] = useState<string | null>(null);
   const syncingRef = useRef(false);
 
-  // Proteção contra corrida entre requisições (geração monotônica): cada
-  // chamada a `loadScope`/`loadAccountScoped` incrementa seu próprio
-  // contador antes do `fetch` e só aplica `setState` se, quando a resposta
-  // chega, nenhuma chamada mais nova já foi iniciada. Sem isso, trocar
-  // marketplace/conta/período rapidamente permite que uma resposta antiga
-  // (que demorou mais) sobrescreva uma resposta mais nova que já chegou —
-  // tanto com dado stale quanto travando a tela em "Carregando" para sempre
-  // se a mais nova nunca "vencer" a comparação de chave.
-  const scopeRequestSeqRef = useRef(0);
-  const accountScopedRequestSeqRef = useRef(0);
-
-  const period = readPeriodFromSearchParams(searchParams);
-  const effectivePeriod = resolveEffectivePeriod(period);
-  const effectiveFrom = effectivePeriod?.from ?? null;
-  const effectiveTo = effectivePeriod?.to ?? null;
-  const marketplace = readMarketplaceFromParams(searchParams);
-  const accountId = readAccountIdFromParams(searchParams);
-  const allTime = readAllTimeFromParams(searchParams);
-  const logisticsScope = readLogisticsScopeFromParams(searchParams, marketplace);
-
-  const loadScope = useCallback(
-    async (
-      from: string | null,
-      to: string | null,
-      mkt: MarketplaceFilter,
-      allTimeFlag: boolean,
-      logistics: LogisticsScopeValue,
-    ) => {
-      const seq = ++scopeRequestSeqRef.current;
-      const key = buildScopeKey({
-        marketplace: mkt,
-        accountId: null,
-        allTime: allTimeFlag,
-        from,
-        to,
-        logisticsScope: logistics,
-      });
-      setScopeSlot((prev) => ({ ...prev, pendingKey: key }));
-      let outcome:
-        | { data: MarketplaceAnalyticsKpisDto }
-        | { authError: boolean };
-      try {
-        const data = await fetchMarketplaceAnalyticsKpis(
-          allTimeFlag
-            ? { marketplace: mkt, allTime: true, logisticsScope: logistics }
-            : {
-                from: from as string,
-                to: to as string,
-                marketplace: mkt,
-                logisticsScope: logistics,
-              },
-        );
-        outcome = { data };
-      } catch (error) {
-        outcome = { authError: error instanceof UnauthorizedAnalyticsApiError };
-      }
-      // Uma requisição mais nova já começou enquanto esta estava em voo —
-      // esta resposta chegou tarde demais e nunca pode substituir o
-      // escopo atual (nem sucesso, nem erro, nem a chave de carregamento).
-      if (scopeRequestSeqRef.current !== seq) return;
-      if ("data" in outcome) {
-        setScopeSlot((prev) => ({
-          ...prev,
-          data: outcome.data,
-          dataKey: key,
-          dataLoadedAt: new Date().toISOString(),
-          lastRequestKey: key,
-          lastRequestFailed: false,
-          lastRequestAuthError: false,
-          pendingKey: null,
-        }));
-      } else {
-        // Nunca zera `data`/`dataKey` já carregados com sucesso — uma
-        // recarga que falha (ex.: após "Sincronizar agora") deve manter o
-        // último retrato bom na tela com um aviso pontual, nunca apagar
-        // painéis, filtros e o próprio botão de sincronizar por trás de uma
-        // tela de erro em branco. 401/403 é a exceção: nunca deve parecer
-        // que a sessão continua válida.
-        setScopeSlot((prev) => ({
-          ...prev,
-          lastRequestKey: key,
-          lastRequestFailed: true,
-          lastRequestAuthError: outcome.authError,
-          pendingKey: null,
-        }));
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    // Primeira instrução é o `await` dentro de `loadScope` — nenhum
-    // `setState` roda de forma síncrona no corpo deste efeito.
-    if (!allTime && (!effectiveFrom || !effectiveTo)) return;
-    void (async () => {
-      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope);
-    })();
-  }, [effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope, loadScope]);
-
-  const loadAccountScoped = useCallback(
-    async (
-      from: string | null,
-      to: string | null,
-      mkt: MarketplaceFilter,
-      account: string,
-      allTimeFlag: boolean,
-      logistics: LogisticsScopeValue,
-    ) => {
-      const seq = ++accountScopedRequestSeqRef.current;
-      const key = buildScopeKey({
-        marketplace: mkt,
-        accountId: account,
-        allTime: allTimeFlag,
-        from,
-        to,
-        logisticsScope: logistics,
-      });
-      setAccountScopedSlot((prev) => ({ ...prev, pendingKey: key }));
-      let outcome:
-        | { data: MarketplaceAnalyticsKpisDto }
-        | { authError: boolean };
-      try {
-        const data = await fetchMarketplaceAnalyticsKpis(
-          allTimeFlag
-            ? {
-                marketplace: mkt,
-                accountId: account,
-                allTime: true,
-                logisticsScope: logistics,
-              }
-            : {
-                from: from as string,
-                to: to as string,
-                marketplace: mkt,
-                accountId: account,
-                logisticsScope: logistics,
-              },
-        );
-        outcome = { data };
-      } catch (error) {
-        outcome = { authError: error instanceof UnauthorizedAnalyticsApiError };
-      }
-      if (accountScopedRequestSeqRef.current !== seq) return;
-      if ("data" in outcome) {
-        setAccountScopedSlot((prev) => ({
-          ...prev,
-          data: outcome.data,
-          dataKey: key,
-          dataLoadedAt: new Date().toISOString(),
-          lastRequestKey: key,
-          lastRequestFailed: false,
-          lastRequestAuthError: false,
-          pendingKey: null,
-        }));
-      } else {
-        // Mesmo raciocínio de `loadScope` acima: preserva o último dado bom,
-        // exceto em 401/403.
-        setAccountScopedSlot((prev) => ({
-          ...prev,
-          lastRequestKey: key,
-          lastRequestFailed: true,
-          lastRequestAuthError: outcome.authError,
-          pendingKey: null,
-        }));
-      }
-    },
-    [],
-  );
-
-  useEffect(() => {
-    if (!accountId) return;
-    if (!allTime && (!effectiveFrom || !effectiveTo)) return;
-    void (async () => {
-      await loadAccountScoped(
-        effectiveFrom,
-        effectiveTo,
-        marketplace,
-        accountId,
-        allTime,
-        logisticsScope,
-      );
-    })();
-  }, [
-    effectiveFrom,
-    effectiveTo,
+  const {
+    period,
+    effectivePeriod,
     marketplace,
     accountId,
     allTime,
     logisticsScope,
-    loadAccountScoped,
-  ]);
-
-  const periodReady = allTime || (effectiveFrom !== null && effectiveTo !== null);
-  const scopeKey = periodReady
-    ? buildScopeKey({
-        marketplace,
-        accountId: null,
-        allTime,
-        from: effectiveFrom,
-        to: effectiveTo,
-        logisticsScope,
-      })
-    : null;
-  const accountScopeKey =
-    accountId && periodReady
-      ? buildScopeKey({
-          marketplace,
-          accountId,
-          allTime,
-          from: effectiveFrom,
-          to: effectiveTo,
-          logisticsScope,
-        })
-      : null;
-
-  // Cada slot (`scopeSlot`/`accountScopedSlot`) só é considerado "dado
-  // válido" quando `dataKey` bate exatamente com a chave canônica do escopo
-  // atual — nunca reaproveita (nem exibe como se fosse atual) um resultado
-  // obtido para outro marketplace, conta, período ou filtro logístico.
-  const scopeHasValidData = scopeKey !== null && scopeSlot.dataKey === scopeKey;
-  const scopeFetching = scopeKey !== null && scopeSlot.pendingKey === scopeKey;
-  const scopeFailedForKey =
-    scopeKey !== null &&
-    scopeSlot.lastRequestFailed &&
-    scopeSlot.lastRequestKey === scopeKey;
-  const scopeAuthFatal = scopeFailedForKey && scopeSlot.lastRequestAuthError;
-
-  const accountHasValidData =
-    accountScopeKey !== null && accountScopedSlot.dataKey === accountScopeKey;
-  const accountFetching =
-    accountScopeKey !== null && accountScopedSlot.pendingKey === accountScopeKey;
-  const accountFailedForKey =
-    accountScopeKey !== null &&
-    accountScopedSlot.lastRequestFailed &&
-    accountScopedSlot.lastRequestKey === accountScopeKey;
-  const accountAuthFatal = accountFailedForKey && accountScopedSlot.lastRequestAuthError;
-
-  const displaySlot = accountId ? accountScopedSlot : scopeSlot;
-  const displayHasValidData = accountId ? accountHasValidData : scopeHasValidData;
-  const displayFetching = accountId ? accountFetching : scopeFetching;
-  const displayFailedForKey = accountId ? accountFailedForKey : scopeFailedForKey;
-  const displayAuthFatal = accountId ? accountAuthFatal : scopeAuthFatal;
-
-  // Nunca exibe `data` de um `dataKey` que não bate com o escopo atual —
-  // mesmo durante um `pendingKey` de uma nova requisição para outro escopo.
-  const displayData = displayHasValidData ? displaySlot.data : null;
-  const displayLoadedAtLabel = displayHasValidData
-    ? formatLoadedAtLabel(displaySlot.dataLoadedAt)
-    : null;
-  // "Atualização em andamento" (dado válido + nova busca em voo) não deve
-  // reduzir a tela a um spinner — mantém cards/gráficos/rankings visíveis.
-  const displayLoading = displayFetching && !displayHasValidData;
-  const displayUpdating = displayFetching && displayHasValidData;
-  // Aviso de atualização: já existe um resultado válido para este escopo
-  // exato, e a última requisição para essa MESMA chave falhou — nunca por
-  // 401/403 (aí é erro fatal, nunca finge que a sessão continua válida).
-  const displayStaleWarning =
-    !displayFetching && displayHasValidData && displayFailedForKey && !displayAuthFatal;
-  // Erro fatal: a última requisição para esta chave falhou e (a) não há
-  // nenhum resultado válido para o escopo atual, OU (b) foi 401/403 — nesse
-  // caso é sempre fatal, mesmo que `data` ainda bata com a chave atual
-  // (nunca finge que a sessão continua válida por já ter dado em tela).
-  const displayFatalError =
-    !displayFetching &&
-    displayFailedForKey &&
-    (displayAuthFatal || !displayHasValidData);
-
-  function handlePeriodChange(range: { from: string; to: string }) {
-    const params = new URLSearchParams(searchParams.toString());
-    // Escolher um período explícito sempre sai de "Todo o período".
-    params.delete("period");
-    params.set("from", range.from);
-    params.set("to", range.to);
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }
-
-  function handleAllTimeChange() {
-    const params = new URLSearchParams(searchParams.toString());
-    params.set("period", "all");
-    params.delete("from");
-    params.delete("to");
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }
-
-  function handleScopeChange(next: { marketplace: MarketplaceFilter; accountId: string | null }) {
-    const params = new URLSearchParams(searchParams.toString());
-    if (next.marketplace === "ALL") {
-      params.delete("marketplace");
-    } else {
-      params.set("marketplace", next.marketplace);
-    }
-    if (next.accountId) {
-      params.set("accountId", next.accountId);
-    } else {
-      params.delete("accountId");
-    }
-    // Trocar para qualquer marketplace/escopo que não suporte o filtro
-    // logístico (nem Mercado Livre nem Shopee) restaura "Tipo de venda"
-    // para "Todas as vendas" (Fase 4, item 2) — nunca deixa
-    // `logistics=FULL`/`NON_FULL` pendurado na URL fora do escopo em que
-    // faz sentido.
-    if (!marketplaceSupportsLogisticsScope(next.marketplace)) {
-      params.delete("logistics");
-    }
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }
-
-  function handleLogisticsScopeChange(next: LogisticsScopeValue) {
-    const params = new URLSearchParams(searchParams.toString());
-    if (next === "ALL") {
-      params.delete("logistics");
-    } else {
-      params.set("logistics", next);
-    }
-    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
-  }
-
-  async function reloadCurrentScope() {
-    if (!allTime && (!effectiveFrom || !effectiveTo)) return;
-    if (accountId) {
-      await loadAccountScoped(
-        effectiveFrom,
-        effectiveTo,
-        marketplace,
-        accountId,
-        allTime,
-        logisticsScope,
-      );
-    } else {
-      await loadScope(effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope);
-    }
-  }
+    scopeSlot,
+    displayData,
+    displayLoading,
+    displayUpdating,
+    displayStaleWarning,
+    displayFatalError,
+    displayAuthFatal,
+    displayLoadedAtLabel,
+    scopeNeverLoaded,
+    scopeInitialLoading,
+    scopeFailedForKey,
+    dropdownAccounts,
+    scopedAccounts,
+    effectiveFinancialMarketplace,
+    handlePeriodChange,
+    handleAllTimeChange,
+    handleScopeChange,
+    handleLogisticsScopeChange,
+    reloadCurrentScope,
+    retryScopeLoad,
+  } = useMarketplaceAnalyticsScope();
 
   async function handleSync(mlAccountId: string) {
     if (syncingRef.current) return;
@@ -722,13 +226,6 @@ function DashboardContent() {
     </div>
   );
 
-  // Este gate cobre só o carregamento "sem conta" que alimenta o painel de
-  // marketplaces/dropdown de contas — nunca aconteceu nenhum sucesso ainda
-  // (`scopeSlot.data === null`) para NENHUM escopo, nem só o atual.
-  const scopeNeverLoaded = scopeSlot.data === null;
-  const scopeInitialLoading =
-    scopeNeverLoaded && scopeKey !== null && !scopeFailedForKey;
-
   if (scopeInitialLoading) {
     return (
       <div className="flex flex-col gap-8">
@@ -744,10 +241,7 @@ function DashboardContent() {
         {header}
         <ErrorBlock
           message="Não foi possível carregar os dados de marketplaces. Tente novamente mais tarde."
-          onRetry={() =>
-            (allTime || (effectiveFrom && effectiveTo)) &&
-            void loadScope(effectiveFrom, effectiveTo, marketplace, allTime, logisticsScope)
-          }
+          onRetry={retryScopeLoad}
         />
       </div>
     );
@@ -783,7 +277,6 @@ function DashboardContent() {
     );
   }
 
-  const dropdownAccounts = scopeSlot.data?.breakdownByAccount ?? [];
   const breakdownByMarketplace = displayData?.breakdownByMarketplace ?? [];
   // "Integração ativa": a conexão em si está boa (com ou sem dado ainda) —
   // HISTORICAL_ONLY fica de fora porque representa justamente uma conexão
@@ -799,7 +292,6 @@ function DashboardContent() {
     (m) => m.summary !== null,
   ).length;
 
-  const scopedAccounts = displayData?.breakdownByAccount ?? [];
   // "Visão consolidada dos marketplaces" (Fase 4, "cartões por conta ML"):
   // sempre `breakdownByAccountUnscoped`, nunca `breakdownByAccount` — este
   // último é filtrado pelo escopo (marketplace/conta) selecionado acima, e
@@ -813,11 +305,6 @@ function DashboardContent() {
   );
   const historicalAccounts = scopedAccounts.filter(
     (a) => a.availability === "HISTORICAL_ONLY",
-  );
-  const effectiveFinancialMarketplace = resolveEffectiveMarketplace(
-    marketplace,
-    accountId,
-    scopedAccounts,
   );
 
   const lastSyncLabel = displayData
@@ -1038,34 +525,6 @@ function DashboardContent() {
                     />
                   </div>
 
-                  {/*
-                    Correção da auditoria Full: "Mercado Livre Full" e
-                    "Shopee Full" são seções independentes. O backend já
-                    devolve `full`/`shopeeFull: null` fora do escopo certo,
-                    mas o gate aqui é explícito e independente — nenhum
-                    escopo Amazon pode renderizar nenhuma das duas seções, e
-                    nenhuma delas aparece fora do seu próprio marketplace
-                    (exceto em `ALL`, onde as duas podem aparecer lado a
-                    lado). Mesma regra já aplicada ao `LogisticsScopeFilter`
-                    acima.
-                  */}
-                  {displayData.full &&
-                  effectiveFinancialMarketplace !== "AMAZON" &&
-                  effectiveFinancialMarketplace !== "SHOPEE" ? (
-                    <FullPerformanceSection
-                      full={displayData.full}
-                      title="Mercado Livre Full"
-                    />
-                  ) : null}
-                  {displayData.shopeeFull &&
-                  effectiveFinancialMarketplace !== "AMAZON" &&
-                  effectiveFinancialMarketplace !== "MERCADO_LIVRE" ? (
-                    <FullPerformanceSection
-                      full={displayData.shopeeFull}
-                      title="Shopee Full"
-                      description="Pedidos processados pela logística Full da Shopee."
-                    />
-                  ) : null}
                 </div>
               ) : displayData ? (
                 <div className="flex flex-col gap-4">

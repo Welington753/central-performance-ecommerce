@@ -620,77 +620,14 @@ describe("DashboardPage — cartões financeiros (CP2K-8D)", () => {
   });
 });
 
-describe("DashboardPage — Mercado Livre Full / Shopee Full (correção da auditoria Full)", () => {
-  it("ALL: mostra as seções Mercado Livre Full e Shopee Full separadamente", async () => {
+describe("DashboardPage — Full extraído para /full", () => {
+  it("nunca renderiza as seções Mercado Livre Full / Shopee Full, mesmo com dados disponíveis", async () => {
     await renderDashboardWithScope(
       kpisDto({
         scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
         summary: financialSummary(),
         full: fullAggregate(),
         shopeeFull: fullAggregate(),
-      }),
-    );
-
-    expect(
-      screen.getByRole("heading", { name: "Mercado Livre Full" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.getByRole("heading", { name: "Shopee Full" }),
-    ).toBeInTheDocument();
-  });
-
-  it("MERCADO_LIVRE: mostra somente a seção Mercado Livre Full", async () => {
-    mockSearchParams({ marketplace: "MERCADO_LIVRE" });
-    await renderDashboardWithScope(
-      kpisDto({
-        scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: true, logisticsScope: "ALL" },
-        summary: financialSummary(),
-        full: fullAggregate(),
-        shopeeFull: null,
-      }),
-    );
-
-    expect(
-      screen.getByRole("heading", { name: "Mercado Livre Full" }),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "Shopee Full" }),
-    ).not.toBeInTheDocument();
-  });
-
-  it("SHOPEE: mostra somente a seção Shopee Full, sem nenhum texto 'Mercado Livre'", async () => {
-    mockSearchParams({ marketplace: "SHOPEE" });
-    await renderDashboardWithScope(
-      kpisDto({
-        scope: { marketplace: "SHOPEE", accountId: null, allTime: true, logisticsScope: "ALL" },
-        summary: financialSummary(),
-        full: null,
-        shopeeFull: fullAggregate(),
-      }),
-    );
-
-    const shopeeHeading = screen.getByRole("heading", { name: "Shopee Full" });
-    expect(shopeeHeading).toBeInTheDocument();
-    expect(
-      screen.getByText("Pedidos processados pela logística Full da Shopee."),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByRole("heading", { name: "Mercado Livre Full" }),
-    ).not.toBeInTheDocument();
-    // Nenhuma menção a "Mercado Livre" dentro da própria seção Full.
-    const shopeeSection = shopeeHeading.closest("div")?.parentElement;
-    expect(shopeeSection).toBeTruthy();
-    expect(shopeeSection).not.toHaveTextContent(/Mercado Livre/i);
-  });
-
-  it("AMAZON: não mostra nenhuma seção Full", async () => {
-    mockSearchParams({ marketplace: "AMAZON" });
-    await renderDashboardWithScope(
-      kpisDto({
-        scope: { marketplace: "AMAZON", accountId: null, allTime: true, logisticsScope: "ALL" },
-        summary: financialSummary(),
-        full: null,
-        shopeeFull: null,
       }),
     );
 

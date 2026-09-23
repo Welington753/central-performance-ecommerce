@@ -5,6 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { NAV_GROUPS, isNavItemActive } from "@/lib/navigation";
 
 /**
  * Cor institucional vinho da Central de Performance, aplicada aos destaques da
@@ -12,101 +13,6 @@ import { useCurrentUser } from "@/hooks/useCurrentUser";
  * sempre escuro, independentemente do tema claro/escuro do restante da tela.
  */
 const BRAND = "#8C0E33";
-
-type NavIconProps = {
-  className?: string;
-};
-
-function DashboardIcon({ className }: NavIconProps) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <rect x="2.5" y="2.5" width="6" height="6" rx="1.5" />
-      <rect x="11.5" y="2.5" width="6" height="6" rx="1.5" />
-      <rect x="2.5" y="11.5" width="6" height="6" rx="1.5" />
-      <rect x="11.5" y="11.5" width="6" height="6" rx="1.5" />
-    </svg>
-  );
-}
-
-function IntegrationsIcon({ className }: NavIconProps) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path d="M8.5 11.5 6 14a3 3 0 1 1-4.2-4.2l2.5-2.5" />
-      <path d="M11.5 8.5 14 6a3 3 0 1 1 4.2 4.2l-2.5 2.5" />
-      <path d="M7.5 12.5 12.5 7.5" />
-    </svg>
-  );
-}
-
-function SyncIcon({ className }: NavIconProps) {
-  return (
-    <svg
-      className={className}
-      viewBox="0 0 20 20"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="1.5"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      focusable="false"
-    >
-      <path d="M3 10a7 7 0 0 1 11.9-5" />
-      <path d="M17 10a7 7 0 0 1-11.9 5" />
-      <path d="M15 2.5V5h-2.5" />
-      <path d="M5 17.5V15h2.5" />
-    </svg>
-  );
-}
-
-type NavGroup = {
-  title: string;
-  items: Array<{
-    href: string;
-    label: string;
-    Icon: (props: NavIconProps) => React.JSX.Element;
-  }>;
-};
-
-/** Somente rotas que já existem — nenhum item fictício ou "em breve". */
-const NAV_GROUPS: NavGroup[] = [
-  {
-    title: "VISÃO GERAL",
-    items: [{ href: "/dashboard", label: "Dashboard", Icon: DashboardIcon }],
-  },
-  {
-    title: "MARKETPLACES",
-    items: [
-      { href: "/integracoes", label: "Integrações", Icon: IntegrationsIcon },
-    ],
-  },
-  {
-    title: "OPERAÇÃO",
-    items: [
-      { href: "/sincronizacoes", label: "Sincronizações", Icon: SyncIcon },
-    ],
-  },
-];
 
 export function Sidebar() {
   const pathname = usePathname();
@@ -221,17 +127,17 @@ export function Sidebar() {
         <div className="flex-1 overflow-y-auto px-3 py-5">
           {NAV_GROUPS.map((group, groupIndex) => (
             <div
-              key={group.title}
+              key={group.id}
               className={groupIndex > 0 ? "mt-6 border-t border-white/10 pt-5" : ""}
             >
               <p className="px-2 pb-2 text-[11px] font-semibold tracking-widest text-white/40">
                 {group.title}
               </p>
               <ul className="flex flex-col gap-1">
-                {group.items.map(({ href, label, Icon }) => {
-                  const isActive = pathname === href;
+                {group.items.map(({ id, href, label, Icon }) => {
+                  const isActive = isNavItemActive(pathname, href);
                   return (
-                    <li key={href}>
+                    <li key={id}>
                       <Link
                         href={href}
                         onClick={close}
