@@ -1,6 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ApiFetchError,
   apiFetch,
@@ -38,6 +39,14 @@ const ACTIVE_JOB_STATUSES = ["QUEUED", "RUNNING", "RETRY_WAIT"];
 // progresso na tela, nunca dirige o processamento (nenhum loop client-side
 // chamando next-chunk). Fechar a aba nunca pausa o job.
 const BACKFILL_POLL_INTERVAL_MS = 4000;
+
+// Resiliência a cold start do Render/falha temporária de rede (fechamento
+// frontend, correção Full ML) — intervalo normal do polling da
+// reclassificação Full ML e sequência de backoff usada SÓ enquanto a última
+// consulta falhou (rede/timeout/5xx). Nunca aplicado ao backfill acima —
+// escopo estritamente da seção "Corrigir histórico Full do Mercado Livre".
+const ML_RECLASS_POLL_INTERVAL_MS = 4000;
+const ML_RECLASS_RETRY_BACKOFF_MS = [4000, 8000, 15000, 30000];
 
 function isSyncRunArray(value: unknown): value is SyncRun[] {
   return Array.isArray(value);
@@ -98,6 +107,7 @@ const OUTCOME_LABELS: Record<AccountOutcome, string> = {
 };
 
 export default function SincronizacoesPage() {
+  const router = useRouter();
   const [syncRuns, setSyncRuns] = useState<SyncRun[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -155,6 +165,16 @@ export default function SincronizacoesPage() {
   >({});
   const [runningAllMlReclass, setRunningAllMlReclass] = useState(false);
   const mlReclassActionPendingRef = useRef<Record<string, boolean>>({});
+  // Aviso NÃO bloqueante (fechamento frontend, resiliência a cold start) —
+  // último status válido continua na tela; isto só soma um banner acima
+  // dele. Nunca confundido com `mlReclassLoadErrors` (que só bloqueia a
+  // primeira carga, quando ainda não existe nenhum status para mostrar).
+  const [mlReclassConnectionError, setMlReclassConnectionError] =
+    useState(false);
+  const mlReclassPollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  const mlReclassBackoffIndexRef = useRef(0);
 
   const loadBackfillStatus = useCallback(async (accountId: string) => {
     try {
@@ -257,17 +277,32 @@ export default function SincronizacoesPage() {
     return () => clearInterval(intervalId);
   }, [anyJobActive, backfillAccounts, loadBackfillStatus]);
 
-  const loadMlReclassStatus = useCallback(async (accountId: string) => {
-    try {
-      const status = await fetchMlLogisticsReclassificationStatus(accountId);
-      setMlReclassStatuses((prev) => ({ ...prev, [accountId]: status }));
-      setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: false }));
-      return status;
-    } catch {
-      setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: true }));
-      return null;
-    }
-  }, []);
+  // Resultado tipado (fechamento frontend, resiliência a cold start) — o
+  // chamador (polling) precisa distinguir sessão expirada (fluxo dedicado,
+  // nunca retry infinito) de falha transitória (retry com backoff) sem
+  // depender de checar `mlReclassLoadErrors` depois (que é só para a UI).
+  type MlReclassLoadOutcome =
+    | { outcome: "SUCCESS"; status: MlLogisticsReclassificationAccountStatusDto }
+    | { outcome: "UNAUTHENTICATED" }
+    | { outcome: "FAILURE" };
+
+  const loadMlReclassStatus = useCallback(
+    async (accountId: string): Promise<MlReclassLoadOutcome> => {
+      try {
+        const status = await fetchMlLogisticsReclassificationStatus(accountId);
+        setMlReclassStatuses((prev) => ({ ...prev, [accountId]: status }));
+        setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: false }));
+        return { outcome: "SUCCESS", status };
+      } catch (error) {
+        if (error instanceof ApiFetchError && error.code === "UNAUTHENTICATED") {
+          return { outcome: "UNAUTHENTICATED" };
+        }
+        setMlReclassLoadErrors((prev) => ({ ...prev, [accountId]: true }));
+        return { outcome: "FAILURE" };
+      }
+    },
+    [],
+  );
 
   const setMlReclassActionPendingFor = useCallback(
     (accountId: string, pending: boolean) => {
@@ -355,15 +390,121 @@ export default function SincronizacoesPage() {
     );
   });
 
+  const clearMlReclassPollTimeout = useCallback(() => {
+    if (mlReclassPollTimeoutRef.current !== null) {
+      clearTimeout(mlReclassPollTimeoutRef.current);
+      mlReclassPollTimeoutRef.current = null;
+    }
+  }, []);
+
+  /**
+   * Um ciclo de polling da reclassificação Full ML (fechamento frontend,
+   * resiliência a cold start do Render) — SEMPRE consulta todas as contas e
+   * decide sozinho se/quando reagenda o próximo ciclo, em vez de depender de
+   * um `setInterval` fixo:
+   * - 401 em qualquer conta: sessão expirada de verdade — nunca fica
+   *   tentando de novo, segue o mesmo fluxo de `useAuthGuard` (`/login`).
+   * - Falha de rede/timeout/5xx em qualquer conta: último status válido
+   *   permanece na tela (nunca limpo aqui), liga o aviso não bloqueante e
+   *   reagenda com backoff limitado (4s/8s/15s, teto 30s) — nunca dispara
+   *   start/resume, só relê o status.
+   * - Sucesso completo: desliga o aviso, zera o backoff; só reagenda se
+   *   ainda houver conta RUNNING/WAITING_RETRY (senão, o polling encerra
+   *   sozinho, igual ao comportamento anterior baseado em `anyMlReclassActive`).
+   * Único ponto que grava `mlReclassPollTimeoutRef` — nunca dois timers
+   * concorrentes, mesmo entre reagendamentos recursivos e o efeito de
+   * `visibilitychange`/foco abaixo (que sempre limpa antes de chamar de
+   * novo).
+   */
+  // Indireção via ref (nunca a `const` referenciando a si mesma dentro do
+  // próprio corpo) — só assim o reagendamento recursivo abaixo sempre chama
+  // a versão MAIS RECENTE da função, sem o lint de hooks acusar uma
+  // referência insegura a uma variável ainda em inicialização.
+  const pollMlReclassStatusesRef = useRef<() => Promise<void>>(async () => {});
+
+  const pollMlReclassStatuses = useCallback(async () => {
+    if (mlReclassAccounts.length === 0) return;
+    const results = await Promise.all(
+      mlReclassAccounts.map((account) => loadMlReclassStatus(account.accountId)),
+    );
+
+    if (results.some((result) => result.outcome === "UNAUTHENTICATED")) {
+      router.replace("/login");
+      return;
+    }
+
+    const anyFailure = results.some((result) => result.outcome === "FAILURE");
+    setMlReclassConnectionError(anyFailure);
+
+    if (anyFailure) {
+      const index = mlReclassBackoffIndexRef.current;
+      const delay =
+        ML_RECLASS_RETRY_BACKOFF_MS[
+          Math.min(index, ML_RECLASS_RETRY_BACKOFF_MS.length - 1)
+        ];
+      mlReclassBackoffIndexRef.current = Math.min(
+        index + 1,
+        ML_RECLASS_RETRY_BACKOFF_MS.length - 1,
+      );
+      mlReclassPollTimeoutRef.current = setTimeout(
+        () => void pollMlReclassStatusesRef.current(),
+        delay,
+      );
+      return;
+    }
+
+    mlReclassBackoffIndexRef.current = 0;
+    const stillActive = results.some(
+      (result) =>
+        result.outcome === "SUCCESS" &&
+        ACTIVE_ML_RECLASSIFICATION_STATUSES.includes(result.status.status),
+    );
+    if (!stillActive) return;
+
+    mlReclassPollTimeoutRef.current = setTimeout(
+      () => void pollMlReclassStatusesRef.current(),
+      ML_RECLASS_POLL_INTERVAL_MS,
+    );
+  }, [mlReclassAccounts, loadMlReclassStatus, router]);
+
+  useEffect(() => {
+    pollMlReclassStatusesRef.current = pollMlReclassStatuses;
+  }, [pollMlReclassStatuses]);
+
   useEffect(() => {
     if (!anyMlReclassActive || mlReclassAccounts.length === 0) return;
-    const intervalId = setInterval(() => {
-      mlReclassAccounts.forEach((account) => {
-        void loadMlReclassStatus(account.accountId);
-      });
-    }, BACKFILL_POLL_INTERVAL_MS);
-    return () => clearInterval(intervalId);
-  }, [anyMlReclassActive, mlReclassAccounts, loadMlReclassStatus]);
+    mlReclassBackoffIndexRef.current = 0;
+    mlReclassPollTimeoutRef.current = setTimeout(
+      () => void pollMlReclassStatuses(),
+      ML_RECLASS_POLL_INTERVAL_MS,
+    );
+    return clearMlReclassPollTimeout;
+  }, [
+    anyMlReclassActive,
+    mlReclassAccounts,
+    pollMlReclassStatuses,
+    clearMlReclassPollTimeout,
+  ]);
+
+  // Ao voltar para a aba ou focar a janela, consulta IMEDIATAMENTE em vez de
+  // esperar o próximo passo do backoff/intervalo — cancela qualquer timer
+  // pendente antes, para nunca deixar dois em voo ao mesmo tempo.
+  useEffect(() => {
+    if (mlReclassAccounts.length === 0) return;
+
+    function pollNow() {
+      if (document.visibilityState !== "visible") return;
+      clearMlReclassPollTimeout();
+      void pollMlReclassStatuses();
+    }
+
+    document.addEventListener("visibilitychange", pollNow);
+    window.addEventListener("focus", pollNow);
+    return () => {
+      document.removeEventListener("visibilitychange", pollNow);
+      window.removeEventListener("focus", pollNow);
+    };
+  }, [mlReclassAccounts, pollMlReclassStatuses, clearMlReclassPollTimeout]);
 
   const loadSyncRuns = useCallback(async () => {
     try {
@@ -706,13 +847,27 @@ export default function SincronizacoesPage() {
           </p>
         ) : (
           <div className="flex flex-col gap-3">
+            {mlReclassConnectionError ? (
+              <p
+                role="status"
+                className="rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-xs text-amber-700"
+              >
+                Conexão temporariamente indisponível. Tentando novamente...
+              </p>
+            ) : null}
             {mlReclassAccounts.map((mlReclassAccount) => (
               <MlLogisticsReclassificationPanel
                 key={mlReclassAccount.accountId}
                 label={mlReclassAccount.label}
                 status={mlReclassStatuses[mlReclassAccount.accountId] ?? null}
+                // Só bloqueia com "não foi possível carregar" quando NUNCA
+                // houve um status válido para esta conta — se já existe um
+                // (mesmo desatualizado), ele continua na tela e o aviso vira
+                // o banner não bloqueante acima (fechamento frontend,
+                // resiliência a cold start/polling instável).
                 loadError={
-                  mlReclassLoadErrors[mlReclassAccount.accountId] ?? false
+                  (mlReclassLoadErrors[mlReclassAccount.accountId] ?? false) &&
+                  !mlReclassStatuses[mlReclassAccount.accountId]
                 }
                 actionPending={
                   mlReclassActionPending[mlReclassAccount.accountId] ?? false

@@ -6,6 +6,11 @@
 // estilos no mesmo arquivo quebraria um dos dois, já que `jest.mock` é
 // aplicado ao módulo inteiro.
 jest.mock("../src/lib/api");
+// A página usa `useRouter` (fechamento frontend, resiliência a cold start —
+// 401 no polling da reclassificação Full ML redireciona para /login).
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: jest.fn(), push: jest.fn() }),
+}));
 
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";

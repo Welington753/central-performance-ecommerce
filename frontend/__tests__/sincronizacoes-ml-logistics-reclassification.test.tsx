@@ -1,6 +1,11 @@
 // Mesmo padrão de automock documentado em sincronizacoes-backfill.test.tsx.
 jest.mock("../src/lib/api");
 
+const routerReplaceMock = jest.fn();
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: routerReplaceMock, push: jest.fn() }),
+}));
+
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import SincronizacoesPage from "@/app/(protegido)/sincronizacoes/page";
@@ -8,6 +13,20 @@ import * as api from "@/lib/api";
 import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
 import type { MarketplaceAccountDto } from "@/types/marketplace";
 import type { MlLogisticsReclassificationAccountStatusDto } from "@/types/ml-logistics-reclassification";
+
+/**
+ * `jest.mock("../src/lib/api")` automocka a classe `ApiFetchError` — `new
+ * api.ApiFetchError(...)` no automock não roda o construtor real (não seta
+ * `message`/`code`). Reconstrói uma instância que passa em `instanceof
+ * ApiFetchError` com as propriedades reais que a página lê (mesmo padrão
+ * documentado em sincronizacoes-backfill.test.tsx).
+ */
+function fakeApiFetchError(message: string, code?: string): Error {
+  const error = new Error(message);
+  Object.setPrototypeOf(error, api.ApiFetchError.prototype);
+  Object.assign(error, { code, name: "ApiFetchError" });
+  return error;
+}
 
 function account(
   overrides: Partial<MarketplaceAccountDto> = {},
@@ -63,6 +82,7 @@ function mlReclassStatus(
 
 beforeEach(() => {
   jest.resetAllMocks();
+  routerReplaceMock.mockClear();
   (api.apiFetch as jest.Mock).mockResolvedValue({
     ok: true,
     status: 200,
@@ -301,5 +321,206 @@ describe("SincronizacoesPage — Corrigir histórico Full do Mercado Livre", () 
 
     expect(api.syncMercadoLivreOrders).not.toHaveBeenCalled();
     expect(api.startBackfill).not.toHaveBeenCalled();
+  });
+
+  describe("resiliência a cold start do Render / falha temporária de polling", () => {
+    it("preserva o último status válido e mostra o aviso não bloqueante quando a consulta falha por rede", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        account({ id: "ml-1" }),
+      ]);
+      (api.fetchMlLogisticsReclassificationStatus as jest.Mock)
+        .mockResolvedValueOnce(
+          mlReclassStatus({ status: "RUNNING", resolvedFullCount: 5 }),
+        )
+        .mockRejectedValueOnce(fakeApiFetchError("Falha de conexão."));
+
+      render(<SincronizacoesPage />);
+      const panel = await screen.findByTestId(
+        "ml-logistics-reclassification-panel-Meli 1",
+      );
+      expect(within(panel).getByText("5")).toBeInTheDocument();
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(4000);
+      });
+
+      // Último status válido continua na tela — nunca some/zera.
+      expect(within(panel).getByText("5")).toBeInTheDocument();
+      expect(
+        screen.getByText(/conexão temporariamente indisponível/i),
+      ).toBeInTheDocument();
+      // Nunca a mensagem bloqueante de "não foi possível carregar" — já
+      // existe um status válido para esta conta.
+      expect(
+        within(panel).queryByText(/não foi possível carregar/i),
+      ).not.toBeInTheDocument();
+    });
+
+    it("recupera o polling automaticamente com backoff limitado, sem depender de atualização manual", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        account({ id: "ml-1" }),
+      ]);
+      (api.fetchMlLogisticsReclassificationStatus as jest.Mock)
+        .mockResolvedValueOnce(mlReclassStatus({ status: "RUNNING" }))
+        .mockRejectedValueOnce(fakeApiFetchError("Falha de conexão."))
+        .mockRejectedValueOnce(fakeApiFetchError("Falha de conexão."))
+        .mockResolvedValue(
+          mlReclassStatus({ status: "RUNNING", resolvedFullCount: 7 }),
+        );
+
+      render(<SincronizacoesPage />);
+      await screen.findByTestId("ml-logistics-reclassification-panel-Meli 1");
+
+      // Primeira falha — o aviso não bloqueante aparece.
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(4001);
+      });
+      expect(
+        screen.getByText(/conexão temporariamente indisponível/i),
+      ).toBeInTheDocument();
+
+      // Backoff LIMITADO (nunca imediato para sempre): tempo suficiente para
+      // a segunda falha e a recuperação subsequente, dentro do teto de 30s.
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(30000);
+      });
+
+      await waitFor(() =>
+        expect(
+          screen.queryByText(/conexão temporariamente indisponível/i),
+        ).not.toBeInTheDocument(),
+      );
+      const panel = await screen.findByTestId(
+        "ml-logistics-reclassification-panel-Meli 1",
+      );
+      expect(within(panel).getByText("7")).toBeInTheDocument();
+    });
+
+    it("nunca cria timers duplicados durante retries com backoff (só uma chamada por ciclo agendado)", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        account({ id: "ml-1" }),
+      ]);
+      (api.fetchMlLogisticsReclassificationStatus as jest.Mock)
+        .mockResolvedValueOnce(mlReclassStatus({ status: "RUNNING" }))
+        .mockRejectedValueOnce(fakeApiFetchError("Falha de conexão."))
+        .mockResolvedValue(mlReclassStatus({ status: "RUNNING" }));
+
+      render(<SincronizacoesPage />);
+      await screen.findByTestId("ml-logistics-reclassification-panel-Meli 1");
+
+      // Cobre o ciclo inicial (4s) que falha e o retry de backoff (4s) que
+      // sucede — se houvesse um segundo timer concorrente (ex.: o antigo
+      // `setInterval` fixo ainda vivo junto do novo esquema de backoff), o
+      // número de chamadas seria maior que 3 já aqui.
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(8001);
+      });
+      const callsAfterRecovery = (
+        api.fetchMlLogisticsReclassificationStatus as jest.Mock
+      ).mock.calls.length;
+      expect(callsAfterRecovery).toBe(3);
+
+      // Uma janela BEM curta, insuficiente para o próximo ciclo normal
+      // (4s) — nenhuma chamada extra deve aparecer aqui; se houvesse um
+      // timer duplicado disparando fora de sincronia, apareceria.
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(2000);
+      });
+      expect(
+        (api.fetchMlLogisticsReclassificationStatus as jest.Mock).mock.calls
+          .length,
+      ).toBe(callsAfterRecovery);
+    });
+
+    it("consulta imediatamente ao voltar para a aba (visibilitychange), sem esperar o próximo ciclo", async () => {
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        account({ id: "ml-1" }),
+      ]);
+      (api.fetchMlLogisticsReclassificationStatus as jest.Mock).mockResolvedValue(
+        mlReclassStatus({ status: "RUNNING", resolvedFullCount: 3 }),
+      );
+
+      render(<SincronizacoesPage />);
+      await screen.findByTestId("ml-logistics-reclassification-panel-Meli 1");
+
+      const callsBefore = (
+        api.fetchMlLogisticsReclassificationStatus as jest.Mock
+      ).mock.calls.length;
+
+      Object.defineProperty(document, "visibilityState", {
+        value: "visible",
+        configurable: true,
+      });
+      await act(async () => {
+        document.dispatchEvent(new Event("visibilitychange"));
+      });
+
+      await waitFor(() =>
+        expect(
+          (api.fetchMlLogisticsReclassificationStatus as jest.Mock).mock.calls
+            .length,
+        ).toBeGreaterThan(callsBefore),
+      );
+    });
+
+    it("401 no polling segue o fluxo de sessão expirada (redireciona para /login), nunca fica tentando de novo sozinho", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        account({ id: "ml-1" }),
+      ]);
+      (api.fetchMlLogisticsReclassificationStatus as jest.Mock)
+        .mockResolvedValueOnce(mlReclassStatus({ status: "RUNNING" }))
+        .mockRejectedValueOnce(
+          fakeApiFetchError("Sessão expirada.", "UNAUTHENTICATED"),
+        );
+
+      render(<SincronizacoesPage />);
+      await screen.findByTestId("ml-logistics-reclassification-panel-Meli 1");
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(4000);
+      });
+
+      expect(routerReplaceMock).toHaveBeenCalledWith("/login");
+
+      const callsAfterRedirect = (
+        api.fetchMlLogisticsReclassificationStatus as jest.Mock
+      ).mock.calls.length;
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(60000);
+      });
+      // Nunca continua tentando depois de detectar sessão expirada.
+      expect(
+        (api.fetchMlLogisticsReclassificationStatus as jest.Mock).mock.calls
+          .length,
+      ).toBe(callsAfterRedirect);
+    });
+
+    it("nunca dispara start/resume durante o retry do polling", async () => {
+      jest.useFakeTimers();
+      (api.fetchMarketplaceAccounts as jest.Mock).mockResolvedValue([
+        account({ id: "ml-1" }),
+      ]);
+      (api.fetchMlLogisticsReclassificationStatus as jest.Mock)
+        .mockResolvedValueOnce(mlReclassStatus({ status: "RUNNING" }))
+        .mockRejectedValueOnce(fakeApiFetchError("Falha de conexão."))
+        .mockResolvedValue(mlReclassStatus({ status: "RUNNING" }));
+
+      render(<SincronizacoesPage />);
+      await screen.findByTestId("ml-logistics-reclassification-panel-Meli 1");
+
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(4000);
+      });
+      await act(async () => {
+        await jest.advanceTimersByTimeAsync(8000);
+      });
+
+      expect(api.startMlLogisticsReclassification).not.toHaveBeenCalled();
+      expect(api.resumeMlLogisticsReclassification).not.toHaveBeenCalled();
+    });
   });
 });

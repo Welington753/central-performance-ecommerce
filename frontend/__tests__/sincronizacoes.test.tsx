@@ -1,3 +1,9 @@
+// A página usa `useRouter` (fechamento frontend, resiliência a cold start —
+// 401 no polling da reclassificação Full ML redireciona para /login).
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: jest.fn(), push: jest.fn() }),
+}));
+
 import { render, screen, waitFor } from "@testing-library/react";
 import SincronizacoesPage from "@/app/(protegido)/sincronizacoes/page";
 

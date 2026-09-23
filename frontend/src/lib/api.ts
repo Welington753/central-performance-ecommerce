@@ -620,12 +620,23 @@ export const ML_LOGISTICS_RECLASSIFICATION_ERROR_MESSAGES: Record<
  * `external_shipment_id`, `external_order_id` ou resposta do marketplace
  * nesta resposta — só contadores e timestamps já sanitizados pelo backend.
  */
+/**
+ * Fechamento frontend (resiliência a cold start/polling instável): `code:
+ * "UNAUTHENTICATED"` distingue sessão expirada (fluxo dedicado — nunca
+ * retry infinito) de falha transitória (rede/timeout/5xx — a página tenta
+ * de novo sozinha com backoff). Nunca lança para outros erros de rede: a
+ * própria `apiFetch` já lança `ApiFetchError` genérico nesse caso, tratado
+ * do mesmo jeito pelo chamador.
+ */
 export async function fetchMlLogisticsReclassificationStatus(
   accountId: string,
 ): Promise<MlLogisticsReclassificationAccountStatusDto> {
   const response = await apiFetch(
     `/marketplace-accounts/${accountId}/logistics-reclassification/status`,
   );
+  if (response.status === 401) {
+    throw new ApiFetchError("Sessão expirada. Entre novamente.", "UNAUTHENTICATED");
+  }
   if (!response.ok) {
     throw new ApiFetchError(
       "Não foi possível carregar o status da correção de histórico Full.",

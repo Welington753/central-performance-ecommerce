@@ -1,5 +1,12 @@
 // Mesmo padrão de automock documentado em sincronizacoes-sync-all.test.tsx.
 jest.mock("../src/lib/api");
+// A página agora usa `useRouter` (fechamento frontend, resiliência a cold
+// start — 401 no polling da reclassificação Full ML redireciona para
+// /login). Nenhum teste deste arquivo exercita esse caminho, só precisa do
+// mock para a página montar.
+jest.mock("next/navigation", () => ({
+  useRouter: () => ({ replace: jest.fn(), push: jest.fn() }),
+}));
 
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
