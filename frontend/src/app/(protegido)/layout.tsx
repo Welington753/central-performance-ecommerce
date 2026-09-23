@@ -30,5 +30,33 @@ export default function ProtectedLayout({
     return null;
   }
 
+  if (status === "forbidden") {
+    return (
+      <div className="flex flex-1 items-center justify-center px-6 py-24">
+        <p className="text-sm text-foreground/70">
+          Você está autenticado, mas não tem permissão para acessar esta
+          área.
+        </p>
+      </div>
+    );
+  }
+
+  if (status === "reconnecting") {
+    return (
+      <div className="flex flex-1 items-center justify-center px-6 py-24">
+        <div className="flex flex-col items-center gap-3 text-center">
+          <span
+            className="h-8 w-8 animate-spin rounded-full border-2 border-border-subtle border-t-brand"
+            role="status"
+            aria-label="Reconectando ao servidor"
+          />
+          <p className="text-sm text-foreground/70">
+            Reconectando ao servidor...
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return <AppShell>{children}</AppShell>;
 }

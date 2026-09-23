@@ -90,16 +90,111 @@ async function parseSanitizedErrorCode(
  * (backend indisponível, DNS, CORS bloqueado, etc.), para que o chamador
  * trate esse caso separadamente sem expor detalhes internos na UI.
  */
+// Timeout padrão por chamada — conservador o bastante para não interromper
+// operações legítimas mais longas (o backend já limita a duração de cada
+// requisição de sincronização/backfill a um único chunk por design), mas
+// finito: nenhuma chamada trava indefinidamente esperando o Render acordar.
+const DEFAULT_TIMEOUT_MS = 30_000;
+
+// Nunca dispara refresh automático nestas rotas — evita recursão
+// (`/auth/refresh` chamando a si mesma) e nunca tenta renovar sessão em
+// fluxos que precisam do 401 "crú" (login ainda sem sessão, logout, health
+// check público).
+const REFRESH_EXEMPT_PATHS = [
+  "/auth/login",
+  "/auth/refresh",
+  "/auth/logout",
+  "/health",
+];
+
+function isRefreshExemptPath(path: string): boolean {
+  return REFRESH_EXEMPT_PATHS.some(
+    (exempt) => path === exempt || path.startsWith(`${exempt}?`),
+  );
+}
+
+// Single-flight: várias chamadas concorrentes que recebem 401 compartilham
+// esta MESMA promessa em voo — o backend rotaciona a sessão a cada refresh
+// (`AuthService.refresh`), então duas chamadas a `/auth/refresh` em paralelo
+// invalidariam uma à outra.
+let refreshPromise: Promise<"REFRESHED" | "EXPIRED"> | null = null;
+
+async function performRefresh(): Promise<"REFRESHED" | "EXPIRED"> {
+  let response: Response;
+  try {
+    response = await apiFetch("/auth/refresh", { method: "POST" });
+  } catch {
+    // Rede/timeout durante o refresh — nunca equivalente a sessão expirada.
+    throw new ApiFetchError(
+      "Não foi possível renovar a sessão agora. Tente novamente em instantes.",
+      "REFRESH_UNAVAILABLE",
+    );
+  }
+  if (response.status === 401) {
+    return "EXPIRED";
+  }
+  if (!response.ok) {
+    throw new ApiFetchError(
+      "Não foi possível renovar a sessão agora. Tente novamente em instantes.",
+      "REFRESH_UNAVAILABLE",
+    );
+  }
+  return "REFRESHED";
+}
+
+function refreshSession(): Promise<"REFRESHED" | "EXPIRED"> {
+  if (!refreshPromise) {
+    refreshPromise = performRefresh().finally(() => {
+      refreshPromise = null;
+    });
+  }
+  return refreshPromise;
+}
+
+/**
+ * Cliente HTTP central (ver comentário do arquivo). `timeoutMs` é
+ * configurável por chamada (padrão `DEFAULT_TIMEOUT_MS`) — cada chamada tem
+ * seu próprio `AbortController`, nunca depende do timeout implícito do
+ * navegador. `isRetryAfterRefresh` é uso interno (evita um segundo refresh
+ * caso a repetição pós-refresh também volte 401).
+ *
+ * Em 401 de uma rota protegida (fora de `REFRESH_EXEMPT_PATHS`), tenta uma
+ * única renovação via `/auth/refresh` e repete esta chamada exatamente uma
+ * vez se a renovação funcionar. Se a renovação vier 401 explícito, devolve o
+ * 401 original (sessão realmente expirada). Se a renovação falhar por
+ * rede/timeout/5xx, lança `ApiFetchError` com `code: "REFRESH_UNAVAILABLE"`
+ * — nunca equivalente a sessão expirada.
+ */
 export async function apiFetch(
   path: string,
   options: RequestInit = {},
+  timeoutMs: number = DEFAULT_TIMEOUT_MS,
+  isRetryAfterRefresh = false,
 ): Promise<Response> {
   const url = `${API_BASE_URL}${path}`;
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
+  // O `AbortSignal` do chamador, se houver, nunca é descartado pelo timeout
+  // interno — abortar o dele também aborta o nosso `controller` (que é o
+  // único `signal` de fato passado ao `fetch` abaixo).
+  const callerSignal = options.signal;
+  if (callerSignal) {
+    if (callerSignal.aborted) {
+      controller.abort();
+    } else {
+      callerSignal.addEventListener("abort", () => controller.abort(), {
+        once: true,
+      });
+    }
+  }
+
+  let response: Response;
   try {
-    return await fetch(url, {
+    response = await fetch(url, {
       ...options,
       credentials: "include",
+      signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
         ...(options.headers ?? {}),
@@ -109,7 +204,23 @@ export async function apiFetch(
     throw new ApiFetchError(
       "Não foi possível se comunicar com o servidor. Tente novamente mais tarde.",
     );
+  } finally {
+    clearTimeout(timeoutId);
   }
+
+  if (
+    response.status === 401 &&
+    !isRetryAfterRefresh &&
+    !isRefreshExemptPath(path)
+  ) {
+    const outcome = await refreshSession();
+    if (outcome === "EXPIRED") {
+      return response;
+    }
+    return apiFetch(path, options, timeoutMs, true);
+  }
+
+  return response;
 }
 
 export async function fetchMarketplaceAccounts(): Promise<

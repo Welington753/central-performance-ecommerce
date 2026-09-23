@@ -12,7 +12,7 @@ const INVALID_CREDENTIALS_MESSAGE = "E-mail ou senha inválidos.";
 const TEMPORARY_UNAVAILABLE_MESSAGE =
   "Serviço temporariamente indisponível. Tente novamente em instantes.";
 const STARTING_SERVER_MESSAGE =
-  "Iniciando servidor. Isso pode levar até 1 minuto...";
+  "Iniciando servidor. No plano gratuito, isso pode levar mais de 1 minuto...";
 
 // Cold start do Render free (mesmo racional do worker do backend) — poucas
 // tentativas rápidas no início, depois espaçadas, nunca imediatas para
@@ -47,7 +47,10 @@ export default function LoginPage() {
 
     async function checkHealth() {
       try {
-        const response = await apiFetch("/health", { method: "GET" });
+        const response = await apiFetch("/health", {
+          method: "GET",
+          cache: "no-store",
+        });
         if (!isActive) return;
         if (
           response.status === 502 ||
