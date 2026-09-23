@@ -116,6 +116,9 @@ export function toMarketplaceAnalyticsResponse(
     },
     lastSync: aggregate.lastSync ? aggregate.lastSync.toISOString() : null,
     full: aggregate.full ? toFullAggregate(aggregate.full) : null,
+    shopeeFull: aggregate.shopeeFull
+      ? toFullAggregate(aggregate.shopeeFull)
+      : null,
   };
 }
 

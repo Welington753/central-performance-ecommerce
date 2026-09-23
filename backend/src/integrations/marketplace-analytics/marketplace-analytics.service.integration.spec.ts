@@ -2141,6 +2141,284 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
     });
   });
 
+  describe('Shopee Full (correção da auditoria Full)', () => {
+    it('a paid Shopee Full order counts in shopeeFull.summary — never leaks into full (Mercado Livre)', async () => {
+      const shopeeAccountId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-full-1',
+        status: 'paid',
+        totalAmount: '300.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [
+          {
+            externalItemId: 'SHP1',
+            sellerSku: 'SKU-SHOPEE-FULL',
+            title: 'Produto Shopee Full',
+            quantity: 3,
+            unitPrice: '100.00',
+          },
+        ],
+      });
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-seller-1',
+        status: 'paid',
+        totalAmount: '90.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [],
+      });
+
+      const dto = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: shopeeAccountId },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(dto.shopeeFull?.summary?.paidOrders).toBe(1);
+      expect(dto.shopeeFull?.summary?.paidRevenue).toBe('300.00');
+      expect(dto.shopeeFull?.summary?.paidUnits).toBe(3);
+      // Faturamento pago total no escopo Shopee é 390.00 — participação do
+      // Full = 300/390.
+      expect(dto.shopeeFull?.summary?.shareOfPaidRevenuePct).toBeCloseTo(
+        76.9,
+        1,
+      );
+      // `full` (Mercado Livre) continua null — nenhuma conta ML no escopo.
+      expect(dto.full).toBeNull();
+    });
+
+    it('with marketplace=ALL, full (Mercado Livre) and shopeeFull are computed and reported separately — never summed into one field', async () => {
+      const mlAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      const shopeeAccountId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      const amazonAccountId = await seedAccount({
+        marketplace: Marketplace.AMAZON,
+      });
+
+      await seedOrder({
+        accountId: mlAccountId,
+        externalOrderId: 'ml-full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-full-1',
+        status: 'paid',
+        totalAmount: '250.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      // Pedido Amazon: `logistics_classification` é `UNKNOWN` por
+      // construção — nunca deve aparecer em nenhum dos dois denominadores.
+      await seedOrder({
+        accountId: amazonAccountId,
+        externalOrderId: 'amz-1',
+        status: 'paid',
+        totalAmount: '900.00',
+        dateCreated: IN_CURRENT,
+        items: [],
+      });
+
+      const dto = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate({}, REFERENCE_NOW),
+      );
+
+      expect(dto.full?.summary?.paidRevenue).toBe('100.00');
+      expect(dto.full?.totalSummary?.paidRevenue).toBe('100.00');
+      expect(dto.shopeeFull?.summary?.paidRevenue).toBe('250.00');
+      expect(dto.shopeeFull?.totalSummary?.paidRevenue).toBe('250.00');
+    });
+
+    it('shopeeFull denominator/coverage never includes Mercado Livre or Amazon orders', async () => {
+      const shopeeAccountId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      const mlAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-full-1',
+        status: 'paid',
+        totalAmount: '120.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: mlAccountId,
+        externalOrderId: 'ml-unknown-1',
+        status: 'paid',
+        totalAmount: '5000.00',
+        dateCreated: IN_CURRENT,
+        // UNKNOWN por construção — nunca deve diluir a cobertura do Shopee.
+        items: [],
+      });
+
+      const dto = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: shopeeAccountId },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(dto.shopeeFull?.coverage).toBe('complete');
+      expect(dto.shopeeFull?.classifiedOrders).toBe(1);
+      expect(dto.shopeeFull?.unclassifiedOrders).toBe(0);
+      expect(dto.shopeeFull?.summary?.shareOfPaidRevenuePct).toBe(100);
+    });
+
+    it("restricts shopeeFull to a single Shopee account when one is selected — never leaks another account's total", async () => {
+      const firstShopeeId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      const secondShopeeId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+
+      await seedOrder({
+        accountId: firstShopeeId,
+        externalOrderId: 'shopee1-full',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: secondShopeeId,
+        externalOrderId: 'shopee2-full',
+        status: 'paid',
+        totalAmount: '70.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const scopedFirst = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: firstShopeeId },
+          REFERENCE_NOW,
+        ),
+      );
+      const scopedSecond = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: secondShopeeId },
+          REFERENCE_NOW,
+        ),
+      );
+      const consolidated = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { marketplace: Marketplace.SHOPEE },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(scopedFirst.shopeeFull?.summary?.paidRevenue).toBe('100.00');
+      expect(scopedSecond.shopeeFull?.summary?.paidRevenue).toBe('70.00');
+      expect(consolidated.shopeeFull?.summary?.paidRevenue).toBe('170.00');
+    });
+
+    it('an UNKNOWN Shopee order counts toward unclassifiedOrders and never appears as "sem Full" (SELLER_FULFILLED)', async () => {
+      const shopeeAccountId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-unknown-1',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'UNKNOWN',
+        items: [],
+      });
+
+      const dto = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId: shopeeAccountId },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(dto.shopeeFull?.classifiedOrders).toBe(1);
+      expect(dto.shopeeFull?.unclassifiedOrders).toBe(1);
+      expect(dto.shopeeFull?.coverage).toBe('partial');
+      // Nunca contado como "sem Full" — o grupo `nonFullSummary` não inclui
+      // o pedido UNKNOWN.
+      expect(dto.shopeeFull?.nonFullSummary).toBeNull();
+      expect(dto.shopeeFull?.unknownSummary?.paidRevenue).toBe('50.00');
+    });
+
+    it('full (Mercado Livre) is null when scope is Shopee-only, and shopeeFull is null when scope is Mercado-Livre-only', async () => {
+      const shopeeAccountId = await seedAccount({
+        marketplace: Marketplace.SHOPEE,
+      });
+      const mlAccountId = await seedAccount({
+        marketplace: Marketplace.MERCADO_LIVRE,
+      });
+      await seedOrder({
+        accountId: shopeeAccountId,
+        externalOrderId: 'shopee-full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId: mlAccountId,
+        externalOrderId: 'ml-full-1',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+
+      const shopeeScoped = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { marketplace: Marketplace.SHOPEE },
+          REFERENCE_NOW,
+        ),
+      );
+      const mlScoped = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { marketplace: Marketplace.MERCADO_LIVRE },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(shopeeScoped.shopeeFull).not.toBeNull();
+      expect(shopeeScoped.full).toBeNull();
+      expect(mlScoped.full).not.toBeNull();
+      expect(mlScoped.shopeeFull).toBeNull();
+    });
+  });
+
   describe('logisticsScope (Fase 4, "Full x sem Full")', () => {
     async function seedThreeGroupOrders(accountId: string) {
       await seedOrder({
@@ -2258,6 +2536,44 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
           REFERENCE_NOW,
         ),
       ).rejects.toBeInstanceOf(MarketplaceAnalyticsFilterError);
+    });
+
+    it('accepts FULL/NON_FULL when marketplace is SHOPEE (Shopee Full)', async () => {
+      const accountId = await seedAccount({ marketplace: Marketplace.SHOPEE });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'shopee-full',
+        status: 'paid',
+        totalAmount: '100.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'MARKETPLACE_FULFILLED',
+        items: [],
+      });
+      await seedOrder({
+        accountId,
+        externalOrderId: 'shopee-seller',
+        status: 'paid',
+        totalAmount: '50.00',
+        dateCreated: IN_CURRENT,
+        logisticsClassification: 'SELLER_FULFILLED',
+        items: [],
+      });
+
+      const full = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId, marketplace: 'SHOPEE', logisticsScope: 'FULL' },
+          REFERENCE_NOW,
+        ),
+      );
+      const nonFull = toMarketplaceAnalyticsResponse(
+        await analyticsService.getAggregate(
+          { accountId, marketplace: 'SHOPEE', logisticsScope: 'NON_FULL' },
+          REFERENCE_NOW,
+        ),
+      );
+
+      expect(full.summary?.grossRevenue).toBe('100.00');
+      expect(nonFull.summary?.grossRevenue).toBe('50.00');
     });
 
     it('rejects an unknown logisticsScope value', async () => {

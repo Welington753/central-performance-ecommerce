@@ -88,6 +88,7 @@ function kpisDto(
     },
     lastSync: null,
     full: null,
+    shopeeFull: null,
     ...overrides,
   };
 }
@@ -120,6 +121,36 @@ function financialSummary(overrides: Partial<AnalyticsSummary> = {}): AnalyticsS
     knownAdjustmentsPctOfGrossRevenue: 5,
     resultAfterKnownAdjustments: "95.00",
     marginAfterKnownAdjustmentsPct: 95,
+    ...overrides,
+  };
+}
+
+function fullAggregate(
+  overrides: Partial<import("@/types/marketplace-analytics").MarketplaceAnalyticsFull> = {},
+): import("@/types/marketplace-analytics").MarketplaceAnalyticsFull {
+  const group = {
+    grossSalesRevenue: "300.00",
+    grossSalesOrders: 3,
+    grossSalesUnits: 3,
+    paidRevenue: "300.00",
+    paidOrders: 3,
+    paidUnits: 3,
+    averageTicket: "100.00",
+    cancelledOrders: 0,
+    cancelledUnits: 0,
+    cancelledRevenue: "0.00",
+  };
+  return {
+    coverage: "complete",
+    classifiedOrders: 3,
+    unclassifiedOrders: 0,
+    summary: { ...group, shareOfPaidRevenuePct: 100, shareOfPaidUnitsPct: 100 },
+    comparison: null,
+    dailySeries: [],
+    ranking: [],
+    nonFullSummary: null,
+    unknownSummary: null,
+    totalSummary: group,
     ...overrides,
   };
 }
@@ -586,5 +617,127 @@ describe("DashboardPage — cartões financeiros (CP2K-8D)", () => {
     );
 
     expect(screen.getByText("Faturamento bruto de pedidos pagos")).toBeInTheDocument();
+  });
+});
+
+describe("DashboardPage — Mercado Livre Full / Shopee Full (correção da auditoria Full)", () => {
+  it("ALL: mostra as seções Mercado Livre Full e Shopee Full separadamente", async () => {
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "ALL", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        full: fullAggregate(),
+        shopeeFull: fullAggregate(),
+      }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Mercado Livre Full" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Shopee Full" }),
+    ).toBeInTheDocument();
+  });
+
+  it("MERCADO_LIVRE: mostra somente a seção Mercado Livre Full", async () => {
+    mockSearchParams({ marketplace: "MERCADO_LIVRE" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "MERCADO_LIVRE", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        full: fullAggregate(),
+        shopeeFull: null,
+      }),
+    );
+
+    expect(
+      screen.getByRole("heading", { name: "Mercado Livre Full" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Shopee Full" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("SHOPEE: mostra somente a seção Shopee Full, sem nenhum texto 'Mercado Livre'", async () => {
+    mockSearchParams({ marketplace: "SHOPEE" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "SHOPEE", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        full: null,
+        shopeeFull: fullAggregate(),
+      }),
+    );
+
+    const shopeeHeading = screen.getByRole("heading", { name: "Shopee Full" });
+    expect(shopeeHeading).toBeInTheDocument();
+    expect(
+      screen.getByText("Pedidos processados pela logística Full da Shopee."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Mercado Livre Full" }),
+    ).not.toBeInTheDocument();
+    // Nenhuma menção a "Mercado Livre" dentro da própria seção Full.
+    const shopeeSection = shopeeHeading.closest("div")?.parentElement;
+    expect(shopeeSection).toBeTruthy();
+    expect(shopeeSection).not.toHaveTextContent(/Mercado Livre/i);
+  });
+
+  it("AMAZON: não mostra nenhuma seção Full", async () => {
+    mockSearchParams({ marketplace: "AMAZON" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "AMAZON", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        full: null,
+        shopeeFull: null,
+      }),
+    );
+
+    expect(
+      screen.queryByRole("heading", { name: "Mercado Livre Full" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Shopee Full" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("SHOPEE: mostra o filtro 'Tipo de venda' (Full x sem Full), igual ao escopo Mercado Livre", async () => {
+    mockSearchParams({ marketplace: "SHOPEE" });
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "SHOPEE", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        full: null,
+        shopeeFull: fullAggregate(),
+      }),
+    );
+
+    expect(
+      screen.getByRole("button", { name: "Somente Full" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Vendas sem Full" }),
+    ).toBeInTheDocument();
+  });
+
+  it("SHOPEE: selecionar 'Somente Full' grava logistics=FULL na URL", async () => {
+    mockSearchParams({ marketplace: "SHOPEE" });
+    const user = userEvent.setup();
+    await renderDashboardWithScope(
+      kpisDto({
+        scope: { marketplace: "SHOPEE", accountId: null, allTime: true, logisticsScope: "ALL" },
+        summary: financialSummary(),
+        full: null,
+        shopeeFull: fullAggregate(),
+      }),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Somente Full" }));
+
+    expect(routerReplace).toHaveBeenCalledWith(
+      expect.stringContaining("logistics=FULL"),
+      expect.anything(),
+    );
   });
 });

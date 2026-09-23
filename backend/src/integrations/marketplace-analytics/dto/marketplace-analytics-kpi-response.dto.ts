@@ -230,4 +230,6 @@ export interface MarketplaceAnalyticsKpisResponseDto {
   dataCoverage: AnalyticsDataCoverage;
   lastSync: string | null;
   full: MarketplaceAnalyticsFull | null;
+  /** "Shopee Full" — mesma forma de `full`, sempre restrita às contas Shopee do escopo. Ver doc em `MarketplaceAnalyticsAggregate.shopeeFull` (service). */
+  shopeeFull: MarketplaceAnalyticsFull | null;
 }

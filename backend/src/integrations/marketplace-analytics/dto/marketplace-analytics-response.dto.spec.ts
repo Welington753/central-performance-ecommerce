@@ -64,6 +64,7 @@ function aggregate(
     },
     lastSync: null,
     full: null,
+    shopeeFull: null,
     ...overrides,
   };
 }

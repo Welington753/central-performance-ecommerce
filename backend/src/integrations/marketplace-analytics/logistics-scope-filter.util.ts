@@ -35,18 +35,21 @@ export function parseLogisticsScopeFilter(
 }
 
 /**
- * `FULL`/`NON_FULL` só existem para o Mercado Livre — nunca aceitos com
- * `marketplace=ALL`/`AMAZON`/`SHOPEE` (o frontend já restaura o filtro para
- * `ALL` ao trocar de marketplace; esta é a validação de defesa em
- * profundidade no backend).
+ * `FULL`/`NON_FULL` só existem para marketplaces com classificação logística
+ * própria — Mercado Livre (`logistics_classification` resolvido via
+ * `classifyLogisticType`) e Shopee (via `classifyShopeeFulfillmentFlag`,
+ * correção da auditoria Full). Nunca aceitos com `marketplace=ALL`/`AMAZON`
+ * (o frontend já restaura o filtro para `ALL` ao trocar de marketplace; esta
+ * é a validação de defesa em profundidade no backend).
  */
-export function assertLogisticsScopeRequiresMercadoLivre(
+export function assertLogisticsScopeRequiresSupportedMarketplace(
   logisticsScope: LogisticsScopeFilter,
   marketplaceFilter: MarketplaceFilter,
 ): void {
   if (
     logisticsScope !== LOGISTICS_SCOPE_ALL &&
-    marketplaceFilter !== Marketplace.MERCADO_LIVRE
+    marketplaceFilter !== Marketplace.MERCADO_LIVRE &&
+    marketplaceFilter !== Marketplace.SHOPEE
   ) {
     throw new MarketplaceAnalyticsFilterError('INVALID_LOGISTICS_SCOPE');
   }

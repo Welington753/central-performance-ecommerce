@@ -2,7 +2,7 @@ import type {
   MappedOrderItemRecord,
   MappedOrderRecord,
 } from '../marketplace-orders/mapped-order-record';
-import { LOGISTICS_UNKNOWN } from '../marketplace-orders/logistics-classification';
+import { classifyShopeeFulfillmentFlag } from './shopee-fulfillment-flag-classification';
 import {
   CANCELLED_ORDER_STATUS,
   PAID_ORDER_STATUS,
@@ -161,7 +161,7 @@ export function mapShopeeOrder(
     sourceStatus: raw.orderStatus,
     fulfillmentChannel: raw.fulfillmentFlag,
     externalMarketplaceId: null,
-    logisticsClassification: LOGISTICS_UNKNOWN,
+    logisticsClassification: classifyShopeeFulfillmentFlag(raw.fulfillmentFlag),
     logisticsType: null,
     items: raw.items.map((item) => mapShopeeOrderItem(item, raw.currency)),
   };

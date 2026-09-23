@@ -71,7 +71,7 @@ describe('mapShopeeOrder', () => {
       sourceStatus: 'COMPLETED',
       fulfillmentChannel: 'fulfilled_by_local_seller',
       externalMarketplaceId: null,
-      logisticsClassification: 'UNKNOWN',
+      logisticsClassification: 'SELLER_FULFILLED',
       logisticsType: null,
       items: [
         {
@@ -282,10 +282,49 @@ describe('mapShopeeOrder', () => {
     expect(result.items[1].currencyId).toBe('BRL');
   });
 
-  it('logisticsClassification é sempre UNKNOWN', () => {
+  it('logisticsType nunca é preenchido pela Shopee', () => {
     const result = mapShopeeOrder(ACCOUNT_ID, validOrder());
-    expect(result.logisticsClassification).toBe('UNKNOWN');
     expect(result.logisticsType).toBeNull();
+  });
+
+  it('classifica fulfillmentFlag "fulfilled_by_shopee" como MARKETPLACE_FULFILLED', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ fulfillmentFlag: 'fulfilled_by_shopee' }),
+    );
+    expect(result.logisticsClassification).toBe('MARKETPLACE_FULFILLED');
+  });
+
+  it('classifica fulfillmentFlag "fulfilled_by_local_seller" como SELLER_FULFILLED', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ fulfillmentFlag: 'fulfilled_by_local_seller' }),
+    );
+    expect(result.logisticsClassification).toBe('SELLER_FULFILLED');
+  });
+
+  it('classifica fulfillmentFlag ausente (null) como UNKNOWN', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ fulfillmentFlag: null }),
+    );
+    expect(result.logisticsClassification).toBe('UNKNOWN');
+  });
+
+  it('classifica fulfillmentFlag fora do vocabulário fechado como UNKNOWN — nunca inferido como sem Full', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ fulfillmentFlag: 'algum_outro_valor' }),
+    );
+    expect(result.logisticsClassification).toBe('UNKNOWN');
+  });
+
+  it('normaliza fulfillmentFlag por trim/lowercase antes de classificar', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({ fulfillmentFlag: '  Fulfilled_By_Shopee  ' }),
+    );
+    expect(result.logisticsClassification).toBe('MARKETPLACE_FULFILLED');
   });
 
   it('nunca inclui nenhum campo pessoal no resultado', () => {

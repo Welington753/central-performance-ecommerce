@@ -198,15 +198,22 @@ function readAllTimeFromParams(searchParams: URLSearchParams): boolean {
 const LOGISTICS_SCOPE_VALUES: LogisticsScopeValue[] = ["ALL", "FULL", "NON_FULL"];
 
 /**
- * `FULL`/`NON_FULL` só existem dentro do escopo Mercado Livre (Fase 4, item
- * 2) — qualquer outro marketplace (ou "Todos os marketplaces") sempre
- * restaura `ALL`, mesmo que a URL traga um valor diferente.
+ * `FULL`/`NON_FULL` só existem dentro do escopo Mercado Livre ou Shopee
+ * (Fase 4, item 2; correção da auditoria Full estendeu à Shopee) — qualquer
+ * outro marketplace (ou "Todos os marketplaces") sempre restaura `ALL`,
+ * mesmo que a URL traga um valor diferente.
  */
+function marketplaceSupportsLogisticsScope(
+  marketplace: MarketplaceFilter,
+): boolean {
+  return marketplace === "MERCADO_LIVRE" || marketplace === "SHOPEE";
+}
+
 function readLogisticsScopeFromParams(
   searchParams: URLSearchParams,
   marketplace: MarketplaceFilter,
 ): LogisticsScopeValue {
-  if (marketplace !== "MERCADO_LIVRE") return "ALL";
+  if (!marketplaceSupportsLogisticsScope(marketplace)) return "ALL";
   const raw = searchParams.get("logistics");
   if (raw && (LOGISTICS_SCOPE_VALUES as string[]).includes(raw)) {
     return raw as LogisticsScopeValue;
@@ -645,11 +652,12 @@ function DashboardContent() {
     } else {
       params.delete("accountId");
     }
-    // Trocar para qualquer marketplace/escopo que não seja Mercado Livre
-    // restaura o filtro "Tipo de venda" para "Todas as vendas" (Fase 4,
-    // item 2) — nunca deixa `logistics=FULL`/`NON_FULL` pendurado na URL
-    // fora do escopo em que faz sentido.
-    if (next.marketplace !== "MERCADO_LIVRE") {
+    // Trocar para qualquer marketplace/escopo que não suporte o filtro
+    // logístico (nem Mercado Livre nem Shopee) restaura "Tipo de venda"
+    // para "Todas as vendas" (Fase 4, item 2) — nunca deixa
+    // `logistics=FULL`/`NON_FULL` pendurado na URL fora do escopo em que
+    // faz sentido.
+    if (!marketplaceSupportsLogisticsScope(next.marketplace)) {
       params.delete("logistics");
     }
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
@@ -837,7 +845,7 @@ function DashboardContent() {
         onChange={handleScopeChange}
       />
 
-      {marketplace === "MERCADO_LIVRE" ? (
+      {marketplaceSupportsLogisticsScope(marketplace) ? (
         <>
           <LogisticsScopeFilter
             value={logisticsScope}
@@ -845,7 +853,11 @@ function DashboardContent() {
           />
           <LogisticsScopeCoverageNotice
             logisticsScope={logisticsScope}
-            full={displayData?.full ?? null}
+            full={
+              (marketplace === "SHOPEE"
+                ? displayData?.shopeeFull
+                : displayData?.full) ?? null
+            }
           />
         </>
       ) : null}
@@ -1027,21 +1039,32 @@ function DashboardContent() {
                   </div>
 
                   {/*
-                    Correção da auditoria Full: a seção só existe dentro do
-                    escopo Mercado Livre. O backend já devolve `full: null`
-                    para Amazon/Shopee, mas o gate aqui é explícito e
-                    independente — nenhum escopo Amazon/Shopee pode renderizar
-                    um cabeçalho "Mercado Livre Full" nem o aviso sugerindo
-                    que os pedidos seriam classificados numa próxima
-                    sincronização (o que nunca aconteceria). Mesma regra já
-                    aplicada ao `LogisticsScopeFilter` acima; com
-                    `marketplace = ALL` a seção aparece e o backend calcula
-                    tudo só sobre as contas Mercado Livre.
+                    Correção da auditoria Full: "Mercado Livre Full" e
+                    "Shopee Full" são seções independentes. O backend já
+                    devolve `full`/`shopeeFull: null` fora do escopo certo,
+                    mas o gate aqui é explícito e independente — nenhum
+                    escopo Amazon pode renderizar nenhuma das duas seções, e
+                    nenhuma delas aparece fora do seu próprio marketplace
+                    (exceto em `ALL`, onde as duas podem aparecer lado a
+                    lado). Mesma regra já aplicada ao `LogisticsScopeFilter`
+                    acima.
                   */}
                   {displayData.full &&
                   effectiveFinancialMarketplace !== "AMAZON" &&
                   effectiveFinancialMarketplace !== "SHOPEE" ? (
-                    <FullPerformanceSection full={displayData.full} />
+                    <FullPerformanceSection
+                      full={displayData.full}
+                      title="Mercado Livre Full"
+                    />
+                  ) : null}
+                  {displayData.shopeeFull &&
+                  effectiveFinancialMarketplace !== "AMAZON" &&
+                  effectiveFinancialMarketplace !== "MERCADO_LIVRE" ? (
+                    <FullPerformanceSection
+                      full={displayData.shopeeFull}
+                      title="Shopee Full"
+                      description="Pedidos processados pela logística Full da Shopee."
+                    />
                   ) : null}
                 </div>
               ) : displayData ? (

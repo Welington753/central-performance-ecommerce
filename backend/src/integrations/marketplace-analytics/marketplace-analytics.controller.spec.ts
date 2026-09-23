@@ -35,6 +35,7 @@ function emptyAggregate(): MarketplaceAnalyticsAggregate {
     },
     lastSync: null,
     full: null,
+    shopeeFull: null,
   };
 }
 

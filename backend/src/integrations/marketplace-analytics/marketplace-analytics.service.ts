@@ -43,7 +43,7 @@ import {
   LOGISTICS_UNKNOWN,
 } from '../marketplace-orders/logistics-classification';
 import {
-  assertLogisticsScopeRequiresMercadoLivre,
+  assertLogisticsScopeRequiresSupportedMarketplace,
   classificationValuesForScope,
   parseLogisticsScopeFilter,
   type LogisticsScopeFilter,
@@ -282,6 +282,17 @@ export interface MarketplaceAnalyticsAggregate {
    * totais zerados quando não houver nenhum pedido classificável no escopo.
    */
   full: AnalyticsFullAggregate | null;
+  /**
+   * "Shopee Full" (correção da auditoria Full) — MESMA estrutura/fórmulas de
+   * `full` (Mercado Livre), mas SEMPRE restrita às contas Shopee do escopo
+   * (nunca soma com `full`, nunca compartilha denominador/cobertura). `null`
+   * nas mesmas condições de `full`: nenhuma conta Shopee no escopo, ou sem
+   * prova real de dado. Populado pelo mesmo `classifyShopeeFulfillmentFlag`
+   * que o mapper usa (`shopee-fulfillment-flag-classification.ts`) —
+   * diferente de `full`, que depende de uma consulta assíncrona ao envio do
+   * Mercado Livre, a classificação da Shopee já vem pronta no pedido.
+   */
+  shopeeFull: AnalyticsFullAggregate | null;
 }
 
 export interface MarketplaceAnalyticsQuery {
@@ -300,7 +311,8 @@ export interface MarketplaceAnalyticsQuery {
    * `ALL`/`FULL`/`NON_FULL` (Fase 4, "Full x sem Full"): ausente/`ALL`
    * preserva compatibilidade total com o comportamento anterior. `FULL`/
    * `NON_FULL` só são aceitos quando `marketplace` resolve para
-   * `MERCADO_LIVRE` — ver `assertLogisticsScopeRequiresMercadoLivre`.
+   * `MERCADO_LIVRE` ou `SHOPEE` — ver
+   * `assertLogisticsScopeRequiresSupportedMarketplace`.
    */
   logisticsScope?: string;
 }
@@ -331,7 +343,10 @@ export class MarketplaceAnalyticsService {
     const accountIdFilter = parseAccountIdFilter(query.accountId);
     const allTime = query.allTime === true;
     const logisticsScope = parseLogisticsScopeFilter(query.logisticsScope);
-    assertLogisticsScopeRequiresMercadoLivre(logisticsScope, marketplaceFilter);
+    assertLogisticsScopeRequiresSupportedMarketplace(
+      logisticsScope,
+      marketplaceFilter,
+    );
     const classificationValues = classificationValuesForScope(logisticsScope);
 
     const allAccounts = await this.marketplaceAccountsService.findAll();
@@ -389,6 +404,10 @@ export class MarketplaceAnalyticsService {
      */
     const mercadoLivreScopedAccountIds = scopedAccounts
       .filter((a) => a.marketplace === Marketplace.MERCADO_LIVRE)
+      .map((a) => a.id);
+    /** Mesma lógica acima, restrita à Shopee — ver doc de `shopeeFull`. */
+    const shopeeScopedAccountIds = scopedAccounts
+      .filter((a) => a.marketplace === Marketplace.SHOPEE)
       .map((a) => a.id);
     const allClassifiedIds = [...classifiedByAccountId.values()].map(
       (a) => a.id,
@@ -512,6 +531,7 @@ export class MarketplaceAnalyticsService {
         },
         lastSync: lastSyncOf(scopedAccountIds),
         full: null,
+        shopeeFull: null,
       };
     }
 
@@ -523,6 +543,7 @@ export class MarketplaceAnalyticsService {
       topListings,
       sources,
       full,
+      shopeeFull,
     ] = await Promise.all([
       this.fetchPeriodTotals(
         scopedAccountIds,
@@ -568,6 +589,12 @@ export class MarketplaceAnalyticsService {
             windows,
             allTime,
           ),
+      // "Shopee Full" — mesma regra acima, restrita às contas Shopee do
+      // escopo (ver doc de `shopeeFull`). Sem nenhuma conta Shopee no
+      // escopo, o agregado inteiro é `null`.
+      shopeeScopedAccountIds.length === 0
+        ? Promise.resolve(null)
+        : this.fetchFullAggregate(shopeeScopedAccountIds, windows, allTime),
     ]);
 
     const dataCoverage = computeConsolidatedCoverage(
@@ -597,6 +624,7 @@ export class MarketplaceAnalyticsService {
       dataCoverage,
       lastSync: lastSyncOf(scopedAccountIds),
       full,
+      shopeeFull,
     };
   }
 

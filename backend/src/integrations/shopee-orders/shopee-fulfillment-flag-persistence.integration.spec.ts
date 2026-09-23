@@ -19,11 +19,13 @@ import { mapShopeeOrder } from './shopee-order.mapper';
  * Esta suíte percorre a cadeia inteira — corpo bruto do detalhe do pedido,
  * validação por allowlist, mapper e persistência real — e verifica a coluna.
  *
- * DELIBERADAMENTE não associa nenhum valor literal a "Shopee Full/FBS":
- * `'fulfilled_by_local_seller'` é apenas o valor presente nas fixtures deste
- * repositório e NÃO está comprovado como discriminador de FBS. Nenhum KPI,
- * card ou classificação depende dele — a coluna é só transporte fiel do que
- * a Shopee devolveu.
+ * Auditoria de produção (Shopee Full/FBS) confirmou o vocabulário fechado de
+ * `fulfillment_flag`: `'fulfilled_by_shopee'` → `MARKETPLACE_FULFILLED`,
+ * `'fulfilled_by_local_seller'` → `SELLER_FULFILLED`, qualquer outro valor
+ * (ou ausente) → `UNKNOWN` (ver `classifyShopeeFulfillmentFlag`). Esta suíte
+ * continua provando a coluna bruta `fulfillment_channel` como transporte
+ * fiel do valor original — a classificação canônica é testada à parte,
+ * abaixo.
  */
 describe('Shopee fulfillment_flag — parser → mapper → persistência (Postgres real)', () => {
   let dataSource: DataSource;
@@ -207,8 +209,8 @@ describe('Shopee fulfillment_flag — parser → mapper → persistência (Postg
     expect(secondRow?.fulfillment_channel).toBe('outro_fulfillment_flag');
   });
 
-  it('never infers a logistics classification from the Shopee flag', async () => {
-    await persistence.persistOrders([mapFromBody('fulfilled_by_local_seller')]);
+  it('classifica "fulfilled_by_shopee" como MARKETPLACE_FULFILLED na persistência', async () => {
+    await persistence.persistOrders([mapFromBody('fulfilled_by_shopee')]);
 
     const [row] = await dataSource.query<
       Array<{ logistics_classification: string; logistics_type: string | null }>
@@ -216,9 +218,56 @@ describe('Shopee fulfillment_flag — parser → mapper → persistência (Postg
       'SELECT logistics_classification, logistics_type FROM marketplace_orders WHERE marketplace_account_id = $1',
       [accountId],
     );
-    // Shopee nunca popula a classificação canônica — nenhum valor literal do
-    // `fulfillment_flag` é (nem pode ser) interpretado como Full.
-    expect(row.logistics_classification).toBe('UNKNOWN');
+    expect(row.logistics_classification).toBe('MARKETPLACE_FULFILLED');
     expect(row.logistics_type).toBeNull();
+  });
+
+  it('classifica "fulfilled_by_local_seller" como SELLER_FULFILLED na persistência', async () => {
+    await persistence.persistOrders([mapFromBody('fulfilled_by_local_seller')]);
+
+    const [row] = await dataSource.query<
+      Array<{ logistics_classification: string }>
+    >(
+      'SELECT logistics_classification FROM marketplace_orders WHERE marketplace_account_id = $1',
+      [accountId],
+    );
+    expect(row.logistics_classification).toBe('SELLER_FULFILLED');
+  });
+
+  it('valor ausente/não reconhecido permanece UNKNOWN na persistência', async () => {
+    await persistence.persistOrders([mapFromBody(null)]);
+
+    const [row] = await dataSource.query<
+      Array<{ logistics_classification: string }>
+    >(
+      'SELECT logistics_classification FROM marketplace_orders WHERE marketplace_account_id = $1',
+      [accountId],
+    );
+    expect(row.logistics_classification).toBe('UNKNOWN');
+  });
+
+  it('payload parcial sem fulfillment_flag não apaga classificação já resolvida (COALESCE + regra de não regressão UNKNOWN)', async () => {
+    await persistence.persistOrders([mapFromBody('fulfilled_by_shopee')]);
+
+    // Resync sem o campo (ausente no detalhe) — mapper produz UNKNOWN, mas a
+    // persistência genérica (`marketplace-orders-persistence.service.ts`)
+    // nunca regride uma classificação já resolvida de volta para UNKNOWN.
+    const resynced = mapFromBody(null);
+    resynced.marketplaceLastUpdated = new Date(
+      (resynced.marketplaceLastUpdated?.getTime() ?? 0) + 1000,
+    );
+    await persistence.persistOrders([resynced]);
+
+    const [row] = await dataSource.query<
+      Array<{
+        logistics_classification: string;
+        fulfillment_channel: string | null;
+      }>
+    >(
+      'SELECT logistics_classification, fulfillment_channel FROM marketplace_orders WHERE marketplace_account_id = $1',
+      [accountId],
+    );
+    expect(row.logistics_classification).toBe('MARKETPLACE_FULFILLED');
+    expect(row.fulfillment_channel).toBe('fulfilled_by_shopee');
   });
 });

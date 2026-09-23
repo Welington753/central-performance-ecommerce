@@ -1,7 +1,7 @@
 import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAnalyticsFilterError } from './marketplace-filter.util';
 import {
-  assertLogisticsScopeRequiresMercadoLivre,
+  assertLogisticsScopeRequiresSupportedMarketplace,
   classificationValuesForScope,
   parseLogisticsScopeFilter,
 } from './logistics-scope-filter.util';
@@ -30,37 +30,55 @@ describe('parseLogisticsScopeFilter', () => {
   });
 });
 
-describe('assertLogisticsScopeRequiresMercadoLivre', () => {
+describe('assertLogisticsScopeRequiresSupportedMarketplace', () => {
   it('never throws for ALL regardless of marketplace', () => {
     expect(() =>
-      assertLogisticsScopeRequiresMercadoLivre('ALL', 'ALL'),
+      assertLogisticsScopeRequiresSupportedMarketplace('ALL', 'ALL'),
     ).not.toThrow();
     expect(() =>
-      assertLogisticsScopeRequiresMercadoLivre('ALL', Marketplace.AMAZON),
+      assertLogisticsScopeRequiresSupportedMarketplace(
+        'ALL',
+        Marketplace.AMAZON,
+      ),
     ).not.toThrow();
   });
 
   it('never throws for FULL/NON_FULL when marketplace is MERCADO_LIVRE', () => {
     expect(() =>
-      assertLogisticsScopeRequiresMercadoLivre(
+      assertLogisticsScopeRequiresSupportedMarketplace(
         'FULL',
         Marketplace.MERCADO_LIVRE,
       ),
     ).not.toThrow();
     expect(() =>
-      assertLogisticsScopeRequiresMercadoLivre(
+      assertLogisticsScopeRequiresSupportedMarketplace(
         'NON_FULL',
         Marketplace.MERCADO_LIVRE,
       ),
     ).not.toThrow();
   });
 
-  it.each(['ALL' as const, Marketplace.AMAZON, Marketplace.SHOPEE])(
+  it('never throws for FULL/NON_FULL when marketplace is SHOPEE (Shopee Full)', () => {
+    expect(() =>
+      assertLogisticsScopeRequiresSupportedMarketplace(
+        'FULL',
+        Marketplace.SHOPEE,
+      ),
+    ).not.toThrow();
+    expect(() =>
+      assertLogisticsScopeRequiresSupportedMarketplace(
+        'NON_FULL',
+        Marketplace.SHOPEE,
+      ),
+    ).not.toThrow();
+  });
+
+  it.each(['ALL' as const, Marketplace.AMAZON])(
     'rejects FULL/NON_FULL when marketplace is %s',
     (marketplace) => {
       for (const scope of ['FULL', 'NON_FULL'] as const) {
         try {
-          assertLogisticsScopeRequiresMercadoLivre(scope, marketplace);
+          assertLogisticsScopeRequiresSupportedMarketplace(scope, marketplace);
           fail('expected to throw');
         } catch (error) {
           expect(error).toBeInstanceOf(MarketplaceAnalyticsFilterError);

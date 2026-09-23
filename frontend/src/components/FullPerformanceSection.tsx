@@ -9,6 +9,10 @@ import type {
 
 interface FullPerformanceSectionProps {
   full: MarketplaceAnalyticsFull;
+  /** "Mercado Livre Full" ou "Shopee Full" — nunca hardcoded dentro do componente. */
+  title: string;
+  /** Explicação curta exibida abaixo do título (ex.: Shopee, "Pedidos processados pela logística Full da Shopee."). Omitida quando o marketplace não precisa dela. */
+  description?: string;
 }
 
 const EMPTY_COMPARISON: AnalyticsFullComparison = {
@@ -295,12 +299,21 @@ function FullDailyChart({ full }: { full: MarketplaceAnalyticsFull }) {
  * cobertura em vez disso. Contrato deliberadamente sem nenhum campo de
  * recomendação de reposição/estoque — fora do escopo desta fase.
  */
-export function FullPerformanceSection({ full }: FullPerformanceSectionProps) {
+export function FullPerformanceSection({
+  full,
+  title,
+  description,
+}: FullPerformanceSectionProps) {
   const comparison = full.comparison ?? EMPTY_COMPARISON;
 
   return (
     <div className="flex flex-col gap-6">
-      <h2 className="text-lg font-semibold">Mercado Livre Full</h2>
+      <div className="flex flex-col gap-1">
+        <h2 className="text-lg font-semibold">{title}</h2>
+        {description ? (
+          <p className="text-sm text-foreground/60">{description}</p>
+        ) : null}
+      </div>
       <CoverageNotice full={full} />
 
       <div className="flex flex-col gap-3">
