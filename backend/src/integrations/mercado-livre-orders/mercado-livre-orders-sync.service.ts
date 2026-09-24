@@ -18,6 +18,7 @@ import { validateOrdersSearchResponseBody } from './mercado-livre-order-response
 import {
   ORDERS_PAGE_LIMIT,
   MercadoLivreOrdersHttpClient,
+  type OrdersSearchDateFilter,
 } from './mercado-livre-orders-http.client';
 import { MercadoLivreShipmentLookupService } from './mercado-livre-shipment-lookup.service';
 import type { FetchShipmentOutcome } from './mercado-livre-shipment.client';
@@ -268,6 +269,18 @@ export class MercadoLivreOrdersSyncService {
         (await this.persistence.getAccountSyncCoverage(accountId)).intervals,
         startedAt,
       );
+    // Correção B1 (auditoria): `windowOverride` presente SEMPRE significa
+    // backfill/histórico (único chamador é `MarketplaceBackfillService`,
+    // sempre por `CREATED` — nunca teria como "recapturar" uma atualização
+    // tardia de um pedido ainda não conhecido). Sem `windowOverride` (botão
+    // manual "Sincronizar agora" e o ciclo automático), a busca passa a ser
+    // por ÚLTIMA ATUALIZAÇÃO (`LAST_UPDATED`) — um pedido criado meses atrás
+    // mas cancelado/parcialmente reembolsado dentro da janela incremental
+    // agora é recapturado e atualizado, em vez de ficar congelado com o
+    // status antigo para sempre.
+    const dateFilter: OrdersSearchDateFilter = options.windowOverride
+      ? 'CREATED'
+      : 'LAST_UPDATED';
 
     let syncRunId: string;
     try {
@@ -293,6 +306,7 @@ export class MercadoLivreOrdersSyncService {
       const { rawOrders, pagesFetched } = await this.fetchAllPages({
         accessToken,
         sellerId,
+        dateFilter,
         periodFrom,
         periodTo,
       });
@@ -446,6 +460,7 @@ export class MercadoLivreOrdersSyncService {
   private async fetchAllPages(input: {
     accessToken: string;
     sellerId: string;
+    dateFilter: OrdersSearchDateFilter;
     periodFrom: Date;
     periodTo: Date;
   }): Promise<{ rawOrders: RawMercadoLivreOrder[]; pagesFetched: number }> {
@@ -454,12 +469,17 @@ export class MercadoLivreOrdersSyncService {
     let offset = 0;
     let total = Number.POSITIVE_INFINITY;
 
+    // `periodFrom`/`periodTo` (e `input.dateFilter`) são os MESMOS em toda
+    // iteração deste laço — a janela é capturada uma única vez pelo chamador
+    // e nunca recalculada por página, garantindo um `to` fechado durante
+    // toda a execução (nunca avança enquanto a paginação está em andamento).
     while (offset < total && offset < HARD_SAFETY_OFFSET_CAP) {
       const outcome = await this.httpClient.fetchOrdersPage({
         accessToken: input.accessToken,
         sellerId: input.sellerId,
-        dateCreatedFrom: input.periodFrom,
-        dateCreatedTo: input.periodTo,
+        dateFilter: input.dateFilter,
+        dateFrom: input.periodFrom,
+        dateTo: input.periodTo,
         offset,
         limit: ORDERS_PAGE_LIMIT,
       });

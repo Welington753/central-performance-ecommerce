@@ -702,4 +702,152 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
       expect(persistence.getAccountSyncCoverage).not.toHaveBeenCalled();
     });
   });
+
+  describe('filtro de data enviado ao provedor (correção B1 da auditoria)', () => {
+    it('the incremental sync (no windowOverride — manual button and auto-sync cycle) sends dateFilter "LAST_UPDATED", never "CREATED"', async () => {
+      const fetchOrdersPage = jest.fn().mockResolvedValue({
+        kind: 'success',
+        body: pageBody([], 0, 0),
+      });
+      const { service } = buildService({ httpClient: { fetchOrdersPage } });
+
+      await service.syncOrders('acc-1');
+
+      expect(fetchOrdersPage).toHaveBeenCalledTimes(1);
+      const [call] = fetchOrdersPage.mock.calls[0] as [{ dateFilter: string }];
+      expect(call.dateFilter).toBe('LAST_UPDATED');
+    });
+
+    it('the historical backfill (windowOverride present) sends dateFilter "CREATED", never "LAST_UPDATED"', async () => {
+      const fetchOrdersPage = jest.fn().mockResolvedValue({
+        kind: 'success',
+        body: pageBody([], 0, 0),
+      });
+      const { service } = buildService({ httpClient: { fetchOrdersPage } });
+      const windowOverride = {
+        from: new Date('2025-01-01T00:00:00.000Z'),
+        to: new Date('2025-02-01T00:00:00.000Z'),
+      };
+
+      await service.syncOrders('acc-1', {
+        windowOverride,
+        type: 'INITIAL' as never,
+      });
+
+      expect(fetchOrdersPage).toHaveBeenCalledTimes(1);
+      const [call] = fetchOrdersPage.mock.calls[0] as [{ dateFilter: string }];
+      expect(call.dateFilter).toBe('CREATED');
+    });
+
+    it('keeps the same dateFilter ("LAST_UPDATED") and the same fixed dateTo across every paginated page', async () => {
+      const fetchOrdersPage = jest
+        .fn()
+        .mockResolvedValueOnce({
+          kind: 'success',
+          body: pageBody([rawOrder('1'), rawOrder('2')], 60, 0),
+        })
+        .mockResolvedValueOnce({
+          kind: 'success',
+          body: pageBody([rawOrder('3')], 60, 50),
+        });
+      const { service } = buildService({
+        httpClient: { fetchOrdersPage },
+        persistence: {
+          persistOrders: jest.fn().mockResolvedValue({
+            ordersCreated: 3,
+            ordersUpdated: 0,
+            itemsPersisted: 3,
+          }),
+        },
+      });
+
+      await service.syncOrders('acc-1');
+
+      expect(fetchOrdersPage).toHaveBeenCalledTimes(2);
+      const calls = fetchOrdersPage.mock.calls as unknown as Array<
+        [{ dateFilter: string; dateFrom: Date; dateTo: Date }]
+      >;
+      expect(calls[0][0].dateFilter).toBe('LAST_UPDATED');
+      expect(calls[1][0].dateFilter).toBe('LAST_UPDATED');
+      // `dateFrom`/`dateTo` também nunca mudam entre páginas — a janela é
+      // capturada uma única vez no início da execução (`periodFrom`/
+      // `periodTo`), nunca recalculada a cada página.
+      expect(calls[0][0].dateFrom.getTime()).toBe(
+        calls[1][0].dateFrom.getTime(),
+      );
+      expect(calls[0][0].dateTo.getTime()).toBe(calls[1][0].dateTo.getTime());
+    });
+
+    it('fetches and persists an order created long before the window because it was updated inside it (the fix for B1: a late cancellation/refund is no longer invisible)', async () => {
+      // Pedido criado 6 meses atrás — bem fora de qualquer janela
+      // incremental de ~1 dia — mas devolvido pelo provedor porque o filtro
+      // enviado agora é por ÚLTIMA ATUALIZAÇÃO, não por criação. O mock não
+      // filtra nada localmente: ele simplesmente representa o que o
+      // provedor devolveria para esse filtro.
+      const oldOrderNowCancelled = {
+        ...rawOrder('999'),
+        status: 'cancelled',
+        date_created: '2026-01-10T10:00:00.000-04:00',
+        last_updated: '2026-08-15T10:05:00.000-04:00',
+      };
+      const fetchOrdersPage = jest.fn().mockResolvedValue({
+        kind: 'success',
+        body: pageBody([oldOrderNowCancelled], 1, 0),
+      });
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 0,
+        ordersUpdated: 1,
+        itemsPersisted: 1,
+      });
+      const { service } = buildService({
+        httpClient: { fetchOrdersPage },
+        persistence: { persistOrders },
+      });
+
+      const summary = await service.syncOrders('acc-1');
+
+      expect(summary.ordersFetched).toBe(1);
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{ externalOrderId: string; status: string }>,
+      ];
+      expect(persistedOrders[0].externalOrderId).toBe('999');
+      expect(persistedOrders[0].status).toBe('cancelled');
+    });
+
+    it('re-maps and forwards an updated status/sourceStatus/refunded fields to persistOrders on a later sync of the same order (mapper+service integration — DB-level regression/COALESCE protection is covered separately by marketplace-orders-persistence.service.integration.spec.ts, unmodified by this fix)', async () => {
+      const persistOrders = jest.fn().mockResolvedValue({
+        ordersCreated: 0,
+        ordersUpdated: 1,
+        itemsPersisted: 1,
+      });
+      const partiallyRefundedOrder = {
+        ...rawOrder('42'),
+        status: 'partially_refunded',
+        last_updated: '2026-08-16T09:00:00.000-04:00',
+        payments: [
+          {
+            status: 'approved',
+            transaction_amount_refunded: 15,
+          },
+        ],
+      };
+      const { service } = buildService({
+        httpClient: {
+          fetchOrdersPage: jest.fn().mockResolvedValue({
+            kind: 'success',
+            body: pageBody([partiallyRefundedOrder], 1, 0),
+          }),
+        },
+        persistence: { persistOrders },
+      });
+
+      await service.syncOrders('acc-1');
+
+      const [persistedOrders] = persistOrders.mock.calls[0] as [
+        Array<{ status: string; refundedAmount: string | null }>,
+      ];
+      expect(persistedOrders[0].status).toBe('partially_refunded');
+      expect(persistedOrders[0].refundedAmount).toBe('15.00');
+    });
+  });
 });

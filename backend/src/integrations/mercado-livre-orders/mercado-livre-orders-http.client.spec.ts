@@ -15,8 +15,9 @@ function baseInput() {
   return {
     accessToken: 'secret-token-value',
     sellerId: '1548451374',
-    dateCreatedFrom: new Date('2026-07-03T00:00:00.000Z'),
-    dateCreatedTo: new Date('2026-09-01T00:00:00.000Z'),
+    dateFilter: 'CREATED' as const,
+    dateFrom: new Date('2026-07-03T00:00:00.000Z'),
+    dateTo: new Date('2026-09-01T00:00:00.000Z'),
     offset: 0,
     limit: 50,
   };
@@ -48,14 +49,63 @@ describe('MercadoLivreOrdersHttpClient.fetchOrdersPage', () => {
       'https://api.mercadolibre.com/orders/search',
     );
     expect(url.searchParams.get('seller')).toBe('1548451374');
+    expect(url.searchParams.get('offset')).toBe('0');
+    expect(url.searchParams.get('limit')).toBe('50');
+  });
+
+  it('sends order.date_created.from/to when dateFilter is CREATED (backfill/histórico) — never order.date_last_updated', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          paging: { total: 0, offset: 0, limit: 50 },
+          results: [],
+        }),
+    });
+    const client = new MercadoLivreOrdersHttpClient(configService(), fetchImpl);
+
+    await client.fetchOrdersPage({ ...baseInput(), dateFilter: 'CREATED' });
+
+    const [calledUrl] = fetchImpl.mock.calls[0] as [string];
+    const url = new URL(calledUrl);
     expect(url.searchParams.get('order.date_created.from')).toBe(
       '2026-07-03T00:00:00.000Z',
     );
     expect(url.searchParams.get('order.date_created.to')).toBe(
       '2026-09-01T00:00:00.000Z',
     );
-    expect(url.searchParams.get('offset')).toBe('0');
-    expect(url.searchParams.get('limit')).toBe('50');
+    expect(url.searchParams.has('order.date_last_updated.from')).toBe(false);
+    expect(url.searchParams.has('order.date_last_updated.to')).toBe(false);
+  });
+
+  it('sends order.date_last_updated.from/to when dateFilter is LAST_UPDATED (sincronização incremental, correção B1) — never order.date_created', async () => {
+    const fetchImpl = jest.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: () =>
+        Promise.resolve({
+          paging: { total: 0, offset: 0, limit: 50 },
+          results: [],
+        }),
+    });
+    const client = new MercadoLivreOrdersHttpClient(configService(), fetchImpl);
+
+    await client.fetchOrdersPage({
+      ...baseInput(),
+      dateFilter: 'LAST_UPDATED',
+    });
+
+    const [calledUrl] = fetchImpl.mock.calls[0] as [string];
+    const url = new URL(calledUrl);
+    expect(url.searchParams.get('order.date_last_updated.from')).toBe(
+      '2026-07-03T00:00:00.000Z',
+    );
+    expect(url.searchParams.get('order.date_last_updated.to')).toBe(
+      '2026-09-01T00:00:00.000Z',
+    );
+    expect(url.searchParams.has('order.date_created.from')).toBe(false);
+    expect(url.searchParams.has('order.date_created.to')).toBe(false);
   });
 
   it('sends the access token only via the Authorization header, never as a query param', async () => {
