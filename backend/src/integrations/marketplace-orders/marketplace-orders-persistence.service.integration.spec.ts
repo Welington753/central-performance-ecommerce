@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { createTestDataSource } from '../../test-utils/create-test-data-source';
+import { createTestEncryptionService } from '../../test-utils/create-test-encryption-service';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
   MarketplaceAccount,
@@ -91,7 +92,10 @@ describe('MarketplaceOrdersPersistenceService (Postgres real)', () => {
       MarketplaceOrder,
       MarketplaceOrderItem,
     ]);
-    service = new MarketplaceOrdersPersistenceService(dataSource);
+    service = new MarketplaceOrdersPersistenceService(
+      dataSource,
+      createTestEncryptionService(),
+    );
   });
 
   afterAll(async () => {

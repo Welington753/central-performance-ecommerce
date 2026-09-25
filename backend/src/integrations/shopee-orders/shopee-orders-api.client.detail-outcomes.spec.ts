@@ -48,6 +48,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - sucesso', () => {
             createTime: 1712601591,
             updateTime: 1713139948,
             fulfillmentFlag: 'fulfilled_by_local_seller',
+            buyer: null,
             items: [
               {
                 itemId: '2600144043',
@@ -157,7 +158,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - sucesso', () => {
     }
   });
 
-  it('never leaks personal fields (buyer_user_id, recipient_address, etc.) into the outcome', async () => {
+  it('keeps only allowlisted buyer fields — never CPF, messages or raw keys — in the outcome', async () => {
     const order = validOrderDetailOrder({
       buyer_user_id: 1170319091,
       buyer_username: 'xt4fdsf96j',
@@ -185,10 +186,10 @@ describe('ShopeeOrdersApiClient.getOrderDetail - sucesso', () => {
     expect(outcome.kind).toBe('success');
     const serialized = JSON.stringify(outcome);
     expect(serialized).not.toContain('buyer_user_id');
-    expect(serialized).not.toContain('xt4fdsf96j');
+    expect(serialized).not.toContain('buyer_cpf_id');
     expect(serialized).not.toContain('123.456.789-00');
-    expect(serialized).not.toContain('Max');
     expect(serialized).not.toContain('please gift wrap');
+    expect(serialized).toContain('"buyerUserId":"1170319091"');
   });
 });
 

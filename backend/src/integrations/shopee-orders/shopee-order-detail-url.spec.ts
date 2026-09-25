@@ -55,7 +55,7 @@ describe('buildShopeeOrderDetailUrl', () => {
       '201214JAJXU6G7,201214JASXYXY6',
     );
     expect(url.searchParams.get('response_optional_fields')).toBe(
-      'total_amount,item_list,fulfillment_flag',
+      'total_amount,item_list,fulfillment_flag,buyer_user_id,buyer_username,recipient_address',
     );
   });
 
@@ -87,7 +87,7 @@ describe('buildShopeeOrderDetailUrl', () => {
       responseOptionalFields: 'buyer_user_id,recipient_address',
     });
     expect(url.searchParams.get('response_optional_fields')).toBe(
-      'total_amount,item_list,fulfillment_flag',
+      'total_amount,item_list,fulfillment_flag,buyer_user_id,buyer_username,recipient_address',
     );
   });
 

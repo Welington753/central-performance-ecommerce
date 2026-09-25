@@ -23,9 +23,15 @@ function validOrder(overrides: Record<string, unknown> = {}) {
         currency_id: 'BRL',
       },
     ],
-    // Campos de comprador — devem ser IGNORADOS pelo validador (allowlist),
-    // nunca fazer o corpo ser rejeitado nem "vazar" para o resultado.
-    buyer: { id: 999, nickname: 'comprador_x', email: 'x@example.com' },
+    // Função "Clientes": só `id`/`nickname`/`first_name`/`last_name` são
+    // extraídos; e-mail/telefone/documento nunca "vazam" para o resultado.
+    buyer: {
+      id: 999,
+      nickname: 'comprador_x',
+      email: 'x@example.com',
+      phone: { number: '11999990000' },
+      billing_info: { doc_number: '12345678900' },
+    },
     ...overrides,
   };
 }
@@ -57,6 +63,12 @@ describe('validateOrdersSearchResponseBody', () => {
       lastUpdated: '2026-08-15T10:05:00.000-04:00',
       shippingId: null,
       payments: [],
+      buyer: {
+        id: '999',
+        nickname: 'comprador_x',
+        firstName: null,
+        lastName: null,
+      },
       items: [
         {
           itemId: 'MLB111',
@@ -70,8 +82,47 @@ describe('validateOrdersSearchResponseBody', () => {
         },
       ],
     });
-    // Nenhum campo de comprador vaza para o objeto validado.
-    expect(JSON.stringify(result.orders[0])).not.toContain('comprador_x');
+    const serialized = JSON.stringify(result.orders[0]);
+    expect(serialized).not.toContain('x@example.com');
+    expect(serialized).not.toContain('11999990000');
+    expect(serialized).not.toContain('12345678900');
+  });
+
+  it.each([
+    ['ausente', undefined],
+    ['nulo', null],
+    ['sem id', { nickname: 'semid' }],
+    ['id zero', { id: 0 }],
+    ['id objeto', { id: { x: 1 } }],
+  ])('buyer %s vira null sem rejeitar o pedido', (_label, buyer) => {
+    const result = validateOrdersSearchResponseBody(
+      validBody([validOrder({ buyer })]),
+    );
+    expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.orders[0].buyer).toBeNull();
+  });
+
+  it('maps first_name/last_name when present and ignores invalid nickname types', () => {
+    const result = validateOrdersSearchResponseBody(
+      validBody([
+        validOrder({
+          buyer: {
+            id: '555',
+            nickname: 42,
+            first_name: ' Ana ',
+            last_name: 'Souza',
+          },
+        }),
+      ]),
+    );
+    if (!result.valid) throw new Error('expected valid');
+    expect(result.orders[0].buyer).toEqual({
+      id: '555',
+      nickname: null,
+      firstName: 'Ana',
+      lastName: 'Souza',
+    });
   });
 
   it.each([

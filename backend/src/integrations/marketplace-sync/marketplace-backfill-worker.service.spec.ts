@@ -30,6 +30,8 @@ function job(overrides: Partial<BackfillJobRow> = {}): BackfillJobRow {
     id: 'job-1',
     marketplaceAccountId: 'acc-1',
     marketplace: 'MERCADO_LIVRE' as never,
+    mode: 'HISTORY',
+    cursorBefore: null,
     status: 'RUNNING',
     chunksProcessed: 0,
     attemptCount: 0,
@@ -103,8 +105,9 @@ function buildWorker(options: {
   clock?: BackfillWorkerClock;
   timers?: BackfillWorkerTimers;
 }) {
-  const backfillService = {
+  const backfillService: Record<string, jest.Mock> = {
     runNextChunk: jest.fn(),
+    runBuyerEnrichmentChunk: jest.fn(),
     ...options.backfillService,
   };
   const jobsPersistence = {
@@ -124,6 +127,107 @@ function buildWorker(options: {
 }
 
 describe('MarketplaceBackfillWorkerService', () => {
+  describe('modo BUYER_ENRICHMENT (função Clientes)', () => {
+    const cursor = new Date('2026-09-10T00:00:00.000Z');
+    const now = new Date('2026-09-20T00:00:00.000Z');
+
+    function enrichmentJob(overrides: Partial<BackfillJobRow> = {}) {
+      return job({
+        mode: 'BUYER_ENRICHMENT',
+        cursorBefore: cursor,
+        ...overrides,
+      });
+    }
+
+    it('runs the enrichment chunk (never runNextChunk) and persists the new cursor, requeueing', async () => {
+      const nextCursor = new Date('2026-08-11T00:00:00.000Z');
+      const { worker, jobsPersistence, backfillService } = buildWorker({
+        clock: fakeClock(now),
+        jobsPersistence: {
+          claimJobs: jest.fn().mockResolvedValue([enrichmentJob()]),
+        },
+        backfillService: {
+          runBuyerEnrichmentChunk: jest
+            .fn()
+            .mockResolvedValue({ done: false, nextCursor, ordersFetched: 3 }),
+        },
+      });
+      await worker.runTickOnce();
+      expect(backfillService.runBuyerEnrichmentChunk).toHaveBeenCalledWith(
+        'acc-1',
+        cursor,
+      );
+      expect(backfillService.runNextChunk).not.toHaveBeenCalled();
+      expect(lastCommitUpdate(jobsPersistence)).toMatchObject({
+        status: 'QUEUED',
+        cursorBefore: nextCursor,
+        chunksProcessed: 1,
+      });
+    });
+
+    it('marks COMPLETED when the enrichment reached the oldest persisted order', async () => {
+      const { worker, jobsPersistence } = buildWorker({
+        clock: fakeClock(now),
+        jobsPersistence: {
+          claimJobs: jest.fn().mockResolvedValue([enrichmentJob()]),
+        },
+        backfillService: {
+          runBuyerEnrichmentChunk: jest.fn().mockResolvedValue({
+            done: true,
+            nextCursor: cursor,
+            ordersFetched: 0,
+          }),
+        },
+      });
+      await worker.runTickOnce();
+      expect(lastCommitUpdate(jobsPersistence)).toMatchObject({
+        status: 'COMPLETED',
+        completedAt: now,
+      });
+    });
+
+    it('an incomplete provider window fails the job WITHOUT advancing the cursor', async () => {
+      const { worker, jobsPersistence } = buildWorker({
+        clock: fakeClock(now),
+        jobsPersistence: {
+          claimJobs: jest.fn().mockResolvedValue([enrichmentJob()]),
+        },
+        backfillService: {
+          runBuyerEnrichmentChunk: jest
+            .fn()
+            .mockRejectedValue(
+              new BackfillError('ENRICHMENT_WINDOW_INCOMPLETE'),
+            ),
+        },
+      });
+      await worker.runTickOnce();
+      const update = lastCommitUpdate(jobsPersistence);
+      expect(update).toMatchObject({
+        status: 'FAILED',
+        lastErrorCode: 'ENRICHMENT_WINDOW_INCOMPLETE',
+      });
+      expect(update.cursorBefore).toBeUndefined();
+    });
+
+    it('a transient failure keeps the cursor and schedules a retry', async () => {
+      const { worker, jobsPersistence } = buildWorker({
+        clock: fakeClock(now),
+        jobsPersistence: {
+          claimJobs: jest.fn().mockResolvedValue([enrichmentJob()]),
+        },
+        backfillService: {
+          runBuyerEnrichmentChunk: jest
+            .fn()
+            .mockRejectedValue(new BackfillError('SYNC_FAILED')),
+        },
+      });
+      await worker.runTickOnce();
+      const update = lastCommitUpdate(jobsPersistence);
+      expect(update.status).toBe('RETRY_WAIT');
+      expect(update.cursorBefore).toBeUndefined();
+    });
+  });
+
   describe('inicialização', () => {
     it('never starts a timer when NODE_ENV=test, even if the env flag says enabled', () => {
       const timers = fakeTimers();

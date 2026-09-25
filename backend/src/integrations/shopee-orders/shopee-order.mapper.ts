@@ -9,7 +9,10 @@ import {
   PENDING_ORDER_STATUS,
   type CanonicalOrderStatus,
 } from '../marketplace-orders/order-status';
+import type { MappedBuyerRecord } from '../marketplace-orders/buyer-snapshot';
+import type { OrderBuyerLink } from '../marketplace-orders/marketplace-orders-persistence.service';
 import type {
+  ShopeeOrderBuyer,
   ShopeeOrderDetailItem,
   ShopeeOrderDetailOrder,
   ShopeeOrderStatus,
@@ -163,8 +166,54 @@ export function mapShopeeOrder(
     externalMarketplaceId: null,
     logisticsClassification: classifyShopeeFulfillmentFlag(raw.fulfillmentFlag),
     logisticsType: null,
+    buyer: mapShopeeBuyer(raw.buyer),
     items: raw.items.map((item) => mapShopeeOrderItem(item, raw.currency)),
   };
+}
+
+/**
+ * Nome/telefone são do DESTINATÁRIO (`recipient_address`) — pode não ser o
+ * comprador, por isso ficam em `recipientName`/`recipientPhone`, nunca como
+ * nome/telefone do comprador; nunca `dropshipper_phone`/
+ * `virtual_contact_number`. A Shopee não fornece nome nem e-mail do
+ * comprador — `buyer_username` é a identificação dele.
+ */
+function mapShopeeBuyer(
+  raw: ShopeeOrderBuyer | null,
+): MappedBuyerRecord | null {
+  if (raw === null) return null;
+  return {
+    externalBuyerId: raw.buyerUserId,
+    dataSource: 'SHOPEE_ORDER_DETAIL',
+    username: raw.buyerUsername,
+    buyerName: null,
+    recipientName: raw.recipientName,
+    email: null,
+    recipientPhone: raw.recipientPhone,
+    city: raw.city,
+    state: raw.state,
+    postalCode: raw.zipcode,
+  };
+}
+
+/**
+ * Enriquecimento histórico de compradores: só o comprador de cada detalhe
+ * (sem exigir , nunca o pedido inteiro).
+ */
+export function mapShopeeOrderBuyerLinks(
+  details: ShopeeOrderDetailOrder[],
+): OrderBuyerLink[] {
+  return details.flatMap((detail) => {
+    const buyer = mapShopeeBuyer(detail.buyer);
+    if (buyer === null) return [];
+    return [
+      {
+        externalOrderId: detail.orderSn,
+        buyer,
+        observedAt: toValidDate(detail.updateTime ?? detail.createTime),
+      },
+    ];
+  });
 }
 
 function mapShopeeOrderItem(

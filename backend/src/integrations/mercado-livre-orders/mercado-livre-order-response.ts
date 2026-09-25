@@ -35,6 +35,19 @@ export interface RawMercadoLivrePayment {
   transactionAmountRefunded: string | null;
 }
 
+/**
+ * `order.buyer` (função "Clientes") — allowlist: só `id`, `nickname`,
+ * `first_name`, `last_name`. Nenhum e-mail/telefone/documento/endereço é
+ * lido, mesmo que presente no corpo. Campo auxiliar: ausente ou inválido
+ * vira `null`, nunca rejeita o pedido.
+ */
+export interface RawMercadoLivreBuyer {
+  id: string;
+  nickname: string | null;
+  firstName: string | null;
+  lastName: string | null;
+}
+
 export interface RawMercadoLivreOrder {
   externalOrderId: string;
   status: string;
@@ -60,6 +73,7 @@ export interface RawMercadoLivreOrder {
    * demais extensões financeiras); ausente vira array vazio.
    */
   payments: RawMercadoLivrePayment[];
+  buyer: RawMercadoLivreBuyer | null;
   items: RawMercadoLivreOrderItem[];
 }
 
@@ -177,6 +191,32 @@ function validatePaymentEntry(value: unknown): RawMercadoLivrePayment | null {
   };
 }
 
+const MAX_BUYER_TEXT_LENGTH = 255;
+
+function optionalBuyerText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= MAX_BUYER_TEXT_LENGTH
+    ? trimmed
+    : null;
+}
+
+function validateBuyer(value: unknown): RawMercadoLivreBuyer | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const raw = value as Record<string, unknown>;
+  const id =
+    typeof raw.id === 'number' && Number.isSafeInteger(raw.id) && raw.id > 0
+      ? String(raw.id)
+      : optionalBuyerText(raw.id);
+  if (id === null) return null;
+  return {
+    id,
+    nickname: optionalBuyerText(raw.nickname),
+    firstName: optionalBuyerText(raw.first_name),
+    lastName: optionalBuyerText(raw.last_name),
+  };
+}
+
 /**
  * Exportada para reúso pelo fallback de recuperação de `shipping.id` via
  * `GET /orders/{id}` (correção da auditoria Full, revisão crítica —
@@ -249,6 +289,7 @@ export function validateOrderEntry(
         ? String(shippingId)
         : null,
     payments,
+    buyer: validateBuyer(raw.buyer),
     items,
   };
 }

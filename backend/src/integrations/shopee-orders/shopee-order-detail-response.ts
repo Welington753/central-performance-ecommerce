@@ -57,6 +57,22 @@ export interface ShopeeOrderDetailItem {
   discountedPrice: number;
 }
 
+/**
+ * Comprador/destinatário (função "Clientes") — allowlist: `buyer_user_id`,
+ * `buyer_username` e, de `recipient_address`, só `name`/`phone`/`city`/
+ * `state`/`zipcode`. Valores mascarados pela Shopee (`*`) são mantidos como
+ * recebidos. Campo auxiliar: inválido vira `null`, nunca rejeita o pedido.
+ */
+export interface ShopeeOrderBuyer {
+  buyerUserId: string;
+  buyerUsername: string | null;
+  recipientName: string | null;
+  recipientPhone: string | null;
+  city: string | null;
+  state: string | null;
+  zipcode: string | null;
+}
+
 export interface ShopeeOrderDetailOrder {
   orderSn: string;
   region: string;
@@ -69,6 +85,7 @@ export interface ShopeeOrderDetailOrder {
   updateTime: number | null;
   /** `null` quando `fulfillment_flag` está ausente (campo opcional). */
   fulfillmentFlag: string | null;
+  buyer: ShopeeOrderBuyer | null;
   items: ShopeeOrderDetailItem[];
 }
 
@@ -132,6 +149,44 @@ function normalizeNullableString(
     return { valid: false };
   }
   return { valid: true, value: value.length === 0 ? null : value };
+}
+
+const MAX_BUYER_TEXT_LENGTH = 255;
+
+function optionalBuyerText(value: unknown): string | null {
+  if (typeof value !== 'string') return null;
+  const trimmed = value.trim();
+  return trimmed.length > 0 && trimmed.length <= MAX_BUYER_TEXT_LENGTH
+    ? trimmed
+    : null;
+}
+
+function validateBuyer(
+  order: Record<string, unknown>,
+): ShopeeOrderBuyer | null {
+  const rawId = order.buyer_user_id;
+  const buyerUserId = isPositiveSafeInteger(rawId)
+    ? String(rawId)
+    : typeof rawId === 'string' && /^[1-9]\d{0,19}$/.test(rawId)
+      ? rawId
+      : null;
+  if (buyerUserId === null) return null;
+
+  const address =
+    typeof order.recipient_address === 'object' &&
+    order.recipient_address !== null &&
+    !Array.isArray(order.recipient_address)
+      ? (order.recipient_address as Record<string, unknown>)
+      : {};
+  return {
+    buyerUserId,
+    buyerUsername: optionalBuyerText(order.buyer_username),
+    recipientName: optionalBuyerText(address.name),
+    recipientPhone: optionalBuyerText(address.phone),
+    city: optionalBuyerText(address.city),
+    state: optionalBuyerText(address.state),
+    zipcode: optionalBuyerText(address.zipcode),
+  };
 }
 
 function validateItem(raw: unknown): ItemValidation {
@@ -310,6 +365,7 @@ function validateOrder(raw: unknown): OrderValidation {
       createTime,
       updateTime,
       fulfillmentFlag,
+      buyer: validateBuyer(order),
       items,
     },
   };
@@ -318,8 +374,9 @@ function validateOrder(raw: unknown): OrderValidation {
 /**
  * Validador puro de uma resposta DESCONHECIDA de
  * `GET /api/v2/order/get_order_detail` (Checkpoint CP2K-2). Allowlist
- * estrita: extrai SOMENTE os campos do contrato acima - `buyer_user_id`,
- * `buyer_username`, `buyer_cpf_id`, `recipient_address`, `dropshipper`,
+ * estrita: extrai SOMENTE os campos do contrato acima (comprador: só os
+ * subcampos de `ShopeeOrderBuyer`) - `buyer_cpf_id`, demais subcampos de
+ * `recipient_address` (`full_address`, `town`, `district`...), `dropshipper`,
  * `dropshipper_phone`, `virtual_contact_number`, `package_query_number`,
  * `pharmacist_name`, `prescription_images`, `prescription_reject_reason`,
  * `buyer_proof_of_collection`, `message_to_seller` e qualquer campo

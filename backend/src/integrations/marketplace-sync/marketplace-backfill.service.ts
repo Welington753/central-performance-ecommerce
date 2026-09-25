@@ -14,11 +14,13 @@ import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-
 import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
+  type OrderBuyersFetchResult,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
 import {
   computeBackfillChunkWindow,
   hasReachedBackfillSafetyFloor,
   utcInstantToSaoPauloDateString,
+  type PeriodWindow,
 } from '../marketplace-orders/period.util';
 import {
   BackfillJobActiveConflictError,
@@ -53,7 +55,9 @@ export type BackfillErrorCode =
   | 'TOKEN_REFRESH_PENDING'
   | 'ML_APP_CONFIGURATION_ERROR'
   | 'PROVIDER_RATE_LIMITED'
-  | 'SYNC_FAILED';
+  | 'SYNC_FAILED'
+  | 'ENRICHMENT_WINDOW_INCOMPLETE'
+  | 'BACKFILL_JOB_MODE_CONFLICT';
 
 export class BackfillError extends Error {
   constructor(public readonly code: BackfillErrorCode) {
@@ -66,6 +70,34 @@ export interface BackfillChunkResult {
   oldestCoveredAt: string;
   ordersFetched: number;
 }
+
+export interface BuyerEnrichmentChunkResult {
+  done: boolean;
+  /** Próximo `cursor_before` (limite superior exclusivo da próxima janela). */
+  nextCursor: Date;
+  ordersFetched: number;
+  ordersLinked: number;
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+// Margem abaixo do pedido mais antigo persistido — a última janela sempre o
+// inclui com folga, independentemente de arredondamento de fronteira na fonte.
+const BUYER_ENRICHMENT_FLOOR_MARGIN_MS = DAY_MS;
+
+// Janela inicial de cada chunk. Acima do teto de enumeração do provedor
+// (Shopee: 5000 pedidos, `shopee-orders-fetch.util.ts`; ML: offset 20000) a
+// janela é dividida ao meio até `BUYER_ENRICHMENT_MIN_WINDOW_MS`.
+const BUYER_ENRICHMENT_CHUNK_DAYS: Record<
+  Marketplace.MERCADO_LIVRE | Marketplace.SHOPEE,
+  number
+> = {
+  [Marketplace.MERCADO_LIVRE]: 30,
+  [Marketplace.SHOPEE]: 7,
+};
+
+/** Menor janela tentada: 1 hora. Nem ela coube → job para (`FAILED`, retomável). */
+export const BUYER_ENRICHMENT_MIN_WINDOW_MS = 60 * 60 * 1000;
 
 /**
  * `SAFETY_LIMIT_REACHED` NUNCA significa "chegou à primeira venda da
@@ -256,7 +288,10 @@ export class MarketplaceBackfillService {
       await this.jobsPersistence.createJob(accountId, account.marketplace);
     } catch (error) {
       if (!(error instanceof BackfillJobActiveConflictError)) throw error;
-      // Idempotência do `start`: já existe job ativo, devolve o existente.
+      // Idempotência do `start`: já existe job HISTORY ativo, devolve o
+      // existente. Job ativo de OUTRO modo (enriquecimento de compradores)
+      // nunca é tratado como se fosse o backfill — conflito explícito.
+      await this.throwIfOtherModeActive(accountId);
     }
     return this.getStatus(accountId);
   }
@@ -269,8 +304,20 @@ export class MarketplaceBackfillService {
 
   async resumeBackfill(accountId: string): Promise<BackfillStatus> {
     await this.marketplaceAccountsService.findByIdOrFail(accountId);
-    await this.jobsPersistence.resumeJob(accountId);
+    try {
+      await this.jobsPersistence.resumeJob(accountId);
+    } catch (error) {
+      if (!(error instanceof BackfillJobActiveConflictError)) throw error;
+      throw new BackfillError('BACKFILL_JOB_MODE_CONFLICT');
+    }
     return this.getStatus(accountId);
+  }
+
+  private async throwIfOtherModeActive(accountId: string): Promise<void> {
+    const active = await this.jobsPersistence.findActiveJob(accountId);
+    if (active && active.mode !== 'HISTORY') {
+      throw new BackfillError('BACKFILL_JOB_MODE_CONFLICT');
+    }
   }
 
   private toJobSummary(job: BackfillJobRow): BackfillJobSummary {
@@ -340,6 +387,97 @@ export class MarketplaceBackfillService {
     } catch (error) {
       throw this.mapChunkError(error);
     }
+  }
+
+  /**
+   * UM chunk do enriquecimento histórico de compradores (função "Clientes",
+   * só Mercado Livre/Shopee): lista `[cursorBefore - N dias, cursorBefore)`
+   * pela MESMA listagem em lote da sincronização (por data de criação) e
+   * grava SÓ comprador + associação de pedidos já persistidos
+   * (`attachBuyersToOrders`) — sem `/shipments`, sem reclassificar Full, sem
+   * tocar financeiro/status/itens, sem `sync_runs` nem
+   * `last_successful_sync_at` (a cobertura da sincronização normal não muda).
+   * Anda para trás até 1 dia antes do pedido mais antigo da conta; o cursor
+   * fica no job (worker), nunca derivado de `sync_runs`.
+   */
+  async runBuyerEnrichmentChunk(
+    accountId: string,
+    cursorBefore: Date,
+  ): Promise<BuyerEnrichmentChunkResult> {
+    const account =
+      await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    if (account.status !== MarketplaceAccountStatus.CONNECTED) {
+      throw new BackfillError('ACCOUNT_NOT_CONNECTED');
+    }
+    if (
+      account.marketplace !== Marketplace.MERCADO_LIVRE &&
+      account.marketplace !== Marketplace.SHOPEE
+    ) {
+      throw new BackfillError('MARKETPLACE_NOT_SUPPORTED');
+    }
+
+    const idle = {
+      done: true,
+      nextCursor: cursorBefore,
+      ordersFetched: 0,
+      ordersLinked: 0,
+    };
+    const range = await this.persistence.getAccountOrderDateRange(accountId);
+    if (range === null) return idle;
+    const floor = new Date(
+      range.first.getTime() - BUYER_ENRICHMENT_FLOOR_MARGIN_MS,
+    );
+    if (cursorBefore.getTime() <= floor.getTime()) return idle;
+
+    // Janela acima do teto do provedor: divide ao meio (mesmo `to`, `from`
+    // mais recente) até caber ou até o mínimo — nunca avança o cursor sobre
+    // pedidos não enumerados e nunca repete a mesma janela.
+    let span = BUYER_ENRICHMENT_CHUNK_DAYS[account.marketplace] * DAY_MS;
+    let window: PeriodWindow;
+    let result: OrderBuyersFetchResult;
+    for (;;) {
+      window = {
+        from: new Date(
+          Math.max(cursorBefore.getTime() - span, floor.getTime()),
+        ),
+        to: cursorBefore,
+      };
+      try {
+        result = await this.fetchOrderBuyers(
+          account.marketplace,
+          accountId,
+          window,
+        );
+      } catch (error) {
+        throw this.mapChunkError(error);
+      }
+      if (result.complete) break;
+      if (span <= BUYER_ENRICHMENT_MIN_WINDOW_MS) {
+        throw new BackfillError('ENRICHMENT_WINDOW_INCOMPLETE');
+      }
+      span = Math.max(BUYER_ENRICHMENT_MIN_WINDOW_MS, Math.floor(span / 2));
+    }
+
+    const ordersLinked = await this.persistence.attachBuyersToOrders(
+      accountId,
+      result.links,
+    );
+    return {
+      done: window.from.getTime() <= floor.getTime(),
+      nextCursor: window.from,
+      ordersFetched: result.ordersFetched,
+      ordersLinked,
+    };
+  }
+
+  private fetchOrderBuyers(
+    marketplace: Marketplace,
+    accountId: string,
+    window: PeriodWindow,
+  ): Promise<OrderBuyersFetchResult> {
+    return marketplace === Marketplace.MERCADO_LIVRE
+      ? this.mlSyncService.fetchOrderBuyers(accountId, window)
+      : this.shopeeSyncService.fetchOrderBuyers(accountId, window);
   }
 
   private async dispatchChunk(

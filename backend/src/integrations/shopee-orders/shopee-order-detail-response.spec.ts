@@ -66,6 +66,7 @@ describe('validateShopeeOrderDetailResponseBody - sucesso completo', () => {
             createTime: 1712601591,
             updateTime: 1713139948,
             fulfillmentFlag: 'fulfilled_by_local_seller',
+            buyer: null,
             items: [
               {
                 itemId: '2600144043',
@@ -478,14 +479,24 @@ describe('validateShopeeOrderDetailResponseBody - IDs int64 seguros vs. unsafe',
 });
 
 describe('validateShopeeOrderDetailResponseBody - campos pessoais ignorados', () => {
-  it('never leaks buyer/recipient personal fields into the result, even if present in the raw body', () => {
+  it('extracts ONLY the allowlisted buyer/recipient fields, never CPF, full address, dropshipper, virtual contact or messages', () => {
     const order = validOrder({
       buyer_user_id: 1170319091,
       buyer_username: 'xt4fdsf96j',
       buyer_cpf_id: '123.456.789-00',
-      recipient_address: { name: 'Max', phone: '3828203' },
+      recipient_address: {
+        name: 'Max',
+        phone: '3828203',
+        city: 'Campinas',
+        state: 'SP',
+        zipcode: '13000-000',
+        town: 'Centro',
+        district: 'Distrito X',
+        full_address: 'Rua Secreta, 123, apto 45',
+      },
       dropshipper: 'someone',
       dropshipper_phone: '099999999',
+      virtual_contact_number: '0800-VIRTUAL',
       message_to_seller: 'please gift wrap',
     });
     const result = validateShopeeOrderDetailResponseBody(
@@ -493,14 +504,87 @@ describe('validateShopeeOrderDetailResponseBody - campos pessoais ignorados', ()
       REQUESTED,
     );
     expect(result.valid).toBe(true);
+    if (!result.valid) return;
+    expect(result.result.orders[0].buyer).toEqual({
+      buyerUserId: '1170319091',
+      buyerUsername: 'xt4fdsf96j',
+      recipientName: 'Max',
+      recipientPhone: '3828203',
+      city: 'Campinas',
+      state: 'SP',
+      zipcode: '13000-000',
+    });
     const serialized = JSON.stringify(result);
-    expect(serialized).not.toContain('buyer_user_id');
-    expect(serialized).not.toContain('xt4fdsf96j');
     expect(serialized).not.toContain('123.456.789-00');
-    expect(serialized).not.toContain('Max');
-    expect(serialized).not.toContain('3828203');
+    expect(serialized).not.toContain('Rua Secreta');
+    expect(serialized).not.toContain('Centro');
+    expect(serialized).not.toContain('Distrito X');
     expect(serialized).not.toContain('dropshipper');
+    expect(serialized).not.toContain('099999999');
+    expect(serialized).not.toContain('0800-VIRTUAL');
     expect(serialized).not.toContain('please gift wrap');
+  });
+
+  it('keeps masked recipient values as received', () => {
+    const order = validOrder({
+      buyer_user_id: 42,
+      recipient_address: { name: 'M***x', phone: '******03', zipcode: '*****' },
+    });
+    const result = validateShopeeOrderDetailResponseBody(
+      baseBody({ orders: [order] }),
+      REQUESTED,
+    );
+    if (!result.valid) throw new Error('expected valid');
+    expect(result.result.orders[0].buyer).toMatchObject({
+      recipientName: 'M***x',
+      recipientPhone: '******03',
+      zipcode: '*****',
+    });
+  });
+
+  it.each([
+    ['ausente', undefined],
+    ['zero', 0],
+    ['negativo', -1],
+    ['objeto', { id: 1 }],
+    ['string não numérica', 'abc'],
+  ])(
+    'buyer_user_id %s vira buyer null sem rejeitar o pedido',
+    (_label, buyerUserId) => {
+      const order = validOrder({
+        buyer_user_id: buyerUserId,
+        buyer_username: 'alguem',
+      });
+      const result = validateShopeeOrderDetailResponseBody(
+        baseBody({ orders: [order] }),
+        REQUESTED,
+      );
+      expect(result.valid).toBe(true);
+      if (!result.valid) return;
+      expect(result.result.orders[0].buyer).toBeNull();
+    },
+  );
+
+  it('invalid buyer_username/recipient subfields become null without rejecting the order', () => {
+    const order = validOrder({
+      buyer_user_id: '987',
+      buyer_username: 12345,
+      recipient_address: 'not-an-object',
+    });
+    const result = validateShopeeOrderDetailResponseBody(
+      baseBody({ orders: [order] }),
+      REQUESTED,
+    );
+    if (!result.valid) throw new Error('expected valid');
+    expect(result.result.orders[0].buyer).toEqual({
+      buyerUserId: '987',
+      buyerUsername: null,
+      recipientName: null,
+      recipientPhone: null,
+      city: null,
+      state: null,
+      zipcode: null,
+    });
   });
 });
 

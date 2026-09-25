@@ -6,7 +6,9 @@ import {
   centsToDecimalString,
   decimalStringToCents,
 } from '../marketplace-orders/money.util';
+import type { MappedBuyerRecord } from '../marketplace-orders/buyer-snapshot';
 import type {
+  RawMercadoLivreBuyer,
   RawMercadoLivreOrder,
   RawMercadoLivreOrderItem,
   RawMercadoLivrePayment,
@@ -109,7 +111,34 @@ export function mapMercadoLivreOrder(
       raw.payments,
       'transactionAmountRefunded',
     ),
+    buyer: mapMercadoLivreBuyer(raw.buyer),
     items: raw.items.map(mapMercadoLivreOrderItem),
+  };
+}
+
+/**
+ * O pedido do Mercado Livre não traz e-mail/telefone/endereço do comprador
+ * (nunca inventados aqui); `first_name`/`last_name` só quando a própria
+ * resposta os trouxe.
+ */
+function mapMercadoLivreBuyer(
+  raw: RawMercadoLivreBuyer | null,
+): MappedBuyerRecord | null {
+  if (raw === null) return null;
+  const nameParts = [raw.firstName, raw.lastName].filter(
+    (part): part is string => part !== null,
+  );
+  return {
+    externalBuyerId: raw.id,
+    dataSource: 'MERCADO_LIVRE_ORDERS',
+    username: raw.nickname,
+    buyerName: nameParts.length > 0 ? nameParts.join(' ') : null,
+    recipientName: null,
+    email: null,
+    recipientPhone: null,
+    city: null,
+    state: null,
+    postalCode: null,
   };
 }
 

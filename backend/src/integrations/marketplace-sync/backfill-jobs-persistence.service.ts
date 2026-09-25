@@ -9,7 +9,16 @@ export type BackfillJobStatus =
   | 'RETRY_WAIT'
   | 'PAUSED'
   | 'FAILED'
-  | 'SAFETY_LIMIT_REACHED';
+  | 'SAFETY_LIMIT_REACHED'
+  | 'COMPLETED';
+
+/**
+ * `HISTORY`: backfill histórico original (avança para antes da cobertura).
+ * `BUYER_ENRICHMENT`: reprocessa, do mais recente ao pedido mais antigo já
+ * persistido, janelas já cobertas para associar compradores (cursor próprio
+ * em `cursor_before`). Uma conta nunca tem dois jobs ativos, de qualquer modo.
+ */
+export type BackfillJobMode = 'HISTORY' | 'BUYER_ENRICHMENT';
 
 /** Estados que contam como "job ativo" para a conta (índice único parcial). */
 export const ACTIVE_BACKFILL_JOB_STATUSES: readonly BackfillJobStatus[] = [
@@ -25,6 +34,8 @@ export interface BackfillJobRow {
   id: string;
   marketplaceAccountId: string;
   marketplace: Marketplace;
+  mode: BackfillJobMode;
+  cursorBefore: Date | null;
   status: BackfillJobStatus;
   chunksProcessed: number;
   attemptCount: number;
@@ -53,12 +64,16 @@ export interface BackfillJobStateUpdate {
   pauseRequested: boolean;
   /** `true`: libera o lease (o job volta a ficar reivindicável pela claim query, se seu status ainda for ativo). Sempre `true` no fluxo normal (um chunk por claim) — mantido explícito só para clareza/testes. */
   releaseLease: boolean;
+  /** Só `BUYER_ENRICHMENT`: novo cursor após um chunk concluído; ausente preserva o atual. */
+  cursorBefore?: Date;
 }
 
 interface BackfillJobRawRow {
   id: string;
   marketplace_account_id: string;
   marketplace: Marketplace;
+  mode: BackfillJobMode;
+  cursor_before: Date | null;
   status: BackfillJobStatus;
   chunks_processed: number;
   attempt_count: number;
@@ -81,6 +96,8 @@ function mapRow(row: BackfillJobRawRow): BackfillJobRow {
     id: row.id,
     marketplaceAccountId: row.marketplace_account_id,
     marketplace: row.marketplace,
+    mode: row.mode,
+    cursorBefore: row.cursor_before,
     status: row.status,
     chunksProcessed: row.chunks_processed,
     attemptCount: row.attempt_count,
@@ -100,7 +117,7 @@ function mapRow(row: BackfillJobRawRow): BackfillJobRow {
 }
 
 const SELECT_COLUMNS = `
-  id, marketplace_account_id, marketplace, status, chunks_processed,
+  id, marketplace_account_id, marketplace, mode, cursor_before, status, chunks_processed,
   attempt_count, requested_at, started_at, last_activity_at, next_attempt_at,
   completed_at, last_error_code, pause_requested, lease_owner,
   lease_expires_at, version, created_at, updated_at
@@ -130,14 +147,16 @@ export class BackfillJobsPersistenceService {
   async createJob(
     accountId: string,
     marketplace: Marketplace,
+    mode: BackfillJobMode = 'HISTORY',
+    cursorBefore: Date | null = null,
   ): Promise<BackfillJobRow> {
     try {
       const rows = await this.dataSource.query<BackfillJobRawRow[]>(
         `INSERT INTO marketplace_backfill_jobs
-            (marketplace_account_id, marketplace, status, next_attempt_at)
-          VALUES ($1, $2, 'QUEUED', now())
+            (marketplace_account_id, marketplace, mode, cursor_before, status, next_attempt_at)
+          VALUES ($1, $2, $3, $4, 'QUEUED', now())
           RETURNING ${SELECT_COLUMNS}`,
-        [accountId, marketplace],
+        [accountId, marketplace, mode, cursorBefore],
       );
       return mapRow(rows[0]);
     } catch (error) {
@@ -159,14 +178,17 @@ export class BackfillJobsPersistenceService {
     return rows[0] ? mapRow(rows[0]) : null;
   }
 
-  /** Job mais recente da conta, ativo ou terminal — usado pelo `status` e por `resume`. */
-  async findLatestJob(accountId: string): Promise<BackfillJobRow | null> {
+  /** Job mais recente da conta NO MODO pedido, ativo ou terminal — usado pelo `status` e por `resume`. */
+  async findLatestJob(
+    accountId: string,
+    mode: BackfillJobMode = 'HISTORY',
+  ): Promise<BackfillJobRow | null> {
     const rows = await this.dataSource.query<BackfillJobRawRow[]>(
       `SELECT ${SELECT_COLUMNS} FROM marketplace_backfill_jobs
-        WHERE marketplace_account_id = $1
+        WHERE marketplace_account_id = $1 AND mode = $2
         ORDER BY created_at DESC
         LIMIT 1`,
-      [accountId],
+      [accountId, mode],
     );
     return rows[0] ? mapRow(rows[0]) : null;
   }
@@ -179,7 +201,10 @@ export class BackfillJobsPersistenceService {
    * para `PAUSED` ele mesmo (nunca interrompe um chunk em voo). Idempotente:
    * chamar de novo com o job já `PAUSED` não faz nada.
    */
-  async requestPause(accountId: string): Promise<BackfillJobRow | null> {
+  async requestPause(
+    accountId: string,
+    mode: BackfillJobMode = 'HISTORY',
+  ): Promise<BackfillJobRow | null> {
     // `UPDATE ... RETURNING` via `DataSource.query()` devolve `[rows,
     // rowCount]` — ver comentário em `commitJobState`.
     const [rows] = await this.dataSource.query<[BackfillJobRawRow[], number]>(
@@ -188,10 +213,10 @@ export class BackfillJobsPersistenceService {
               pause_requested = CASE WHEN status = 'RUNNING' THEN true ELSE pause_requested END,
               updated_at = now(),
               version = version + 1
-        WHERE marketplace_account_id = $1
+        WHERE marketplace_account_id = $1 AND mode = $2
           AND status IN ('QUEUED', 'RUNNING', 'RETRY_WAIT', 'PAUSED')
         RETURNING ${SELECT_COLUMNS}`,
-      [accountId],
+      [accountId, mode],
     );
     return rows[0] ? mapRow(rows[0]) : null;
   }
@@ -203,9 +228,17 @@ export class BackfillJobsPersistenceService {
    * está) para qualquer outro status — nunca reabre um job já
    * `SAFETY_LIMIT_REACHED` nem interfere em um job já ativo.
    */
-  async resumeJob(accountId: string): Promise<BackfillJobRow | null> {
-    const [rows] = await this.dataSource.query<[BackfillJobRawRow[], number]>(
-      `UPDATE marketplace_backfill_jobs
+  async resumeJob(
+    accountId: string,
+    mode: BackfillJobMode = 'HISTORY',
+  ): Promise<BackfillJobRow | null> {
+    // Reativar um job deste modo com OUTRO modo já ativo na conta viola o
+    // índice único "um job ativo por conta" → `BackfillJobActiveConflictError`
+    // (409 no chamador), nunca um 500 cru.
+    let rows: BackfillJobRawRow[];
+    try {
+      [rows] = await this.dataSource.query<[BackfillJobRawRow[], number]>(
+        `UPDATE marketplace_backfill_jobs
           SET status = 'QUEUED',
               pause_requested = false,
               attempt_count = 0,
@@ -214,16 +247,22 @@ export class BackfillJobsPersistenceService {
               version = version + 1
         WHERE id = (
           SELECT id FROM marketplace_backfill_jobs
-           WHERE marketplace_account_id = $1
+           WHERE marketplace_account_id = $1 AND mode = $2
            ORDER BY created_at DESC
            LIMIT 1
         )
           AND status IN ('PAUSED', 'FAILED')
         RETURNING ${SELECT_COLUMNS}`,
-      [accountId],
-    );
+        [accountId, mode],
+      );
+    } catch (error) {
+      if (this.isActiveJobConflict(error)) {
+        throw new BackfillJobActiveConflictError();
+      }
+      throw error;
+    }
     if (rows[0]) return mapRow(rows[0]);
-    return this.findLatestJob(accountId);
+    return this.findLatestJob(accountId, mode);
   }
 
   /**
@@ -326,6 +365,7 @@ export class BackfillJobsPersistenceService {
               pause_requested = $11,
               lease_owner = CASE WHEN $12::boolean THEN NULL ELSE lease_owner END,
               lease_expires_at = CASE WHEN $12::boolean THEN NULL ELSE lease_expires_at END,
+              cursor_before = COALESCE($13::timestamptz, cursor_before),
               version = version + 1,
               updated_at = now()
         WHERE id = $1 AND version = $2 AND lease_owner = $3
@@ -343,6 +383,7 @@ export class BackfillJobsPersistenceService {
         update.lastErrorCode,
         update.pauseRequested,
         update.releaseLease,
+        update.cursorBefore ?? null,
       ],
     );
     return rows.length === 1;

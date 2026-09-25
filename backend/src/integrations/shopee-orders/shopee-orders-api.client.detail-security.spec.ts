@@ -45,8 +45,8 @@ describe('ShopeeOrdersApiClient.getOrderDetail - nenhuma chamada com host arbitr
   );
 });
 
-describe('ShopeeOrdersApiClient.getOrderDetail - nunca solicita campo pessoal', () => {
-  it('never sends a caller-controllable response_optional_fields, always the fixed closed constant', async () => {
+describe('ShopeeOrdersApiClient.getOrderDetail - campos opcionais fechados', () => {
+  it('never sends a caller-controllable response_optional_fields, always the fixed closed constant (never CPF/dropshipper/messages)', async () => {
     const fetchImpl = jest
       .fn()
       .mockResolvedValue(jsonResponse(200, validOrderDetailBody()));
@@ -65,10 +65,13 @@ describe('ShopeeOrdersApiClient.getOrderDetail - nunca solicita campo pessoal', 
     const [calledUrl] = fetchImpl.mock.calls[0] as [string];
     const url = new URL(calledUrl);
     const requestedFields = url.searchParams.get('response_optional_fields');
-    expect(requestedFields).toBe('total_amount,item_list,fulfillment_flag');
-    expect(requestedFields).not.toContain('buyer_user_id');
-    expect(requestedFields).not.toContain('recipient_address');
+    expect(requestedFields).toBe(
+      'total_amount,item_list,fulfillment_flag,buyer_user_id,buyer_username,recipient_address',
+    );
     expect(requestedFields).not.toContain('buyer_cpf_id');
+    expect(requestedFields).not.toContain('dropshipper');
+    expect(requestedFields).not.toContain('virtual_contact_number');
+    expect(requestedFields).not.toContain('message_to_seller');
   });
 });
 

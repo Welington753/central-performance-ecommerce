@@ -1,6 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell } from "@/components/AppShell";
+import { NAV_GROUPS } from "@/lib/navigation";
 
 const pushMock = jest.fn();
 const routerMock = { push: pushMock, replace: jest.fn() };
@@ -81,27 +82,33 @@ describe("AppShell — barra lateral", () => {
     expect(within(nav).getByText("CP")).toBeInTheDocument();
   });
 
-  it("renderiza exatamente os três links das rotas existentes, agrupados", async () => {
+  it("renderiza os links da configuração atual de navegação, agrupados", async () => {
     await renderShell();
 
     const nav = screen.getByRole("navigation", { name: "Navegação principal" });
 
-    expect(within(nav).getByRole("link", { name: "Dashboard" })).toHaveAttribute(
-      "href",
-      "/dashboard",
+    const expected: Array<[string, string, string]> = [
+      ["VISÃO GERAL", "Dashboard", "/dashboard"],
+      ["ANÁLISES", "Full", "/full"],
+      ["ANÁLISES", "Clientes", "/clientes"],
+      ["MARKETPLACES", "Integrações", "/integracoes"],
+      ["OPERAÇÃO", "Sincronizações", "/sincronizacoes"],
+    ];
+    for (const [groupTitle, label, href] of expected) {
+      const group = within(nav).getByText(groupTitle).parentElement as HTMLElement;
+      expect(within(group).getByRole("link", { name: label })).toHaveAttribute(
+        "href",
+        href,
+      );
+    }
+
+    // Nenhum link fora da configuração central (NAV_GROUPS).
+    const configured = NAV_GROUPS.flatMap((group) => group.items);
+    const links = within(nav).getAllByRole("link");
+    expect(links).toHaveLength(configured.length);
+    expect(links.map((link) => link.getAttribute("href"))).toEqual(
+      configured.map((item) => item.href),
     );
-    expect(
-      within(nav).getByRole("link", { name: "Integrações" }),
-    ).toHaveAttribute("href", "/integracoes");
-    expect(
-      within(nav).getByRole("link", { name: "Sincronizações" }),
-    ).toHaveAttribute("href", "/sincronizacoes");
-
-    expect(within(nav).getAllByRole("link")).toHaveLength(3);
-
-    expect(within(nav).getByText("VISÃO GERAL")).toBeInTheDocument();
-    expect(within(nav).getByText("MARKETPLACES")).toBeInTheDocument();
-    expect(within(nav).getByText("OPERAÇÃO")).toBeInTheDocument();
   });
 
   it("marca apenas a rota ativa com aria-current='page'", async () => {

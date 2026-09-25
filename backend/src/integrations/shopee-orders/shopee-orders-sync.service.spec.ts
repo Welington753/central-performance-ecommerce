@@ -49,6 +49,7 @@ function validDetailOrder(orderSn: string) {
     createTime: 1700000000,
     updateTime: 1700003600,
     fulfillmentFlag: null,
+    buyer: null,
     items: [],
   };
 }
@@ -91,6 +92,7 @@ function buildService(
     finalizeSyncRunIncomplete: jest.fn().mockResolvedValue(undefined),
     finalizeSyncRunPartial: jest.fn().mockResolvedValue(undefined),
     markAccountSynced: jest.fn().mockResolvedValue(undefined),
+    findOrdersWithoutBuyer: jest.fn().mockResolvedValue(new Set()),
     ...overrides.persistence,
   };
 
@@ -629,5 +631,96 @@ describe('ShopeeOrdersSyncService.syncOrders', () => {
         ).toBeLessThan(5000);
       },
     );
+  });
+});
+
+describe('ShopeeOrdersSyncService.fetchOrderBuyers (enriquecimento de compradores)', () => {
+  const window = {
+    from: new Date('2026-08-01T00:00:00.000Z'),
+    to: new Date('2026-08-08T00:00:00.000Z'),
+  };
+
+  it('a window above 5000 orders returns complete=false WITHOUT any get_order_detail call nor persistence', async () => {
+    let page = 0;
+    const getOrderList = jest.fn(() => {
+      page += 1;
+      return Promise.resolve({
+        kind: 'success' as const,
+        result: {
+          orders: Array.from({ length: 100 }, (_, i) => ({
+            orderSn: `SN-${page}-${i}`,
+          })),
+          more: true,
+          nextCursor: `cursor-${page}`,
+          requestId: 'req-1',
+        },
+      });
+    });
+    const { service, client, persistence } = buildService({
+      client: { getOrderList },
+      persistence: { findOrdersWithoutBuyer: jest.fn() },
+    });
+    await expect(service.fetchOrderBuyers(ACCOUNT_ID, window)).resolves.toEqual(
+      { links: [], ordersFetched: 0, complete: false },
+    );
+    expect(getOrderList).toHaveBeenCalledWith(
+      expect.objectContaining({ timeRangeField: 'create_time' }),
+    );
+    expect(client.getOrderDetail).not.toHaveBeenCalled();
+    expect(persistence.findOrdersWithoutBuyer).not.toHaveBeenCalled();
+    expect(persistence.beginSyncRun).not.toHaveBeenCalled();
+  });
+
+  it('fetches detail (batched) only for persisted orders still without buyer; recipient data stays as recipient; no sync_run/persist', async () => {
+    const getOrderDetail = jest.fn().mockResolvedValue(
+      detailSuccess([
+        {
+          ...validDetailOrder('B'),
+          // Sem `total_amount` (não pago) — irrelevante para o comprador.
+          totalAmount: null,
+          buyer: {
+            buyerUserId: '123',
+            buyerUsername: 'comprador',
+            recipientName: 'Destinatário X',
+            recipientPhone: '5511999990000',
+            city: 'Santos',
+            state: 'SP',
+            zipcode: '11000-000',
+          },
+        },
+      ]),
+    );
+    const { service, persistence } = buildService({
+      client: {
+        getOrderList: jest.fn().mockResolvedValue(listSuccess(['A', 'B'])),
+        getOrderDetail,
+      },
+      persistence: {
+        findOrdersWithoutBuyer: jest.fn().mockResolvedValue(new Set(['B'])),
+      },
+    });
+
+    const result = await service.fetchOrderBuyers(ACCOUNT_ID, window);
+
+    expect(getOrderDetail).toHaveBeenCalledTimes(1);
+    expect(getOrderDetail).toHaveBeenCalledWith(
+      expect.objectContaining({ orderSnList: ['B'] }),
+    );
+    expect(result).toMatchObject({ complete: true, ordersFetched: 2 });
+    expect(result.links).toHaveLength(1);
+    expect(result.links[0]).toMatchObject({
+      externalOrderId: 'B',
+      observedAt: new Date(1700003600 * 1000),
+    });
+    expect(result.links[0].buyer).toMatchObject({
+      externalBuyerId: '123',
+      username: 'comprador',
+      buyerName: null,
+      recipientName: 'Destinatário X',
+      recipientPhone: '5511999990000',
+    });
+    expect(persistence.beginSyncRun).not.toHaveBeenCalled();
+    expect(persistence.persistOrders).not.toHaveBeenCalled();
+    expect(persistence.markAccountSynced).not.toHaveBeenCalled();
   });
 });

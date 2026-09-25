@@ -49,6 +49,17 @@ describe("Sidebar — navegação lateral", () => {
     expect(link).toHaveAttribute("href", "/full");
   });
 
+  it("Clientes aparece em ANÁLISES, logo após Full, e fica ativo em /clientes", () => {
+    mockPathname("/clientes");
+    render(<Sidebar />);
+
+    const link = screen.getByRole("link", { name: "Clientes" });
+    expect(link).toHaveAttribute("href", "/clientes");
+    expect(link).toHaveAttribute("aria-current", "page");
+    const links = screen.getAllByRole("link").map((item) => item.textContent);
+    expect(links.indexOf("Clientes")).toBe(links.indexOf("Full") + 1);
+  });
+
   it("marca Full como ativo em /full", () => {
     mockPathname("/full");
     render(<Sidebar />);

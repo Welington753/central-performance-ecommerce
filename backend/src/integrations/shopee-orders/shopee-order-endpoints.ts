@@ -14,10 +14,11 @@ export const SHOPEE_ORDER_DETAIL_PATH = '/api/v2/order/get_order_detail';
 
 /**
  * `response_optional_fields` fechado e fixo (Checkpoint CP2K-2) - o cliente
- * NUNCA aceita este valor do chamador; sempre exatamente estes três campos,
- * nenhum campo pessoal (`buyer_user_id`, `recipient_address`, etc. nunca são
- * solicitados). `total_amount`/`item_list`/`fulfillment_flag` são os únicos
- * campos opcionais necessários para o mapper de um checkpoint futuro.
+ * NUNCA aceita este valor do chamador. Desde a função "Clientes", inclui
+ * `buyer_user_id`/`buyer_username`/`recipient_address` (identidade do
+ * comprador e cidade/UF/CEP/nome/telefone do destinatário — o parser só lê
+ * esses subcampos). Nunca solicita `buyer_cpf_id`, `dropshipper_phone`,
+ * mensagens ou qualquer outro campo pessoal.
  */
 export const SHOPEE_ORDER_DETAIL_RESPONSE_OPTIONAL_FIELDS =
-  'total_amount,item_list,fulfillment_flag';
+  'total_amount,item_list,fulfillment_flag,buyer_user_id,buyer_username,recipient_address';

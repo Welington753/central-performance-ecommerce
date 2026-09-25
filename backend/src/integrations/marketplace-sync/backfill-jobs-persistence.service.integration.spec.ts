@@ -359,4 +359,72 @@ describe('BackfillJobsPersistenceService (Postgres real)', () => {
       expect(await service.countCurrentlyRunning()).toBe(2);
     });
   });
+  describe('modo BUYER_ENRICHMENT (função Clientes)', () => {
+    it('stores mode + cursor, keeps history lookups isolated and still allows only ONE active job per account', async () => {
+      const cursor = new Date('2026-09-01T00:00:00.000Z');
+      const job = await service.createJob(
+        accountId,
+        Marketplace.MERCADO_LIVRE,
+        'BUYER_ENRICHMENT',
+        cursor,
+      );
+      expect(job).toMatchObject({
+        mode: 'BUYER_ENRICHMENT',
+        cursorBefore: cursor,
+      });
+      expect(await service.findLatestJob(accountId)).toBeNull();
+      expect(
+        (await service.findLatestJob(accountId, 'BUYER_ENRICHMENT'))?.id,
+      ).toBe(job.id);
+      await expect(
+        service.createJob(accountId, Marketplace.MERCADO_LIVRE),
+      ).rejects.toBeInstanceOf(BackfillJobActiveConflictError);
+    });
+
+    it('commitJobState advances the cursor only when a new one is given (CAS-guarded)', async () => {
+      await service.createJob(
+        accountId,
+        Marketplace.MERCADO_LIVRE,
+        'BUYER_ENRICHMENT',
+        new Date('2026-09-01T00:00:00.000Z'),
+      );
+      const [claimed] = await service.claimJobs('worker-1', 1, 60000);
+      const base = {
+        status: 'QUEUED' as const,
+        chunksProcessed: 1,
+        attemptCount: 0,
+        nextAttemptAt: new Date(),
+        lastActivityAt: new Date(),
+        completedAt: null,
+        lastErrorCode: null,
+        pauseRequested: false,
+        releaseLease: true,
+      };
+      const next = new Date('2026-08-02T00:00:00.000Z');
+      expect(
+        await service.commitJobState(claimed.id, claimed.version, 'worker-1', {
+          ...base,
+          cursorBefore: next,
+        }),
+      ).toBe(true);
+      const [again] = await service.claimJobs('worker-1', 1, 60000);
+      await service.commitJobState(again.id, again.version, 'worker-1', base);
+      const latest = await service.findLatestJob(accountId, 'BUYER_ENRICHMENT');
+      expect(latest?.cursorBefore).toEqual(next);
+    });
+
+    it('pause/resume act only on the requested mode', async () => {
+      await service.createJob(
+        accountId,
+        Marketplace.MERCADO_LIVRE,
+        'BUYER_ENRICHMENT',
+        new Date(),
+      );
+      expect(await service.requestPause(accountId)).toBeNull();
+      const paused = await service.requestPause(accountId, 'BUYER_ENRICHMENT');
+      expect(paused?.status).toBe('PAUSED');
+      const resumed = await service.resumeJob(accountId, 'BUYER_ENRICHMENT');
+      expect(resumed?.status).toBe('QUEUED');
+    });
+  });
 });

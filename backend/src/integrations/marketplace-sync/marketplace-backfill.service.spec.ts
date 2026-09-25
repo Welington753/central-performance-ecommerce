@@ -121,10 +121,14 @@ function buildService(
       first: new Date('2026-06-01T00:00:00.000Z'),
       last: new Date('2026-06-30T00:00:00.000Z'),
     }),
+    attachBuyersToOrders: jest.fn().mockResolvedValue(0),
     ...overrides.persistence,
   };
   const mlSyncService = {
     syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 3 }),
+    fetchOrderBuyers: jest
+      .fn()
+      .mockResolvedValue({ links: [], ordersFetched: 0, complete: true }),
     ...overrides.mlSyncService,
   };
   const amazonSyncService = {
@@ -133,6 +137,9 @@ function buildService(
   };
   const shopeeSyncService = {
     syncOrders: jest.fn().mockResolvedValue({ ordersFetched: 3 }),
+    fetchOrderBuyers: jest
+      .fn()
+      .mockResolvedValue({ links: [], ordersFetched: 0, complete: true }),
     ...overrides.shopeeSyncService,
   };
   const syncRunsService = {
@@ -141,6 +148,7 @@ function buildService(
   };
   const jobsPersistence = {
     findLatestJob: jest.fn().mockResolvedValue(null),
+    findActiveJob: jest.fn().mockResolvedValue(null),
     createJob: jest.fn(),
     requestPause: jest.fn().mockResolvedValue(null),
     resumeJob: jest.fn().mockResolvedValue(null),
@@ -849,6 +857,215 @@ describe('MarketplaceBackfillService', () => {
       });
       // Campos antigos continuam intactos.
       expect(status.oldestCoveredAt).toBe('2026-05-31');
+    });
+  });
+});
+
+describe('MarketplaceBackfillService.runBuyerEnrichmentChunk (função Clientes)', () => {
+  const cursor = new Date('2026-09-01T00:00:00.000Z');
+  const HOUR_MS = 60 * 60 * 1000;
+  const link = {
+    externalOrderId: 'O1',
+    buyer: { externalBuyerId: '9' },
+    observedAt: cursor,
+  };
+  const olderHistory = {
+    getAccountOrderDateRange: jest.fn().mockResolvedValue({
+      first: new Date('2026-01-01T00:00:00.000Z'),
+      last: new Date('2026-08-30T00:00:00.000Z'),
+    }),
+    attachBuyersToOrders: jest.fn().mockResolvedValue(1),
+  };
+  const shopeeAccount = {
+    findByIdOrFail: jest
+      .fn()
+      .mockResolvedValue(account({ marketplace: Marketplace.SHOPEE })),
+  };
+
+  it('lists a 30-day ML window ending at the cursor and persists ONLY buyer links — never the full sync (no /shipments, no sync_runs)', async () => {
+    const { service, mlSyncService, persistence } = buildService({
+      persistence: { ...olderHistory },
+      mlSyncService: {
+        fetchOrderBuyers: jest.fn().mockResolvedValue({
+          links: [link],
+          ordersFetched: 3,
+          complete: true,
+        }),
+      },
+    });
+    const result = await service.runBuyerEnrichmentChunk('acc-1', cursor);
+    expect(mlSyncService.fetchOrderBuyers).toHaveBeenCalledWith('acc-1', {
+      from: new Date('2026-08-02T00:00:00.000Z'),
+      to: cursor,
+    });
+    expect(mlSyncService.syncOrders).not.toHaveBeenCalled();
+    expect(persistence.recoverStaleRunningRuns).not.toHaveBeenCalled();
+    expect(persistence.attachBuyersToOrders).toHaveBeenCalledWith('acc-1', [
+      link,
+    ]);
+    expect(result).toEqual({
+      done: false,
+      nextCursor: new Date('2026-08-02T00:00:00.000Z'),
+      ordersFetched: 3,
+      ordersLinked: 1,
+    });
+  });
+
+  it('clamps the last window to one day before the oldest persisted order and finishes', async () => {
+    const { service, mlSyncService } = buildService({
+      persistence: {
+        getAccountOrderDateRange: jest.fn().mockResolvedValue({
+          first: new Date('2026-08-20T00:00:00.000Z'),
+          last: new Date('2026-08-30T00:00:00.000Z'),
+        }),
+      },
+    });
+    const result = await service.runBuyerEnrichmentChunk('acc-1', cursor);
+    const floor = new Date('2026-08-19T00:00:00.000Z');
+    expect(mlSyncService.fetchOrderBuyers).toHaveBeenCalledWith('acc-1', {
+      from: floor,
+      to: cursor,
+    });
+    expect(result.done).toBe(true);
+    expect(result.nextCursor).toEqual(floor);
+  });
+
+  it('finishes immediately, without any provider call, when the account has no orders (or the cursor already passed the floor)', async () => {
+    const empty = buildService({
+      persistence: {
+        getAccountOrderDateRange: jest.fn().mockResolvedValue(null),
+      },
+    });
+    expect(
+      await empty.service.runBuyerEnrichmentChunk('acc-1', cursor),
+    ).toMatchObject({ done: true, nextCursor: cursor });
+    expect(empty.mlSyncService.fetchOrderBuyers).not.toHaveBeenCalled();
+
+    const past = buildService({ persistence: { ...olderHistory } });
+    const beforeFloor = new Date('2025-12-31T00:00:00.000Z');
+    expect(
+      await past.service.runBuyerEnrichmentChunk('acc-1', beforeFloor),
+    ).toMatchObject({ done: true, nextCursor: beforeFloor });
+    expect(past.mlSyncService.fetchOrderBuyers).not.toHaveBeenCalled();
+  });
+
+  it('Shopee window above the 5000-order cap is halved (same `to`) until it fits; the cursor only advances over the enumerated window', async () => {
+    // Simula uma semana com > 5000 pedidos: só janelas de até ~1,75 dia cabem.
+    const fetchOrderBuyers = jest.fn(
+      (_accountId: string, window: { from: Date; to: Date }) => {
+        const days = (window.to.getTime() - window.from.getTime()) / 86400000;
+        return Promise.resolve(
+          days > 2
+            ? { links: [], ordersFetched: 0, complete: false }
+            : { links: [link], ordersFetched: 4200, complete: true },
+        );
+      },
+    );
+    const { service } = buildService({
+      marketplaceAccountsService: shopeeAccount,
+      persistence: { ...olderHistory },
+      shopeeSyncService: { fetchOrderBuyers },
+    });
+    const result = await service.runBuyerEnrichmentChunk('acc-1', cursor);
+    const spans = fetchOrderBuyers.mock.calls.map(
+      ([, w]) => (w.to.getTime() - w.from.getTime()) / HOUR_MS,
+    );
+    expect(spans).toEqual([168, 84, 42]);
+    expect(fetchOrderBuyers.mock.calls.every(([, w]) => w.to === cursor)).toBe(
+      true,
+    );
+    expect(result).toMatchObject({
+      done: false,
+      nextCursor: new Date(cursor.getTime() - 42 * HOUR_MS),
+      ordersFetched: 4200,
+    });
+  });
+
+  it('stops explicitly (ENRICHMENT_WINDOW_INCOMPLETE, cursor untouched, nothing persisted) when even the 1-hour minimum window exceeds the cap — never loops', async () => {
+    const fetchOrderBuyers = jest
+      .fn()
+      .mockResolvedValue({ links: [], ordersFetched: 0, complete: false });
+    const { service, persistence } = buildService({
+      marketplaceAccountsService: shopeeAccount,
+      persistence: { ...olderHistory, attachBuyersToOrders: jest.fn() },
+      shopeeSyncService: { fetchOrderBuyers },
+    });
+    await expect(
+      service.runBuyerEnrichmentChunk('acc-1', cursor),
+    ).rejects.toMatchObject({ code: 'ENRICHMENT_WINDOW_INCOMPLETE' });
+    const spans = fetchOrderBuyers.mock.calls.map(
+      ([, w]: [string, { from: Date; to: Date }]) =>
+        (w.to.getTime() - w.from.getTime()) / HOUR_MS,
+    );
+    // 168h → ... → 1h: finito, estritamente decrescente, termina no mínimo.
+    expect(spans[0]).toBe(168);
+    expect(spans[spans.length - 1]).toBe(1);
+    expect(spans.length).toBeLessThanOrEqual(10);
+    for (let i = 1; i < spans.length; i += 1) {
+      expect(spans[i]).toBeLessThan(spans[i - 1]);
+    }
+    expect(persistence.attachBuyersToOrders).not.toHaveBeenCalled();
+  });
+
+  it('rejects Amazon (out of scope) as MARKETPLACE_NOT_SUPPORTED without any provider call', async () => {
+    const { service, amazonSyncService } = buildService({
+      marketplaceAccountsService: {
+        findByIdOrFail: jest
+          .fn()
+          .mockResolvedValue(account({ marketplace: Marketplace.AMAZON })),
+      },
+    });
+    await expect(
+      service.runBuyerEnrichmentChunk('acc-1', cursor),
+    ).rejects.toMatchObject({ code: 'MARKETPLACE_NOT_SUPPORTED' });
+    expect(amazonSyncService.syncOrders).not.toHaveBeenCalled();
+  });
+
+  it('maps provider errors to the existing backfill codes (e.g. rate limit → PROVIDER_RATE_LIMITED)', async () => {
+    const { service } = buildService({
+      persistence: { ...olderHistory },
+      mlSyncService: {
+        fetchOrderBuyers: jest
+          .fn()
+          .mockRejectedValue(new SyncOrdersError('PROVIDER_RATE_LIMITED')),
+      },
+    });
+    await expect(
+      service.runBuyerEnrichmentChunk('acc-1', cursor),
+    ).rejects.toMatchObject({ code: 'PROVIDER_RATE_LIMITED' });
+  });
+});
+
+describe('MarketplaceBackfillService — exclusão mútua com o enriquecimento (mesma fila)', () => {
+  it('startBackfill with a BUYER_ENRICHMENT job active → BACKFILL_JOB_MODE_CONFLICT, never reporting it as the history job', async () => {
+    const { service, jobsPersistence } = buildService({
+      jobsPersistence: {
+        createJob: jest
+          .fn()
+          .mockRejectedValue(new BackfillJobActiveConflictError()),
+        findActiveJob: jest
+          .fn()
+          .mockResolvedValue(
+            backfillJobRow({ status: 'RUNNING', mode: 'BUYER_ENRICHMENT' }),
+          ),
+      },
+    });
+    await expect(service.startBackfill('acc-1')).rejects.toMatchObject({
+      code: 'BACKFILL_JOB_MODE_CONFLICT',
+    });
+    expect(jobsPersistence.createJob).toHaveBeenCalledTimes(1);
+  });
+
+  it('resumeBackfill blocked by an active enrichment → BACKFILL_JOB_MODE_CONFLICT (not a raw 500)', async () => {
+    const { service } = buildService({
+      jobsPersistence: {
+        resumeJob: jest
+          .fn()
+          .mockRejectedValue(new BackfillJobActiveConflictError()),
+      },
+    });
+    await expect(service.resumeBackfill('acc-1')).rejects.toMatchObject({
+      code: 'BACKFILL_JOB_MODE_CONFLICT',
     });
   });
 });

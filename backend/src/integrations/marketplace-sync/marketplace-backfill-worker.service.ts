@@ -54,6 +54,10 @@ const ERROR_CLASSIFICATION: Record<BackfillErrorCode, ErrorClass> = {
   TOKEN_REFRESH_PENDING: 'REQUEUE',
   PROVIDER_RATE_LIMITED: 'RATE_LIMITED',
   SYNC_FAILED: 'TRANSIENT',
+  // Mesma janela voltaria a bater no mesmo teto — nunca resolvido por retry.
+  ENRICHMENT_WINDOW_INCOMPLETE: 'TERMINAL',
+  // Só lançado por start/resume (HTTP), nunca por um chunk — mapeado por completude.
+  BACKFILL_JOB_MODE_CONFLICT: 'TERMINAL',
 };
 
 export interface BackfillWorkerConfig {
@@ -208,14 +212,30 @@ export class MarketplaceBackfillWorkerService
     let update: BackfillJobStateUpdate;
 
     try {
-      const result = await this.backfillService.runNextChunk(
-        job.marketplaceAccountId,
-      );
+      let finished: boolean;
+      let cursorBefore: Date | undefined;
+      if (job.mode === 'BUYER_ENRICHMENT') {
+        // Cursor ausente só num job criado fora do fluxo normal — começa de "agora".
+        const result = await this.backfillService.runBuyerEnrichmentChunk(
+          job.marketplaceAccountId,
+          job.cursorBefore ?? now,
+        );
+        finished = result.done;
+        cursorBefore = result.nextCursor;
+      } else {
+        const result = await this.backfillService.runNextChunk(
+          job.marketplaceAccountId,
+        );
+        finished = !result.hasMoreHistory;
+      }
       const chunksProcessed = job.chunksProcessed + 1;
 
-      if (!result.hasMoreHistory) {
+      if (finished) {
         update = this.buildUpdate(job, now, {
-          status: 'SAFETY_LIMIT_REACHED',
+          status:
+            job.mode === 'BUYER_ENRICHMENT'
+              ? 'COMPLETED'
+              : 'SAFETY_LIMIT_REACHED',
           chunksProcessed,
           attemptCount: 0,
           nextAttemptAt: now,
@@ -246,6 +266,7 @@ export class MarketplaceBackfillWorkerService
           pauseRequested: false,
         });
       }
+      if (cursorBefore) update = { ...update, cursorBefore };
     } catch (rawError) {
       const error =
         rawError instanceof BackfillError

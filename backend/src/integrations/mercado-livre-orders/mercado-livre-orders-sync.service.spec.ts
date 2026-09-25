@@ -851,3 +851,96 @@ describe('MercadoLivreOrdersSyncService.syncOrders', () => {
     });
   });
 });
+
+describe('MercadoLivreOrdersSyncService.fetchOrderBuyers (enriquecimento de compradores)', () => {
+  const window = {
+    from: new Date('2026-08-01T00:00:00.000Z'),
+    to: new Date('2026-08-31T00:00:00.000Z'),
+  };
+  const withBuyer = (id: string, buyerId: number) => ({
+    ...rawOrder(id, `SHIP-${id}`),
+    buyer: { id: buyerId, nickname: `NICK_${buyerId}` },
+  });
+
+  it('lists by creation date and returns only buyer links: zero /shipments lookups, no sync_run, no persistence, no last-sync mark', async () => {
+    const { service, httpClient, shipmentClient, persistence } = buildService({
+      httpClient: {
+        fetchOrdersPage: jest.fn().mockResolvedValueOnce({
+          kind: 'success',
+          body: pageBody(
+            [withBuyer('1', 7), withBuyer('2', 8), rawOrder('3', 'SHIP-3')],
+            3,
+            0,
+          ),
+        }),
+      },
+    });
+
+    const result = await service.fetchOrderBuyers('acc-1', window);
+
+    expect(result.complete).toBe(true);
+    expect(result.ordersFetched).toBe(3);
+    expect(
+      result.links.map((l) => [l.externalOrderId, l.buyer.externalBuyerId]),
+    ).toEqual([
+      ['1', '7'],
+      ['2', '8'],
+    ]);
+    expect(httpClient.fetchOrdersPage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        dateFilter: 'CREATED',
+        dateFrom: window.from,
+        dateTo: window.to,
+      }),
+    );
+    expect(shipmentClient.fetchShipment).not.toHaveBeenCalled();
+    expect(persistence.beginSyncRun).not.toHaveBeenCalled();
+    expect(persistence.persistOrders).not.toHaveBeenCalled();
+    expect(persistence.markAccountSynced).not.toHaveBeenCalled();
+    expect(persistence.finalizeSyncRunSuccess).not.toHaveBeenCalled();
+  });
+
+  it('a window above the 20000 offset cap returns complete=false after ONE page, collecting nothing', async () => {
+    const { service, httpClient } = buildService({
+      httpClient: {
+        fetchOrdersPage: jest.fn().mockResolvedValue({
+          kind: 'success',
+          body: pageBody([withBuyer('1', 7)], 25000, 0),
+        }),
+      },
+    });
+    await expect(service.fetchOrderBuyers('acc-1', window)).resolves.toEqual({
+      links: [],
+      ordersFetched: 0,
+      complete: false,
+    });
+    expect(httpClient.fetchOrdersPage).toHaveBeenCalledTimes(1);
+  });
+
+  it('maps provider failures to the closed SyncOrdersError vocabulary', async () => {
+    const { service } = buildService({
+      httpClient: {
+        fetchOrdersPage: jest.fn().mockResolvedValue({ kind: 'rate_limited' }),
+      },
+    });
+    await expect(
+      service.fetchOrderBuyers('acc-1', window),
+    ).rejects.toMatchObject({ code: 'PROVIDER_RATE_LIMITED' });
+  });
+
+  it('rejects a disconnected account before any HTTP call', async () => {
+    const { service, httpClient } = buildService({
+      marketplaceAccountsService: {
+        findByIdOrFail: jest
+          .fn()
+          .mockResolvedValue(
+            account({ status: MarketplaceAccountStatus.DISCONNECTED }),
+          ),
+      },
+    });
+    await expect(
+      service.fetchOrderBuyers('acc-1', window),
+    ).rejects.toMatchObject({ code: 'ACCOUNT_NOT_CONNECTED' });
+    expect(httpClient.fetchOrdersPage).not.toHaveBeenCalled();
+  });
+});

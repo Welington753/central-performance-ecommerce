@@ -47,6 +47,7 @@ function validOrder(
     createTime: 1712601591,
     updateTime: 1713139948,
     fulfillmentFlag: 'fulfilled_by_local_seller',
+    buyer: null,
     items: [validItem()],
     ...overrides,
   };
@@ -73,6 +74,7 @@ describe('mapShopeeOrder', () => {
       externalMarketplaceId: null,
       logisticsClassification: 'SELLER_FULFILLED',
       logisticsType: null,
+      buyer: null,
       items: [
         {
           externalItemId: '2600144043',
@@ -84,6 +86,35 @@ describe('mapShopeeOrder', () => {
           currencyId: 'VND',
         },
       ],
+    });
+  });
+
+  it('mapeia comprador/destinatário sem inventar e-mail e preservando valores mascarados', () => {
+    const result = mapShopeeOrder(
+      ACCOUNT_ID,
+      validOrder({
+        buyer: {
+          buyerUserId: '123456',
+          buyerUsername: 'comprador.shopee',
+          recipientName: 'J****a',
+          recipientPhone: '******4321',
+          city: 'São Paulo',
+          state: 'SP',
+          zipcode: '01310-100',
+        },
+      }),
+    );
+    expect(result.buyer).toEqual({
+      externalBuyerId: '123456',
+      dataSource: 'SHOPEE_ORDER_DETAIL',
+      username: 'comprador.shopee',
+      buyerName: null,
+      recipientName: 'J****a',
+      email: null,
+      recipientPhone: '******4321',
+      city: 'São Paulo',
+      state: 'SP',
+      postalCode: '01310-100',
     });
   });
 
@@ -327,10 +358,13 @@ describe('mapShopeeOrder', () => {
     expect(result.logisticsClassification).toBe('MARKETPLACE_FULFILLED');
   });
 
-  it('nunca inclui nenhum campo pessoal no resultado', () => {
+  it('nunca inclui campo pessoal fora da allowlist de `buyer` no resultado', () => {
     const result = mapShopeeOrder(ACCOUNT_ID, validOrder());
-    const serialized = JSON.stringify(result);
-    expect(serialized).not.toMatch(/buyer|recipient|dropshipper|prescription/i);
+    const { buyer, ...rest } = result;
+    expect(buyer).toBeNull();
+    expect(JSON.stringify(rest)).not.toMatch(
+      /buyer|recipient|dropshipper|prescription|cpf/i,
+    );
   });
 
   it('não modifica o objeto de entrada', () => {

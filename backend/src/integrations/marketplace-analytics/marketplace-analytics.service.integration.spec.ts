@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { randomUUID } from 'crypto';
 import { createTestDataSource } from '../../test-utils/create-test-data-source';
+import { createTestEncryptionService } from '../../test-utils/create-test-encryption-service';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
   MarketplaceAccount,
@@ -1429,7 +1430,10 @@ describe('MarketplaceAnalyticsService (Postgres real)', () => {
         };
       }
 
-      const persistence = new MarketplaceOrdersPersistenceService(dataSource);
+      const persistence = new MarketplaceOrdersPersistenceService(
+        dataSource,
+        createTestEncryptionService(),
+      );
       const mappedA = mapAmazonOrder(
         amazonAccount,
         sameListingOrder({ orderId: 'amz-order-a', orderItemId: 'item-a' }),

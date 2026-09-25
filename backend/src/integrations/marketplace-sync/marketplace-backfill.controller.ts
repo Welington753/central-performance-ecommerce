@@ -69,7 +69,14 @@ export class MarketplaceBackfillController {
   async resume(
     @Param('id', ParseUUIDPipe) id: string,
   ): Promise<BackfillStatus> {
-    return this.backfillService.resumeBackfill(id);
+    try {
+      return await this.backfillService.resumeBackfill(id);
+    } catch (error) {
+      if (error instanceof BackfillError) {
+        throw this.mapErrorToHttpException(error);
+      }
+      throw error;
+    }
   }
 
   // Preservado por compatibilidade (Fase 4, "Backfill durável") — o
@@ -98,7 +105,9 @@ export class MarketplaceBackfillController {
       case 'NO_INITIAL_SYNC_YET':
       case 'MARKETPLACE_NOT_SUPPORTED':
         return new NotFoundException(error.code);
+      // MODE_CONFLICT: enriquecimento de compradores ativo na mesma conta (mesma fila).
       case 'BACKFILL_ALREADY_RUNNING':
+      case 'BACKFILL_JOB_MODE_CONFLICT':
         return new ConflictException(error.code);
       case 'AMAZON_NOT_CONFIGURED':
       case 'SYNC_FAILED':

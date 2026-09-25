@@ -1,6 +1,7 @@
 import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { createTestDataSource } from '../../test-utils/create-test-data-source';
+import { createTestEncryptionService } from '../../test-utils/create-test-encryption-service';
 import { SyncRun } from '../../sync/sync-run.entity';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
@@ -96,7 +97,10 @@ describe('Shopee fulfillment_flag — parser → mapper → persistência (Postg
       MarketplaceOrder,
       MarketplaceOrderItem,
     ]);
-    persistence = new MarketplaceOrdersPersistenceService(dataSource);
+    persistence = new MarketplaceOrdersPersistenceService(
+      dataSource,
+      createTestEncryptionService(),
+    );
   });
 
   afterAll(async () => {

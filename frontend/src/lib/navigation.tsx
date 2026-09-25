@@ -70,6 +70,27 @@ function FullIcon({ className }: NavIconProps) {
   );
 }
 
+function CustomersIcon({ className }: NavIconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="8" cy="7" r="3" />
+      <path d="M2.5 17a5.5 5.5 0 0 1 11 0" />
+      <path d="M13.5 4.5a3 3 0 0 1 0 5" />
+      <path d="M15.5 12.5a5.5 5.5 0 0 1 2 4.5" />
+    </svg>
+  );
+}
+
 function IntegrationsIcon({ className }: NavIconProps) {
   return (
     <svg
@@ -123,7 +144,16 @@ export const NAV_GROUPS: NavGroup[] = [
   {
     id: "analises",
     title: "ANÁLISES",
-    items: [{ id: "full", href: "/full", label: "Full", Icon: FullIcon }],
+    items: [
+      { id: "full", href: "/full", label: "Full", Icon: FullIcon },
+      {
+        id: "clientes",
+        href: "/clientes",
+        label: "Clientes",
+        Icon: CustomersIcon,
+        permissionKey: "clientes.visualizar",
+      },
+    ],
   },
   {
     id: "marketplaces",

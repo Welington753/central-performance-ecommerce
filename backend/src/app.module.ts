@@ -6,6 +6,7 @@ import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
 import { CommonModule } from './common/common.module';
+import { CustomersModule } from './customers/customers.module';
 import { envValidationSchema } from './config/env.validation';
 import { buildDataSourceOptions } from './database/typeorm-options.factory';
 import { HealthModule } from './health/health.module';
@@ -45,6 +46,7 @@ import { UsersModule } from './users/users.module';
     IntegrationsModule,
     SyncModule,
     HealthModule,
+    CustomersModule,
   ],
   providers: [
     {

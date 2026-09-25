@@ -10,10 +10,10 @@ import {
 /**
  * Pedido normalizado, independente de marketplace — populado pelo conector
  * do Mercado Livre (Fase 3) e, desde o Checkpoint 4-B, também pelo conector
- * da Amazon. Nenhum dado de comprador é armazenado aqui (design "Dados
- * permitidos" — proibido nome/ID/apelido/e-mail/telefone/endereço/documentos
- * do comprador). Nenhum payload bruto do provedor é armazenado — apenas os
- * campos normalizados listados abaixo.
+ * da Amazon. Nenhum dado pessoal do comprador é armazenado aqui — só a
+ * referência opcional `marketplaceBuyerId` para `marketplace_buyers`
+ * (função "Clientes", ML/Shopee). Nenhum payload bruto do provedor é
+ * armazenado — apenas os campos normalizados listados abaixo.
  *
  * Unicidade `(marketplace_account_id, external_order_id)`: uma sincronização
  * repetida do mesmo período faz UPSERT, nunca duplica. O marketplace de um
@@ -159,6 +159,10 @@ export class MarketplaceOrder {
 
   @Column({ type: 'numeric', precision: 14, scale: 2, nullable: true })
   refundedAmount!: string | null;
+
+  /** Uma vez associado, nunca trocado por outro comprador (ver persistência). */
+  @Column({ type: 'uuid', nullable: true })
+  marketplaceBuyerId!: string | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

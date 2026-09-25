@@ -12,6 +12,7 @@ import type { MappedOrderRecord } from '../marketplace-orders/mapped-order-recor
 import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
+  type OrderBuyersFetchResult,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
 import {
   computeIncrementalSyncWindow,
@@ -24,7 +25,11 @@ import {
 } from './shopee-orders-fetch.util';
 import type { ShopeeOrderListTimeRangeField } from './shopee-order-list-input';
 import { ShopeeOrdersApiClient } from './shopee-orders-api.client';
-import { mapShopeeOrder, ShopeeOrderMappingError } from './shopee-order.mapper';
+import {
+  mapShopeeOrder,
+  mapShopeeOrderBuyerLinks,
+  ShopeeOrderMappingError,
+} from './shopee-order.mapper';
 import {
   resolveShopeeCredentialsErrorCode,
   ShopeeOrdersSyncError,
@@ -290,6 +295,54 @@ export class ShopeeOrdersSyncService {
       throw error instanceof ShopeeOrdersSyncError
         ? error
         : new ShopeeOrdersSyncError(code);
+    }
+  }
+
+  // Enriquecimento de compradores: lista por `create_time`, detalha (lotes de 50) só pedidos
+  // persistidos sem comprador; nunca persiste pedido nem grava `sync_runs`/última sincronização.
+  // Acima do teto de enumeração: `complete: false`, sem detalhe (o chamador divide a janela).
+  async fetchOrderBuyers(
+    accountId: string,
+    window: PeriodWindow,
+  ): Promise<OrderBuyersFetchResult> {
+    const account =
+      await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    if (
+      account.marketplace !== Marketplace.SHOPEE ||
+      account.status !== MarketplaceAccountStatus.CONNECTED ||
+      !account.externalSellerId
+    ) {
+      throw new ShopeeOrdersSyncError('NOT_CONNECTED');
+    }
+    try {
+      const credentials =
+        await this.accessTokenService.ensureValidShopCredentials(accountId);
+      const { orderSns, capped } = await fetchShopeeOrderSns({
+        client: this.client,
+        credentials,
+        blocks: splitShopeeSyncWindowIntoBlocks(window),
+        timeRangeField: 'create_time',
+      });
+      if (capped) return { links: [], ordersFetched: 0, complete: false };
+
+      const pending = await this.persistence.findOrdersWithoutBuyer(
+        accountId,
+        orderSns,
+      );
+      const details = await fetchShopeeOrderDetails({
+        client: this.client,
+        credentials,
+        orderSns: orderSns.filter((orderSn) => pending.has(orderSn)),
+      });
+      return {
+        links: mapShopeeOrderBuyerLinks(details),
+        ordersFetched: orderSns.length,
+        complete: true,
+      };
+    } catch (error) {
+      throw error instanceof ShopeeOrdersSyncError
+        ? error
+        : new ShopeeOrdersSyncError(resolveSyncErrorCode(error));
     }
   }
 }

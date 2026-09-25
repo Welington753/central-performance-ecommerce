@@ -1,8 +1,10 @@
+import type { MappedBuyerRecord } from './buyer-snapshot';
 import type { LogisticsClassification } from './logistics-classification';
 
 /**
- * Registro de pedido pronto para persistência — já sem nenhum campo de
- * comprador, mensagem, endereço ou payload bruto. Genérico entre
+ * Registro de pedido pronto para persistência — sem mensagem, endereço
+ * completo, documento ou payload bruto; o comprador (quando o marketplace o
+ * identifica) vem só em `buyer`, já restrito à allowlist. Genérico entre
  * marketplaces: cada mapper específico (`mercado-livre-order.mapper.ts`,
  * `amazon-order.mapper.ts`) produz este mesmo formato a partir da resposta
  * bruta do respectivo provedor. Os três campos opcionais de Amazon só
@@ -50,6 +52,8 @@ export interface MappedOrderRecord {
   taxesAmount?: string | null;
   couponAmount?: string | null;
   refundedAmount?: string | null;
+  /** Comprador identificado pela fonte (ML/Shopee); ausente/`null` = pedido sem comprador identificável. */
+  buyer?: MappedBuyerRecord | null;
   items: MappedOrderItemRecord[];
 }
 

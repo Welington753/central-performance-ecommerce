@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import { EncryptionService } from '../../common/encryption/encryption.service';
 import type { Marketplace } from '../contracts/marketplace.enum';
 import { SyncRunStatus, SyncRunType } from '../../sync/sync-run.entity';
 import { mergeIntervals, type SyncedInterval } from './coverage-interval.util';
@@ -8,7 +9,9 @@ import {
   sanitizeLogisticsDiagnostics,
   type LogisticsClassificationDiagnostics,
 } from './logistics-classification-diagnostics';
+import type { MappedBuyerRecord } from './buyer-snapshot';
 import type { MappedOrderRecord } from './mapped-order-record';
+import { MarketplaceBuyersWriter } from './marketplace-buyers.writer';
 
 export interface AccountSyncCoverage {
   intervals: SyncedInterval[];
@@ -17,6 +20,24 @@ export interface AccountSyncCoverage {
 }
 
 export class SyncAlreadyRunningError extends Error {}
+
+/** Comprador de UM pedido para o enriquecimento histórico (`attachBuyersToOrders`). */
+export interface OrderBuyerLink {
+  externalOrderId: string;
+  buyer: MappedBuyerRecord;
+  /** Instante do pedido NA FONTE (última atualização, ou criação). */
+  observedAt: Date;
+}
+
+/** Resultado de UMA janela do enriquecimento (listagem do provedor, sem persistir). */
+export interface OrderBuyersFetchResult {
+  links: OrderBuyerLink[];
+  ordersFetched: number;
+  /** `false`: a janela excede o teto do provedor e não foi enumerada inteira — nada coletado. */
+  complete: boolean;
+}
+
+const BUYER_LINK_BATCH_SIZE = 200;
 
 /**
  * `coveredThrough` fora de `[date_from, date_to]` do próprio run (Checkpoint
@@ -61,7 +82,14 @@ export interface PersistOrdersResult {
  */
 @Injectable()
 export class MarketplaceOrdersPersistenceService {
-  constructor(@InjectDataSource() private readonly dataSource: DataSource) {}
+  private readonly buyersWriter: MarketplaceBuyersWriter;
+
+  constructor(
+    @InjectDataSource() private readonly dataSource: DataSource,
+    encryption: EncryptionService,
+  ) {
+    this.buyersWriter = new MarketplaceBuyersWriter(encryption);
+  }
 
   /**
    * Cria a linha `RUNNING` de `sync_runs`. O índice único parcial
@@ -447,6 +475,10 @@ export class MarketplaceOrdersPersistenceService {
    * trouxesse o campo apagava silenciosamente o `fulfillment_flag` da
    * Shopee — ou o canal FBA/FBM da Amazon — já persistido. Um valor NOVO
    * não nulo continua substituindo o antigo normalmente.
+   *
+   * `marketplace_buyer_id` (função "Clientes"): `COALESCE(existente,
+   * recebido)` — um pedido já associado a um comprador nunca é reassociado a
+   * outro; um payload sem comprador nunca desassocia.
    */
   async persistOrders(
     orders: MappedOrderRecord[],
@@ -465,6 +497,17 @@ export class MarketplaceOrdersPersistenceService {
 
     try {
       for (const order of orders) {
+        // Comprador (função "Clientes"): merge protegido contra NULL, evento
+        // antigo e valor mascarado — ver `mergeBuyerSnapshot`.
+        const buyerId = order.buyer
+          ? await this.buyersWriter.upsert(
+              queryRunner,
+              order.marketplaceAccountId,
+              order.buyer,
+              order.marketplaceLastUpdated ?? order.dateCreated,
+            )
+          : null;
+
         // `INSERT ... ON CONFLICT DO UPDATE ... RETURNING` continua sendo,
         // para o driver, um comando INSERT — devolve o array de linhas
         // diretamente, nunca a tupla `[rows, rowCount]` (ver `beginSyncRun`
@@ -479,10 +522,10 @@ export class MarketplaceOrdersPersistenceService {
                external_marketplace_id, logistics_classification, logistics_type,
                external_shipment_id,
                marketplace_fee_amount, buyer_shipping_cost_amount, taxes_amount,
-               coupon_amount, refunded_amount,
+               coupon_amount, refunded_amount, marketplace_buyer_id,
                updated_at)
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
-                     $15, $16, $17, $18, $19, $20, now())
+                     $15, $16, $17, $18, $19, $20, $21, now())
             ON CONFLICT (marketplace_account_id, external_order_id) DO UPDATE
               SET status = EXCLUDED.status,
                   currency_id = EXCLUDED.currency_id,
@@ -512,6 +555,7 @@ export class MarketplaceOrdersPersistenceService {
                   taxes_amount = COALESCE(EXCLUDED.taxes_amount, marketplace_orders.taxes_amount),
                   coupon_amount = COALESCE(EXCLUDED.coupon_amount, marketplace_orders.coupon_amount),
                   refunded_amount = COALESCE(EXCLUDED.refunded_amount, marketplace_orders.refunded_amount),
+                  marketplace_buyer_id = COALESCE(marketplace_orders.marketplace_buyer_id, EXCLUDED.marketplace_buyer_id),
                   updated_at = now()
               WHERE marketplace_orders.marketplace_last_updated IS NULL
                  OR EXCLUDED.marketplace_last_updated IS NULL
@@ -538,12 +582,23 @@ export class MarketplaceOrdersPersistenceService {
             order.taxesAmount ?? null,
             order.couponAmount ?? null,
             order.refundedAmount ?? null,
+            buyerId,
           ],
         )) as Array<{ id: string; inserted: boolean }>;
 
         if (orderRows.length === 0) {
           // Evento antigo: bloqueado pela cláusula WHERE acima. Pulado por
-          // completo — itens do pedido existente permanecem intocados.
+          // completo — itens e dados financeiros permanecem intocados; só
+          // preenche o comprador quando o pedido ainda não tem nenhum
+          // (nunca troca um comprador já associado).
+          if (buyerId !== null) {
+            await queryRunner.query(
+              `UPDATE marketplace_orders SET marketplace_buyer_id = $3
+                WHERE marketplace_account_id = $1 AND external_order_id = $2
+                  AND marketplace_buyer_id IS NULL`,
+              [order.marketplaceAccountId, order.externalOrderId, buyerId],
+            );
+          }
           continue;
         }
 
@@ -588,6 +643,76 @@ export class MarketplaceOrdersPersistenceService {
     } finally {
       await queryRunner.release();
     }
+  }
+
+  /** Dentre `externalOrderIds`, os pedidos JÁ persistidos desta conta ainda sem comprador. */
+  async findOrdersWithoutBuyer(
+    accountId: string,
+    externalOrderIds: string[],
+  ): Promise<Set<string>> {
+    if (externalOrderIds.length === 0) return new Set();
+    const rows = await this.dataSource.query<
+      Array<{ external_order_id: string }>
+    >(
+      `SELECT external_order_id FROM marketplace_orders
+        WHERE marketplace_account_id = $1
+          AND external_order_id = ANY($2::varchar[])
+          AND marketplace_buyer_id IS NULL`,
+      [accountId, externalOrderIds],
+    );
+    return new Set(rows.map((row) => row.external_order_id));
+  }
+
+  /**
+   * Enriquecimento histórico de compradores (função "Clientes"): grava SÓ o
+   * comprador (mesmo merge protegido de `persistOrders`) e a associação
+   * `marketplace_buyer_id` de pedidos JÁ persistidos e ainda sem comprador.
+   * Nunca cria pedido, nunca toca status/financeiro/itens/Full/qualquer
+   * outra coluna, nunca troca um comprador já associado e nunca grava
+   * comprador de pedido que não existe aqui. Transações curtas por lote.
+   * Devolve quantos pedidos foram associados.
+   */
+  async attachBuyersToOrders(
+    accountId: string,
+    links: OrderBuyerLink[],
+  ): Promise<number> {
+    const pending = await this.findOrdersWithoutBuyer(
+      accountId,
+      links.map((link) => link.externalOrderId),
+    );
+    const toLink = links.filter((link) => pending.has(link.externalOrderId));
+    let linked = 0;
+    for (let i = 0; i < toLink.length; i += BUYER_LINK_BATCH_SIZE) {
+      const batch = toLink.slice(i, i + BUYER_LINK_BATCH_SIZE);
+      const queryRunner = this.dataSource.createQueryRunner();
+      await queryRunner.connect();
+      await queryRunner.startTransaction();
+      try {
+        for (const link of batch) {
+          const buyerId = await this.buyersWriter.upsert(
+            queryRunner,
+            accountId,
+            link.buyer,
+            link.observedAt,
+          );
+          const [rows] = (await queryRunner.query(
+            `UPDATE marketplace_orders SET marketplace_buyer_id = $3
+              WHERE marketplace_account_id = $1 AND external_order_id = $2
+                AND marketplace_buyer_id IS NULL
+              RETURNING id`,
+            [accountId, link.externalOrderId, buyerId],
+          )) as [Array<{ id: string }>, number];
+          linked += rows.length;
+        }
+        await queryRunner.commitTransaction();
+      } catch (error) {
+        await queryRunner.rollbackTransaction();
+        throw error;
+      } finally {
+        await queryRunner.release();
+      }
+    }
+    return linked;
   }
 
   private isActiveRunConflict(error: unknown): boolean {

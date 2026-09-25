@@ -242,7 +242,7 @@ describe('ShopeeOrdersApiClient.getOrderDetail - requisicao: URL, assinatura, me
     expect(url.searchParams.get('shop_id')).toBe(SHOP_ID);
     expect(url.searchParams.get('order_sn_list')).toBe('2404098R48U37H');
     expect(url.searchParams.get('response_optional_fields')).toBe(
-      'total_amount,item_list,fulfillment_flag',
+      'total_amount,item_list,fulfillment_flag,buyer_user_id,buyer_username,recipient_address',
     );
 
     expect(calledInit.method).toBe('GET');

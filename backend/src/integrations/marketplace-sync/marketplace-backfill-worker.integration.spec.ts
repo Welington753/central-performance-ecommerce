@@ -84,7 +84,14 @@ describe('MarketplaceBackfillWorkerService — concorrência entre processos (Po
     const pendingChunk = new Promise((resolve) => {
       resolveChunk = resolve;
     });
-    const runNextChunk = jest.fn().mockReturnValue(pendingChunk);
+    let signalChunkStarted!: () => void;
+    const chunkStarted = new Promise<void>((resolve) => {
+      signalChunkStarted = resolve;
+    });
+    const runNextChunk = jest.fn().mockImplementation(() => {
+      signalChunkStarted();
+      return pendingChunk;
+    });
     const backfillServiceStub = { runNextChunk } as never;
 
     const workerA = new MarketplaceBackfillWorkerService(
@@ -100,8 +107,11 @@ describe('MarketplaceBackfillWorkerService — concorrência entre processos (Po
 
     const tickA = workerA.runTickOnce();
     const tickB = workerB.runTickOnce();
-    // Dá tempo das duas transações de claim rodarem antes de liberar o chunk.
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Espera determinística (sem relógio): o tick que reivindicou o job fica
+    // preso em `pendingChunk`, então o PRIMEIRO tick a terminar é o que já
+    // tentou reivindicar e não obteve nada. Só depois disso o chunk é liberado
+    // — a outra instância nunca chega atrasada e pega o job devolvido à fila.
+    await Promise.all([chunkStarted, Promise.race([tickA, tickB])]);
     expect(runNextChunk).toHaveBeenCalledTimes(1);
 
     resolveChunk({

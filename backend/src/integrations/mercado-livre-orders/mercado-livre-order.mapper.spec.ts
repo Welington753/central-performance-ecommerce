@@ -35,6 +35,7 @@ function rawOrder(
     lastUpdated: '2026-08-15T10:05:00.000-04:00',
     shippingId: null,
     payments: [],
+    buyer: null,
     items: [
       {
         itemId: 'MLB111',
@@ -71,6 +72,7 @@ describe('mapMercadoLivreOrder', () => {
       taxesAmount: null,
       couponAmount: null,
       refundedAmount: null,
+      buyer: null,
       items: [
         {
           externalItemId: 'MLB111',
@@ -86,7 +88,46 @@ describe('mapMercadoLivreOrder', () => {
     });
   });
 
-  it('never includes any buyer/PII-shaped key — the mapped shape is a fixed allowlist', () => {
+  describe('buyer (função Clientes)', () => {
+    it('maps id + nickname + first/last name, never inventing email/phone/address', () => {
+      const mapped = mapMercadoLivreOrder(
+        'account-1',
+        rawOrder({
+          buyer: {
+            id: '999',
+            nickname: 'COMPRADOR_X',
+            firstName: 'Maria',
+            lastName: 'Silva',
+          },
+        }),
+      );
+      expect(mapped.buyer).toEqual({
+        externalBuyerId: '999',
+        dataSource: 'MERCADO_LIVRE_ORDERS',
+        username: 'COMPRADOR_X',
+        buyerName: 'Maria Silva',
+        recipientName: null,
+        email: null,
+        recipientPhone: null,
+        city: null,
+        state: null,
+        postalCode: null,
+      });
+    });
+
+    it('keeps buyerName null when the source did not send any name part', () => {
+      const mapped = mapMercadoLivreOrder(
+        'account-1',
+        rawOrder({
+          buyer: { id: '1', nickname: null, firstName: null, lastName: null },
+        }),
+      );
+      expect(mapped.buyer?.buyerName).toBeNull();
+      expect(mapped.buyer?.username).toBeNull();
+    });
+  });
+
+  it('never includes any PII-shaped key outside `buyer` — the mapped shape is a fixed allowlist', () => {
     const mapped = mapMercadoLivreOrder('account-1', rawOrder());
     const keys = Object.keys(mapped);
     expect(keys).toEqual([
@@ -108,6 +149,8 @@ describe('mapMercadoLivreOrder', () => {
       'taxesAmount',
       'couponAmount',
       'refundedAmount',
+      // Função "Clientes": comprador restrito à allowlist de `MappedBuyerRecord`.
+      'buyer',
       'items',
     ]);
   });

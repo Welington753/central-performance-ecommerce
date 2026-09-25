@@ -12,6 +12,7 @@ import { BackfillJobsPersistenceService } from './backfill-jobs-persistence.serv
 import { MarketplaceBackfillController } from './marketplace-backfill.controller';
 import { MarketplaceBackfillService } from './marketplace-backfill.service';
 import { MarketplaceBackfillWorkerService } from './marketplace-backfill-worker.service';
+import { BuyerEnrichmentService } from './buyer-enrichment.service';
 
 /**
  * Módulo genérico de orquestração de sincronização multi-marketplace (Fase
@@ -39,6 +40,8 @@ import { MarketplaceBackfillWorkerService } from './marketplace-backfill-worker.
     MarketplaceBackfillWorkerService,
     AdvisoryLockService,
     MarketplaceAutoSyncService,
+    BuyerEnrichmentService,
   ],
+  exports: [BuyerEnrichmentService],
 })
 export class MarketplaceSyncModule {}

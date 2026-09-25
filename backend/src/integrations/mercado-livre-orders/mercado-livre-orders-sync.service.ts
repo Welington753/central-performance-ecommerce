@@ -35,6 +35,8 @@ import {
 import {
   MarketplaceOrdersPersistenceService,
   SyncAlreadyRunningError,
+  type OrderBuyerLink,
+  type OrderBuyersFetchResult,
 } from '../marketplace-orders/marketplace-orders-persistence.service';
 import {
   computeIncrementalSyncWindow,
@@ -457,13 +459,81 @@ export class MercadoLivreOrdersSyncService {
     return diagnostics;
   }
 
+  /**
+   * Enriquecimento histórico de compradores (função "Clientes"): SÓ lista os
+   * pedidos criados na janela (mesma paginação em lote de `fetchAllPages`,
+   * por `date_created`) e devolve o comprador de cada um. Nunca consulta
+   * `/shipments`, nunca reclassifica Full, nunca persiste pedido, nunca grava
+   * `sync_runs` nem `last_successful_sync_at` — a sincronização normal e a
+   * cobertura dela ficam exatamente como estão. `complete: false` (nada
+   * coletado) quando a janela passa do teto de paginação: o chamador divide
+   * a janela, nunca pula pedidos.
+   */
+  async fetchOrderBuyers(
+    accountId: string,
+    window: PeriodWindow,
+  ): Promise<OrderBuyersFetchResult> {
+    const account =
+      await this.marketplaceAccountsService.findByIdOrFail(accountId);
+    if (
+      account.marketplace !== Marketplace.MERCADO_LIVRE ||
+      account.status !== MarketplaceAccountStatus.CONNECTED ||
+      !account.externalSellerId
+    ) {
+      throw new SyncOrdersError('ACCOUNT_NOT_CONNECTED');
+    }
+    try {
+      const accessToken =
+        await this.oauthService.ensureValidAccessToken(accountId);
+      const { rawOrders, capped } = await this.fetchAllPages({
+        accessToken,
+        sellerId: account.externalSellerId,
+        dateFilter: 'CREATED',
+        periodFrom: window.from,
+        periodTo: window.to,
+        stopWhenOverCap: true,
+      });
+      if (capped) return { links: [], ordersFetched: 0, complete: false };
+      const links: OrderBuyerLink[] = [];
+      for (const raw of rawOrders) {
+        const mapped = mapMercadoLivreOrder(accountId, raw);
+        if (mapped.buyer) {
+          links.push({
+            externalOrderId: mapped.externalOrderId,
+            buyer: mapped.buyer,
+            observedAt: mapped.marketplaceLastUpdated ?? mapped.dateCreated,
+          });
+        }
+      }
+      return { links, ordersFetched: rawOrders.length, complete: true };
+    } catch (error) {
+      if (error instanceof InvalidOrderDateError) {
+        throw new SyncOrdersError('INVALID_PROVIDER_RESPONSE');
+      }
+      throw error instanceof SyncOrdersError
+        ? error
+        : new SyncOrdersError(resolveSyncErrorCode(error));
+    }
+  }
+
+  /**
+   * `capped: true` = o laço parou no teto de offset com pedidos ainda não
+   * enumerados. A sincronização normal ignora o campo (comportamento de
+   * sempre); `stopWhenOverCap` (só o enriquecimento) desiste já na primeira
+   * página quando `paging.total` passa do teto, sem baixar páginas inúteis.
+   */
   private async fetchAllPages(input: {
     accessToken: string;
     sellerId: string;
     dateFilter: OrdersSearchDateFilter;
     periodFrom: Date;
     periodTo: Date;
-  }): Promise<{ rawOrders: RawMercadoLivreOrder[]; pagesFetched: number }> {
+    stopWhenOverCap?: boolean;
+  }): Promise<{
+    rawOrders: RawMercadoLivreOrder[];
+    pagesFetched: number;
+    capped: boolean;
+  }> {
     const rawOrders: RawMercadoLivreOrder[] = [];
     let pagesFetched = 0;
     let offset = 0;
@@ -503,13 +573,18 @@ export class MercadoLivreOrdersSyncService {
       }
 
       pagesFetched += 1;
-      rawOrders.push(...validation.orders);
       total = validation.paging.total;
+      if (input.stopWhenOverCap && total > HARD_SAFETY_OFFSET_CAP) {
+        return { rawOrders: [], pagesFetched, capped: true };
+      }
+      rawOrders.push(...validation.orders);
       offset += ORDERS_PAGE_LIMIT;
 
-      if (validation.orders.length === 0) break;
+      if (validation.orders.length === 0) {
+        return { rawOrders, pagesFetched, capped: false };
+      }
     }
 
-    return { rawOrders, pagesFetched };
+    return { rawOrders, pagesFetched, capped: offset < total };
   }
 }
