@@ -50,6 +50,11 @@ const nextConfig: NextConfig = {
         source: "/integrations/:path*",
         destination: `${backendProxyUrl}/integrations/:path*`,
       },
+      // API da função "Clientes" — a página do frontend é `/clientes`, sem colisão.
+      {
+        source: "/customers/:path*",
+        destination: `${backendProxyUrl}/customers/:path*`,
+      },
     ];
   },
 };

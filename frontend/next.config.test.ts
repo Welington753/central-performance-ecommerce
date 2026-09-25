@@ -63,7 +63,7 @@ describe("next.config rewrites — proxy same-origin (Checkpoint CP2K-6B-2E)", (
     expect(rewrites).toEqual([]);
   });
 
-  it("com BACKEND_PROXY_URL definido, encaminha exatamente os 7 prefixos exigidos, sem capturar páginas do frontend", async () => {
+  it("com BACKEND_PROXY_URL definido, encaminha exatamente os 8 prefixos exigidos, sem capturar páginas do frontend", async () => {
     process.env.BACKEND_PROXY_URL = "http://backend-test:3000";
     const nextConfig = await loadConfig();
     const rewrites = await getRewrites(nextConfig);
@@ -90,6 +90,10 @@ describe("next.config rewrites — proxy same-origin (Checkpoint CP2K-6B-2E)", (
       {
         source: "/integrations/:path*",
         destination: "http://backend-test:3000/integrations/:path*",
+      },
+      {
+        source: "/customers/:path*",
+        destination: "http://backend-test:3000/customers/:path*",
       },
     ]);
   });
@@ -122,5 +126,7 @@ describe("next.config rewrites — proxy same-origin (Checkpoint CP2K-6B-2E)", (
     expect(sources).not.toContain("/:path*");
     expect(sources).not.toContain("/integracoes");
     expect(sources).not.toContain("/login");
+    expect(sources).not.toContain("/clientes");
+    expect(sources).not.toContain("/clientes/:path*");
   });
 });
