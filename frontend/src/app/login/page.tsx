@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState, type FormEvent } from "react";
-import { useRouter } from "next/navigation";
+import { Suspense, useEffect, useRef, useState, type FormEvent } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
 import { apiFetch } from "@/lib/api";
 
 const INVALID_CREDENTIALS_MESSAGE = "E-mail ou senha inválidos.";
@@ -18,6 +18,38 @@ const STARTING_SERVER_MESSAGE =
 // tentativas rápidas no início, depois espaçadas, nunca imediatas para
 // sempre.
 const HEALTH_CHECK_RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
+
+/**
+ * `useSearchParams` exige um limite `Suspense` acima (mesmo padrão de
+ * `DashboardTabs`/`IntegracoesPage`) — extraído para não afetar o restante
+ * do comportamento já testado de `LoginPage`.
+ */
+function PasswordChangedBanner() {
+  const searchParams = useSearchParams();
+  if (searchParams.get("passwordChanged") !== "1") return null;
+  return (
+    <p
+      role="status"
+      className="mb-4 rounded-md border border-border-subtle bg-foreground/5 px-3 py-2 text-xs text-foreground/70"
+    >
+      Senha alterada. Entre novamente com a nova senha.
+    </p>
+  );
+}
+
+/** Refinamento de segurança CP4: sessão expirada durante a troca de senha (`retryOnUnauthorized: false`). */
+function SessionExpiredBanner() {
+  const searchParams = useSearchParams();
+  if (searchParams.get("sessionExpired") !== "1") return null;
+  return (
+    <p
+      role="status"
+      className="mb-4 rounded-md border border-border-subtle bg-foreground/5 px-3 py-2 text-xs text-foreground/70"
+    >
+      Sua sessão expirou. Entre novamente.
+    </p>
+  );
+}
 
 export default function LoginPage() {
   const router = useRouter();
@@ -148,6 +180,13 @@ export default function LoginPage() {
             Entre com sua conta para continuar
           </p>
         </div>
+
+        <Suspense fallback={null}>
+          <PasswordChangedBanner />
+        </Suspense>
+        <Suspense fallback={null}>
+          <SessionExpiredBanner />
+        </Suspense>
 
         <form
           onSubmit={handleSubmit}

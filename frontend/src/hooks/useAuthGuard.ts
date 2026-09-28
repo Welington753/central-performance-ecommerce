@@ -14,7 +14,7 @@ export type AuthGuardStatus =
 // Mesmo racional do polling de /health no login (cold start do Render
 // free) — poucas tentativas rápidas no início, depois espaçadas, nunca
 // imediatas para sempre (o último valor se repete indefinidamente).
-const RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
+export const RETRY_DELAYS_MS = [2000, 4000, 8000, 15000, 30000];
 
 /**
  * Protege rotas client-side.

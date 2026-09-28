@@ -55,6 +55,12 @@ const nextConfig: NextConfig = {
         source: "/customers/:path*",
         destination: `${backendProxyUrl}/customers/:path*`,
       },
+      // API de usuários/permissões (Checkpoint 4) — a página do frontend é
+      // `/usuarios`, sem colisão.
+      {
+        source: "/users/:path*",
+        destination: `${backendProxyUrl}/users/:path*`,
+      },
     ];
   },
 };

@@ -10,6 +10,7 @@ const routerMock = {
 
 jest.mock("next/navigation", () => ({
   useRouter: () => routerMock,
+  useSearchParams: () => new URLSearchParams(),
 }));
 
 function healthOk(): Promise<Partial<Response>> {

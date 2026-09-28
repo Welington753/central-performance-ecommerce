@@ -84,7 +84,16 @@ function setup(options: { isAdmin?: boolean } = {}) {
   api.apiFetch.mockImplementation(async (path: string) => {
     calls.push(path);
     if (path === "/auth/me") {
-      return jsonResponse({ name: "Ana", email: "ana@example.com", isAdmin: options.isAdmin ?? true });
+      // Checkpoint 4: `/auth/me` sempre inclui `id`/`permissions` — sem eles
+      // `useCurrentUser` descarta a resposta (fail-closed). `ClientesPage`
+      // só olha `isAdmin`, então `permissions: []` basta aqui.
+      return jsonResponse({
+        id: "u1",
+        name: "Ana",
+        email: "ana@example.com",
+        isAdmin: options.isAdmin ?? true,
+        permissions: [],
+      });
     }
     if (path.startsWith("/customers/summary")) return jsonResponse(summary());
     if (path.startsWith("/customers/export.xlsx")) {

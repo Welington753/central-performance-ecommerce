@@ -1,10 +1,12 @@
+import type { PermissionKey } from "@/types/users";
+
 /**
  * Configuração central da navegação lateral — única fonte de verdade dos
  * grupos/itens do menu. Adicionar uma página nova exige só: criar a rota e
  * registrar um item aqui (nunca hardcodear links soltos em outros
- * componentes). `permissionKey` é reservado para uma futura filtragem por
- * permissão (ainda não implementada) — hoje todo item sem `permissionKey`
- * (ou com ele) é sempre exibido.
+ * componentes). `permissionKey` (Checkpoint 4) é filtrado por `Sidebar`
+ * via `hasPermission(user, item.permissionKey)` — item sem a permissão
+ * correspondente nunca aparece, mesmo que a rota exista.
  */
 
 export type NavIconProps = {
@@ -19,8 +21,8 @@ export interface NavItem {
   label: string;
   href: string;
   Icon: NavIcon;
-  /** Reservado para filtragem futura por permissão; ausente = visível para qualquer sessão autenticada. */
-  permissionKey?: string;
+  /** Item sem `permissionKey` é sempre visível para qualquer sessão autenticada. */
+  permissionKey?: PermissionKey;
 }
 
 export interface NavGroup {
@@ -132,26 +134,59 @@ function SyncIcon({ className }: NavIconProps) {
   );
 }
 
+function UsersIcon({ className }: NavIconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <circle cx="7" cy="6.5" r="2.5" />
+      <path d="M2.5 16.5a4.5 4.5 0 0 1 9 0" />
+      <circle cx="14.5" cy="7.5" r="2" />
+      <path d="M12.5 10.2a3.6 3.6 0 0 1 5 3.3" />
+    </svg>
+  );
+}
+
 /** Somente rotas que já existem — nenhum item fictício ou "em breve". */
 export const NAV_GROUPS: NavGroup[] = [
   {
     id: "visao-geral",
     title: "VISÃO GERAL",
     items: [
-      { id: "dashboard", href: "/dashboard", label: "Dashboard", Icon: DashboardIcon },
+      {
+        id: "dashboard",
+        href: "/dashboard",
+        label: "Dashboard",
+        Icon: DashboardIcon,
+        permissionKey: "dashboard.view",
+      },
     ],
   },
   {
     id: "analises",
     title: "ANÁLISES",
     items: [
-      { id: "full", href: "/full", label: "Full", Icon: FullIcon },
+      {
+        id: "full",
+        href: "/full",
+        label: "Full",
+        Icon: FullIcon,
+        permissionKey: "full.view",
+      },
       {
         id: "clientes",
         href: "/clientes",
         label: "Clientes",
         Icon: CustomersIcon,
-        permissionKey: "clientes.visualizar",
+        permissionKey: "customers.view",
       },
     ],
   },
@@ -159,14 +194,39 @@ export const NAV_GROUPS: NavGroup[] = [
     id: "marketplaces",
     title: "MARKETPLACES",
     items: [
-      { id: "integracoes", href: "/integracoes", label: "Integrações", Icon: IntegrationsIcon },
+      {
+        id: "integracoes",
+        href: "/integracoes",
+        label: "Integrações",
+        Icon: IntegrationsIcon,
+        permissionKey: "integrations.view",
+      },
     ],
   },
   {
     id: "operacao",
     title: "OPERAÇÃO",
     items: [
-      { id: "sincronizacoes", href: "/sincronizacoes", label: "Sincronizações", Icon: SyncIcon },
+      {
+        id: "sincronizacoes",
+        href: "/sincronizacoes",
+        label: "Sincronizações",
+        Icon: SyncIcon,
+        permissionKey: "sync.view",
+      },
+    ],
+  },
+  {
+    id: "administracao",
+    title: "ADMINISTRAÇÃO",
+    items: [
+      {
+        id: "usuarios",
+        href: "/usuarios",
+        label: "Usuários",
+        Icon: UsersIcon,
+        permissionKey: "users.view",
+      },
     ],
   },
 ];

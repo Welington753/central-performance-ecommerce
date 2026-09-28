@@ -72,7 +72,7 @@ export class ApiFetchError extends Error {
  * fechado nos serviços) — nunca lança, nunca repassa nada além dessa única
  * string já validada, nunca o corpo bruto.
  */
-async function parseSanitizedErrorCode(
+export async function parseSanitizedErrorCode(
   response: Response,
 ): Promise<string | undefined> {
   try {
@@ -151,6 +151,19 @@ function refreshSession(): Promise<"REFRESHED" | "EXPIRED"> {
   return refreshPromise;
 }
 
+export interface ApiFetchOptions extends RequestInit {
+  /**
+   * `false` desliga a renovação automática de sessão (refresh + repetição)
+   * em 401 para esta chamada — default `true`, preserva o comportamento de
+   * toda chamada existente. Existe para mutações sensíveis que nunca podem
+   * ser reenviadas automaticamente (ex.: `changeOwnPassword` — reenviar uma
+   * troca de senha após um 401/refresh seria repetir uma mutação sem o
+   * usuário saber). Nunca usar comparação frágil por substring da URL para
+   * essa decisão — o chamador declara a intenção explicitamente aqui.
+   */
+  retryOnUnauthorized?: boolean;
+}
+
 /**
  * Cliente HTTP central (ver comentário do arquivo). `timeoutMs` é
  * configurável por chamada (padrão `DEFAULT_TIMEOUT_MS`) — cada chamada tem
@@ -158,16 +171,19 @@ function refreshSession(): Promise<"REFRESHED" | "EXPIRED"> {
  * navegador. `isRetryAfterRefresh` é uso interno (evita um segundo refresh
  * caso a repetição pós-refresh também volte 401).
  *
- * Em 401 de uma rota protegida (fora de `REFRESH_EXEMPT_PATHS`), tenta uma
- * única renovação via `/auth/refresh` e repete esta chamada exatamente uma
- * vez se a renovação funcionar. Se a renovação vier 401 explícito, devolve o
- * 401 original (sessão realmente expirada). Se a renovação falhar por
- * rede/timeout/5xx, lança `ApiFetchError` com `code: "REFRESH_UNAVAILABLE"`
- * — nunca equivalente a sessão expirada.
+ * Em 401 de uma rota protegida (fora de `REFRESH_EXEMPT_PATHS` e com
+ * `retryOnUnauthorized !== false`), tenta uma única renovação via
+ * `/auth/refresh` e repete esta chamada exatamente uma vez se a renovação
+ * funcionar. Se a renovação vier 401 explícito, devolve o 401 original
+ * (sessão realmente expirada). Se a renovação falhar por rede/timeout/5xx,
+ * lança `ApiFetchError` com `code: "REFRESH_UNAVAILABLE"` — nunca
+ * equivalente a sessão expirada. Falha de rede/timeout/5xx na chamada em si
+ * nunca é repetida automaticamente, com ou sem `retryOnUnauthorized` — só o
+ * 401 tem repetição automática, e só quando habilitada.
  */
 export async function apiFetch(
   path: string,
-  options: RequestInit = {},
+  options: ApiFetchOptions = {},
   timeoutMs: number = DEFAULT_TIMEOUT_MS,
   isRetryAfterRefresh = false,
 ): Promise<Response> {
@@ -211,7 +227,8 @@ export async function apiFetch(
   if (
     response.status === 401 &&
     !isRetryAfterRefresh &&
-    !isRefreshExemptPath(path)
+    !isRefreshExemptPath(path) &&
+    options.retryOnUnauthorized !== false
   ) {
     const outcome = await refreshSession();
     if (outcome === "EXPIRED") {
@@ -223,10 +240,10 @@ export async function apiFetch(
   return response;
 }
 
-export async function fetchMarketplaceAccounts(): Promise<
-  MarketplaceAccountDto[]
-> {
-  const response = await apiFetch("/marketplace-accounts");
+export async function fetchMarketplaceAccounts(
+  signal?: AbortSignal,
+): Promise<MarketplaceAccountDto[]> {
+  const response = await apiFetch("/marketplace-accounts", { signal });
   if (!response.ok) {
     throw new ApiFetchError(
       "Não foi possível carregar as contas de marketplace.",

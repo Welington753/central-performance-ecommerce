@@ -370,6 +370,90 @@ describe("apiFetch — refresh automático em 401 (single-flight)", () => {
   });
 });
 
+describe("apiFetch — retryOnUnauthorized: false (refinamento de segurança CP4)", () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+  });
+
+  it("16. 401 com retryOnUnauthorized: false devolve o 401 sem chamar /auth/refresh e sem repetir a chamada", async () => {
+    global.fetch = sequenceFetch({
+      "/auth/change-password": [jsonResponse(401, {})],
+    });
+
+    const response = await apiFetch("/auth/change-password", {
+      method: "POST",
+      retryOnUnauthorized: false,
+    });
+
+    expect(response.status).toBe(401);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+    const refreshCalls = (global.fetch as jest.Mock).mock.calls.filter(
+      (call) => call[0] === "/auth/refresh",
+    );
+    expect(refreshCalls).toHaveLength(0);
+  });
+
+  it("17. rede/timeout com retryOnUnauthorized: false continua sem repetir a chamada (nunca reenvia mutação)", async () => {
+    global.fetch = jest.fn().mockRejectedValue(new TypeError("network down"));
+
+    const error = await apiFetch("/auth/change-password", {
+      method: "POST",
+      retryOnUnauthorized: false,
+    }).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(ApiFetchError);
+    expect(global.fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("18. 500/502/503/504 com retryOnUnauthorized: false não repetem a chamada", async () => {
+    for (const status of [500, 502, 503, 504]) {
+      global.fetch = jest.fn().mockResolvedValue(jsonResponse(status, {}));
+
+      const response = await apiFetch("/auth/change-password", {
+        method: "POST",
+        retryOnUnauthorized: false,
+      });
+
+      expect(response.status).toBe(status);
+      expect(global.fetch).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("19. GET protegido comum (sem a opção) continua renovando a sessão em 401 — comportamento default preservado", async () => {
+    global.fetch = sequenceFetch({
+      "/marketplace-accounts": [
+        jsonResponse(401, {}),
+        jsonResponse(200, [{ id: "acc-1" }]),
+      ],
+      "/auth/refresh": [jsonResponse(200, {})],
+    });
+
+    const response = await apiFetch("/marketplace-accounts");
+
+    expect(response.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
+
+  it("20. retryOnUnauthorized: true tem o mesmo efeito do default (compatibilidade explícita)", async () => {
+    global.fetch = sequenceFetch({
+      "/marketplace-accounts": [
+        jsonResponse(401, {}),
+        jsonResponse(200, [{ id: "acc-1" }]),
+      ],
+      "/auth/refresh": [jsonResponse(200, {})],
+    });
+
+    const response = await apiFetch("/marketplace-accounts", {
+      retryOnUnauthorized: true,
+    });
+
+    expect(response.status).toBe(200);
+    expect(global.fetch).toHaveBeenCalledTimes(3);
+  });
+});
+
 describe("apiFetch — timeout controlado (AbortController)", () => {
   const originalFetch = global.fetch;
 

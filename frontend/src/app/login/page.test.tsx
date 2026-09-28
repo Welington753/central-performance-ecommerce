@@ -1,10 +1,11 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import LoginPage from "./page";
 
 jest.mock("next/navigation", () => ({
   useRouter: jest.fn(),
+  useSearchParams: jest.fn(),
 }));
 
 // Caminho relativo real (não o alias `@/*`) — mesmo padrão já usado em
@@ -27,6 +28,7 @@ function response(status: number, body: unknown = {}): Response {
 beforeEach(() => {
   jest.clearAllMocks();
   (useRouter as jest.Mock).mockReturnValue({ push });
+  (useSearchParams as jest.Mock).mockReturnValue(new URLSearchParams());
 });
 
 describe("LoginPage — health check de cold start", () => {
@@ -82,5 +84,48 @@ describe("LoginPage — health check de cold start", () => {
         api.apiFetch.mock.calls.filter((call) => call[0] === "/auth/login"),
       ).toHaveLength(1),
     );
+  });
+});
+
+describe("LoginPage — mensagem pós-troca de senha", () => {
+  it("mostra o aviso quando vem de /alterar-senha (?passwordChanged=1)", async () => {
+    api.apiFetch.mockResolvedValue(response(200));
+    (useSearchParams as jest.Mock).mockReturnValue(
+      new URLSearchParams("passwordChanged=1"),
+    );
+
+    render(<LoginPage />);
+
+    expect(
+      await screen.findByText("Senha alterada. Entre novamente com a nova senha."),
+    ).toBeInTheDocument();
+  });
+
+  it("mostra o aviso de sessão expirada quando vem de /alterar-senha (?sessionExpired=1)", async () => {
+    api.apiFetch.mockResolvedValue(response(200));
+    (useSearchParams as jest.Mock).mockReturnValue(
+      new URLSearchParams("sessionExpired=1"),
+    );
+
+    render(<LoginPage />);
+
+    expect(
+      await screen.findByText("Sua sessão expirou. Entre novamente."),
+    ).toBeInTheDocument();
+  });
+
+  it("não mostra o aviso em um acesso normal", async () => {
+    api.apiFetch.mockResolvedValue(response(200));
+
+    render(<LoginPage />);
+
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Entrar" }),
+      ).not.toBeDisabled(),
+    );
+    expect(
+      screen.queryByText("Senha alterada. Entre novamente com a nova senha."),
+    ).not.toBeInTheDocument();
   });
 });

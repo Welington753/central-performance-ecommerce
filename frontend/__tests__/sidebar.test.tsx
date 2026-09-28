@@ -2,6 +2,7 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { AppShell } from "@/components/AppShell";
 import { NAV_GROUPS } from "@/lib/navigation";
+import { PERMISSION_KEYS } from "@/types/users";
 
 const pushMock = jest.fn();
 const routerMock = { push: pushMock, replace: jest.fn() };
@@ -37,6 +38,11 @@ jest.mock("next/link", () => {
   return { __esModule: true, default: MockLink };
 });
 
+// Checkpoint 4: `/auth/me` sempre inclui `id`/`permissions` (contrato real
+// de `CurrentUserResponseDto`) — o mock precisa refletir isso, senão
+// `useCurrentUser` descarta a resposta (fail-closed) e nenhum link aparece.
+// Usuário com TODAS as permissões (equivalente a ADMIN) preserva a
+// visibilidade de todos os itens de navegação já esperada por este teste.
 function mockCurrentUser(user: { name: string; email: string } | null) {
   (global.fetch as jest.Mock | undefined) = jest.fn(
     async (url: string, options?: RequestInit) => {
@@ -44,7 +50,20 @@ function mockCurrentUser(user: { name: string; email: string } | null) {
         if (user === null) {
           return { ok: false, status: 401, json: async () => ({}) };
         }
-        return { ok: true, status: 200, json: async () => user };
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: "u1",
+            ...user,
+            active: true,
+            isAdmin: true,
+            role: "ADMIN",
+            permissions: [...PERMISSION_KEYS],
+            accountScope: { mode: "ALL" },
+            mustChangePassword: false,
+          }),
+        };
       }
       if (String(url).endsWith("/auth/logout") && options?.method === "POST") {
         return { ok: true, status: 200, json: async () => ({ success: true }) };
@@ -102,9 +121,14 @@ describe("AppShell — barra lateral", () => {
       );
     }
 
-    // Nenhum link fora da configuração central (NAV_GROUPS).
+    // Nenhum link fora da configuração central (NAV_GROUPS) — exceto
+    // "Alterar minha senha" (Checkpoint 4), que nunca faz parte de
+    // NAV_GROUPS/permissionKey de propósito: fica disponível para qualquer
+    // sessão autenticada, na área do usuário, não na navegação principal.
     const configured = NAV_GROUPS.flatMap((group) => group.items);
-    const links = within(nav).getAllByRole("link");
+    const links = within(nav)
+      .getAllByRole("link")
+      .filter((link) => link.textContent !== "Alterar minha senha");
     expect(links).toHaveLength(configured.length);
     expect(links.map((link) => link.getAttribute("href"))).toEqual(
       configured.map((item) => item.href),

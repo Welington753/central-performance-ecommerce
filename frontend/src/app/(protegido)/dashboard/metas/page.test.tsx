@@ -43,10 +43,15 @@ function jsonResponse(body: unknown, status = 200): Response {
 function mockCurrentUser(overrides: { isAdmin?: boolean } = {}) {
   api.apiFetch.mockImplementation(async (path: string) => {
     if (path === "/auth/me") {
+      // Checkpoint 4: `/auth/me` sempre inclui `id`/`permissions` — sem eles
+      // `useCurrentUser` descarta a resposta (fail-closed). `MetasPage` só
+      // olha `isAdmin`, então `permissions: []` basta aqui.
       return jsonResponse({
+        id: "u1",
         name: "Ana",
         email: "ana@example.com",
         isAdmin: overrides.isAdmin ?? false,
+        permissions: [],
       });
     }
     return jsonResponse({}, 404);

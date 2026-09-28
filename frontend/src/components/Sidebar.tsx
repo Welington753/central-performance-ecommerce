@@ -4,7 +4,7 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
 import { apiFetch } from "@/lib/api";
-import { useCurrentUser } from "@/hooks/useCurrentUser";
+import { hasPermission, useCurrentUser } from "@/hooks/useCurrentUser";
 import { NAV_GROUPS, isNavItemActive } from "@/lib/navigation";
 
 /**
@@ -17,11 +17,22 @@ const BRAND = "#8C0E33";
 export function Sidebar() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, isLoading: isLoadingUser } = useCurrentUser();
+  const { user, isLoading: isLoadingUser, status } = useCurrentUser();
   const [isOpen, setIsOpen] = useState(false);
   const [isSigningOut, setIsSigningOut] = useState(false);
 
   const close = useCallback(() => setIsOpen(false), []);
+
+  // Grupo inteiro some se nenhum item restar visível — item sem
+  // `permissionKey` é sempre exibido; com ele, exige `hasPermission`.
+  // Durante carregamento/erro de /auth/me (`user` ainda nulo) tudo fica
+  // oculto — nunca "pisca" um item protegido antes de saber se é permitido.
+  const visibleGroups = NAV_GROUPS.map((group) => ({
+    ...group,
+    items: group.items.filter(
+      (item) => !item.permissionKey || hasPermission(user, item.permissionKey),
+    ),
+  })).filter((group) => group.items.length > 0);
 
   // Fecha a gaveta com Escape (somente enquanto ela está aberta).
   useEffect(() => {
@@ -125,7 +136,7 @@ export function Sidebar() {
 
         {/* Grupos de navegação */}
         <div className="flex-1 overflow-y-auto px-3 py-5">
-          {NAV_GROUPS.map((group, groupIndex) => (
+          {visibleGroups.map((group, groupIndex) => (
             <div
               key={group.id}
               className={groupIndex > 0 ? "mt-6 border-t border-white/10 pt-5" : ""}
@@ -178,6 +189,19 @@ export function Sidebar() {
               <p className="text-xs text-white/40">Usuário não identificado</p>
             )}
           </div>
+
+          {/* Disponível para qualquer sessão autenticada, sem depender de
+              permissionKey — nunca durante carregamento nem sem usuário
+              válido (mesma condição que já esconde nome/e-mail acima). */}
+          {status === "ready" && user ? (
+            <Link
+              href="/alterar-senha"
+              onClick={close}
+              className="mb-2 block rounded-md px-3 py-2 text-center text-sm font-medium text-white/70 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#8C0E33]"
+            >
+              Alterar minha senha
+            </Link>
+          ) : null}
 
           <button
             type="button"
