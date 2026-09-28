@@ -6,6 +6,7 @@ import {
   PrimaryGeneratedColumn,
   UpdateDateColumn,
 } from 'typeorm';
+import { AccountScopeMode } from './account-scope-mode.enum';
 
 @Entity({ name: 'users' })
 export class User {
@@ -39,6 +40,37 @@ export class User {
    */
   @Column({ name: 'is_admin', type: 'boolean', default: false })
   isAdmin!: boolean;
+
+  /**
+   * Papel do usuário — `roles.id`. NOT NULL desde o Checkpoint 3: todo
+   * caminho que cria usuário (seed, `UsersService.createUser`,
+   * `UsersManagementService.create`) é obrigado a atribuir um papel válido.
+   * Usuários preexistentes já vinham preenchidos pelo backfill da migration
+   * a partir de `is_admin` antes da própria migration aplicar o NOT NULL.
+   * Guards resolvem a partir da PERMISSÃO efetiva (papel +
+   * `user_permission_overrides`), nunca comparando `role.key` diretamente.
+   */
+  @Column({ name: 'role_id', type: 'uuid' })
+  roleId!: string;
+
+  /**
+   * Fail-closed por definição (ver `AccountScopeMode`): ausência de linhas
+   * em `user_account_scope` NUNCA equivale a `ALL`. Novo usuário nasce
+   * `NONE` pelo default da coluna; usuários preexistentes são migrados para
+   * `ALL` (preserva a visão que já tinham antes do RBAC).
+   */
+  @Column({
+    name: 'account_scope_mode',
+    type: 'varchar',
+    default: AccountScopeMode.NONE,
+  })
+  accountScopeMode!: AccountScopeMode;
+
+  @Column({ name: 'must_change_password', type: 'boolean', default: false })
+  mustChangePassword!: boolean;
+
+  @Column({ name: 'password_changed_at', type: 'timestamptz', nullable: true })
+  passwordChangedAt!: Date | null;
 
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;

@@ -13,6 +13,7 @@ import { HealthModule } from './health/health.module';
 import { IntegrationsModule } from './integrations/integrations.module';
 import { SyncModule } from './sync/sync.module';
 import { UsersModule } from './users/users.module';
+import { UsersManagementModule } from './users/users-management.module';
 
 @Module({
   imports: [
@@ -43,6 +44,7 @@ import { UsersModule } from './users/users.module';
     CommonModule,
     UsersModule,
     AuthModule,
+    UsersManagementModule,
     IntegrationsModule,
     SyncModule,
     HealthModule,

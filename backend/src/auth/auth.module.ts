@@ -4,8 +4,10 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersModule } from '../users/users.module';
 import { AuthController } from './auth.controller';
 import { AuthService } from './auth.service';
+import { AuthorizationContextService } from './authorization-context.service';
 import { AccessTokenGuard } from './guards/access-token.guard';
 import { AdminGuard } from './guards/admin.guard';
+import { PermissionGuard } from './guards/permission.guard';
 import { UserSession } from './user-session.entity';
 
 @Module({
@@ -18,12 +20,27 @@ import { UserSession } from './user-session.entity';
     JwtModule.register({}),
   ],
   controllers: [AuthController],
-  providers: [AuthService, AccessTokenGuard, AdminGuard],
-  // UsersModule reexportado: AdminGuard depende de UsersService, e
-  // qualquer módulo que use `@UseGuards(AdminGuard)` (ex.:
+  providers: [
+    AuthService,
+    AccessTokenGuard,
+    AdminGuard,
+    PermissionGuard,
+    AuthorizationContextService,
+  ],
+  // UsersModule reexportado: AdminGuard/PermissionGuard dependem de
+  // UsersService/PermissionResolverService, e qualquer módulo que use
+  // `@UseGuards(AdminGuard)`/`@UseGuards(PermissionGuard)` (ex.:
   // MarketplaceAnalyticsModule) precisa enxergar essa dependência através
   // do próprio AuthModule — sem isto, o Nest falha ao instanciar o guard
   // fora do AuthModule ("Please make sure that UsersService is available").
-  exports: [AuthService, AccessTokenGuard, AdminGuard, JwtModule, UsersModule],
+  exports: [
+    AuthService,
+    AccessTokenGuard,
+    AdminGuard,
+    PermissionGuard,
+    AuthorizationContextService,
+    JwtModule,
+    UsersModule,
+  ],
 })
 export class AuthModule {}

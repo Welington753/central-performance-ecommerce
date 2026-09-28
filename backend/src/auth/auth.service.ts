@@ -4,13 +4,18 @@ import { JwtService } from '@nestjs/jwt';
 import { InjectRepository } from '@nestjs/typeorm';
 import * as argon2 from 'argon2';
 import { createHash, randomBytes } from 'crypto';
-import { Repository } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
+import { SessionRevocationService } from '../users/session-revocation.service';
 import { User } from '../users/user.entity';
 import { UsersService } from '../users/users.service';
 import {
   GENERIC_AUTH_ERROR_MESSAGE,
   GENERIC_SESSION_ERROR_MESSAGE,
 } from './constants/auth.constants';
+import {
+  CurrentPasswordInvalidError,
+  NewPasswordMustDifferError,
+} from './change-password.errors';
 import type { AccessTokenPayload } from './interfaces/access-token-payload.interface';
 import { UserSession } from './user-session.entity';
 
@@ -42,6 +47,8 @@ export class AuthService {
     private readonly sessionRepository: Repository<UserSession>,
     private readonly jwtService: JwtService,
     private readonly configService: ConfigService,
+    private readonly sessionRevocationService: SessionRevocationService,
+    private readonly dataSource: DataSource,
   ) {}
 
   /** Duração do access token, em segundos (padrão: 900s = 15 minutos). */
@@ -121,6 +128,71 @@ export class AuthService {
       throw new UnauthorizedException('Não autenticado.');
     }
     return user;
+  }
+
+  /**
+   * Checkpoint 3: exige SEMPRE a senha atual (inclusive no primeiro
+   * acesso — nunca um atalho para quem tem `must_change_password=true`).
+   * Revoga todas as sessões (a sessão que chamou este endpoint também é
+   * revogada — o controller limpa os cookies e o usuário precisa logar de
+   * novo com a senha nova) e registra auditoria `PASSWORD_CHANGED` sem
+   * nenhum valor de senha, só o nome do campo alterado.
+   */
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const user = await this.getActiveUserOrFail(userId);
+
+    const isCurrentValid = await this.verifyPassword(
+      user.passwordHash,
+      currentPassword,
+    );
+    if (!isCurrentValid) {
+      throw new CurrentPasswordInvalidError();
+    }
+    if (newPassword === currentPassword) {
+      throw new NewPasswordMustDifferError();
+    }
+
+    const newPasswordHash = await argon2.hash(newPassword);
+
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+    try {
+      await queryRunner.query(
+        `UPDATE "users" SET
+           "password_hash" = $2,
+           "must_change_password" = false,
+           "password_changed_at" = now(),
+           "updated_at" = now()
+         WHERE "id" = $1`,
+        [userId, newPasswordHash],
+      );
+      await this.sessionRevocationService.revokeAllActiveForUser(
+        queryRunner.manager,
+        userId,
+      );
+      await queryRunner.query(
+        `INSERT INTO "user_audit_logs" (actor_user_id, target_user_id, action, changes)
+         VALUES ($1, $1, 'PASSWORD_CHANGED', $2::jsonb)`,
+        [userId, JSON.stringify({ fields: ['passwordHash'] })],
+      );
+      await queryRunner.commitTransaction();
+    } catch (error) {
+      if (queryRunner.isTransactionActive) {
+        try {
+          await queryRunner.rollbackTransaction();
+        } catch {
+          // Nunca mascara o erro original em propagação.
+        }
+      }
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
   }
 
   private async verifyPassword(

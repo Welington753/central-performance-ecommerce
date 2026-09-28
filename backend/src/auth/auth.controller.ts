@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -14,14 +15,21 @@ import { ConfigService } from '@nestjs/config';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { CookieOptions, Request, Response } from 'express';
-import { toUserResponse } from '../users/users.mapper';
+import { CurrentUserResponseDto } from '../users/dto/current-user-response.dto';
 import { UserResponseDto } from '../users/dto/user-response.dto';
+import { PermissionResolverService } from '../users/permission-resolver.service';
+import { toCurrentUserResponse, toUserResponse } from '../users/users.mapper';
 import { AuthService } from './auth.service';
+import {
+  CurrentPasswordInvalidError,
+  NewPasswordMustDifferError,
+} from './change-password.errors';
 import {
   ACCESS_TOKEN_COOKIE_NAME,
   REFRESH_TOKEN_COOKIE_NAME,
 } from './constants/auth.constants';
 import { CurrentUser } from './decorators/current-user.decorator';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { AccessTokenGuard } from './guards/access-token.guard';
 import type { AccessTokenPayload } from './interfaces/access-token-payload.interface';
@@ -36,6 +44,7 @@ export class AuthController {
   constructor(
     private readonly authService: AuthService,
     private readonly configService: ConfigService,
+    private readonly permissionResolverService: PermissionResolverService,
   ) {}
 
   @Throttle({ default: { limit: 5, ttl: 60000 } })
@@ -94,12 +103,57 @@ export class AuthController {
   @Get('me')
   async me(
     @CurrentUser() payload?: AccessTokenPayload,
-  ): Promise<UserResponseDto> {
+  ): Promise<CurrentUserResponseDto> {
     if (!payload) {
       throw new UnauthorizedException('Não autenticado.');
     }
     const user = await this.authService.getActiveUserOrFail(payload.sub);
-    return toUserResponse(user);
+    // Resolvido do zero a cada chamada (nunca cacheado) — uma mudança de
+    // papel/permissão/escopo feita direto no banco vale já na próxima
+    // requisição, sem exigir novo login.
+    const authorization = await this.permissionResolverService.resolve(
+      payload.sub,
+    );
+    return toCurrentUserResponse(user, authorization);
+  }
+
+  /**
+   * Nunca protegido por `PermissionGuard` (só `AccessTokenGuard`) — precisa
+   * continuar acessível mesmo com `mustChangePassword=true` (é exatamente
+   * a rota que resolve isso). Exige SEMPRE a senha atual, inclusive no
+   * primeiro acesso. Revoga todas as sessões do usuário (a atual inclusa)
+   * e limpa os cookies — o usuário precisa logar de novo com a senha nova.
+   */
+  @ApiCookieAuth()
+  @UseGuards(AccessTokenGuard)
+  @Throttle({ default: { limit: 5, ttl: 60000 } })
+  @Post('change-password')
+  @HttpCode(HttpStatus.OK)
+  async changePassword(
+    @Body() dto: ChangePasswordDto,
+    @CurrentUser() payload: AccessTokenPayload | undefined,
+    @Res({ passthrough: true }) res: Response,
+  ): Promise<{ success: true }> {
+    if (!payload) {
+      throw new UnauthorizedException('Não autenticado.');
+    }
+    try {
+      await this.authService.changePassword(
+        payload.sub,
+        dto.currentPassword,
+        dto.newPassword,
+      );
+    } catch (error) {
+      if (error instanceof CurrentPasswordInvalidError) {
+        throw new BadRequestException(error.message);
+      }
+      if (error instanceof NewPasswordMustDifferError) {
+        throw new BadRequestException(error.message);
+      }
+      throw error;
+    }
+    this.clearAuthCookies(res);
+    return { success: true };
   }
 
   private extractUserAgent(req: Request): string | null {

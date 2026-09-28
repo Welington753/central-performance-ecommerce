@@ -1,5 +1,7 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test } from '@nestjs/testing';
+import { randomUUID } from 'crypto';
+import { AccountScopeMode } from './account-scope-mode.enum';
 import { User } from './user.entity';
 import { UsersService } from './users.service';
 
@@ -35,17 +37,26 @@ describe('UsersService', () => {
       ],
     }).compile();
     const service = moduleRef.get(UsersService);
+    const roleId = randomUUID();
 
     await service.createUser({
       name: 'Ana',
       email: 'ana@example.com',
       passwordHash: 'argon2-hash-value',
+      roleId,
+      isAdmin: false,
+      accountScopeMode: AccountScopeMode.NONE,
+      mustChangePassword: true,
     });
 
     expect(create).toHaveBeenCalledWith(
       expect.objectContaining({
         passwordHash: 'argon2-hash-value',
         active: true,
+        roleId,
+        isAdmin: false,
+        accountScopeMode: AccountScopeMode.NONE,
+        mustChangePassword: true,
       }),
     );
     expect(save).toHaveBeenCalled();

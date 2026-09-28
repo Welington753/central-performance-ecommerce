@@ -3,7 +3,8 @@ import type { ConfigService } from '@nestjs/config';
 import type { JwtService } from '@nestjs/jwt';
 import * as argon2 from 'argon2';
 import { createHash, randomUUID } from 'crypto';
-import type { Repository } from 'typeorm';
+import type { DataSource, Repository } from 'typeorm';
+import { AccountScopeMode } from '../users/account-scope-mode.enum';
 import type { User } from '../users/user.entity';
 import type { UsersService } from '../users/users.service';
 import { AuthService } from './auth.service';
@@ -22,6 +23,10 @@ function buildUser(overrides: Partial<User> = {}): User {
     passwordHash: 'irrelevant-in-most-tests',
     active: true,
     isAdmin: false,
+    roleId: randomUUID(),
+    accountScopeMode: AccountScopeMode.NONE,
+    mustChangePassword: false,
+    passwordChangedAt: null,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,
@@ -77,11 +82,20 @@ describe('AuthService', () => {
       getOrThrow: jest.fn().mockReturnValue('access-token-secret'),
     };
 
+    const sessionRevocationService = {
+      revokeAllActiveForUser: jest.fn().mockResolvedValue(0),
+    };
+    const dataSource = {
+      createQueryRunner: jest.fn(),
+    };
+
     authService = new AuthService(
       usersService as unknown as UsersService,
       sessionRepository as unknown as Repository<UserSession>,
       jwtService as unknown as JwtService,
       configService as unknown as ConfigService,
+      sessionRevocationService,
+      dataSource as unknown as DataSource,
     );
   });
 
