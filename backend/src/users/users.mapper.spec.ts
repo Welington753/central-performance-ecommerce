@@ -90,7 +90,7 @@ describe('toCurrentUserResponse', () => {
     ]);
   });
 
-  it('ADMIN recebe as 16 permissões do catálogo no DTO', () => {
+  it('ADMIN recebe todas as permissões do catálogo no DTO', () => {
     const dto = toCurrentUserResponse(
       buildUser({ isAdmin: true }),
       buildAuthorizationContext({
@@ -99,7 +99,7 @@ describe('toCurrentUserResponse', () => {
         permissions: ALL_PERMISSION_KEYS,
       }),
     );
-    expect(dto.permissions).toHaveLength(16);
+    expect(dto.permissions).toHaveLength(ALL_PERMISSION_KEYS.length);
   });
 
   it('roleKey null vira role null no DTO (usuário sem papel)', () => {

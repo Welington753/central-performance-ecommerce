@@ -29,6 +29,9 @@ export const PERMISSIONS = {
   SYNC_FULL_HISTORY: 'sync.full_history',
   USERS_VIEW: 'users.view',
   USERS_MANAGE: 'users.manage',
+  PROBLEMS_VIEW: 'problems.view',
+  PROBLEMS_MANAGE: 'problems.manage',
+  PROBLEMS_SYNC: 'problems.sync',
 } as const;
 
 export type PermissionKey = (typeof PERMISSIONS)[keyof typeof PERMISSIONS];
@@ -87,6 +90,7 @@ export const ROLE_PERMISSION_PRESETS: Readonly<
     PERMISSIONS.GOALS_VIEW,
     PERMISSIONS.INTEGRATIONS_VIEW,
     PERMISSIONS.SYNC_VIEW,
+    PERMISSIONS.PROBLEMS_VIEW,
   ],
   VIEWER: [
     PERMISSIONS.DASHBOARD_VIEW,

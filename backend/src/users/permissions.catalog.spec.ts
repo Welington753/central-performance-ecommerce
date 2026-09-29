@@ -24,6 +24,9 @@ const EXPECTED_CATALOG = [
   'sync.full_history',
   'users.view',
   'users.manage',
+  'problems.view',
+  'problems.manage',
+  'problems.sync',
 ] as const;
 
 const EXPECTED_ANALYST_PRESET = [
@@ -34,6 +37,7 @@ const EXPECTED_ANALYST_PRESET = [
   'goals.view',
   'integrations.view',
   'sync.view',
+  'problems.view',
 ];
 
 const EXPECTED_VIEWER_PRESET = [
@@ -45,15 +49,15 @@ const EXPECTED_VIEWER_PRESET = [
 ];
 
 describe('permissions.catalog', () => {
-  it('catálogo canônico tem exatamente as 16 permission keys em inglês, sem duplicatas', () => {
-    expect(ALL_PERMISSION_KEYS).toHaveLength(16);
-    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(16);
+  it('catálogo canônico tem exatamente as 19 permission keys em inglês, sem duplicatas', () => {
+    expect(ALL_PERMISSION_KEYS).toHaveLength(19);
+    expect(new Set(ALL_PERMISSION_KEYS).size).toBe(19);
     expect([...ALL_PERMISSION_KEYS].sort()).toEqual(
       [...EXPECTED_CATALOG].sort(),
     );
   });
 
-  it('PERMISSIONS expõe exatamente as mesmas 16 chaves que ALL_PERMISSION_KEYS', () => {
+  it('PERMISSIONS expõe exatamente as mesmas 19 chaves que ALL_PERMISSION_KEYS', () => {
     expect(Object.values(PERMISSIONS).sort()).toEqual(
       [...ALL_PERMISSION_KEYS].sort(),
     );
@@ -83,7 +87,7 @@ describe('permissions.catalog', () => {
     );
   });
 
-  it('isPermissionKey reconhece só as 16 chaves canônicas — nunca chave legada em português nem lixo', () => {
+  it('isPermissionKey reconhece só as chaves canônicas — nunca chave legada em português nem lixo', () => {
     for (const key of ALL_PERMISSION_KEYS) {
       expect(isPermissionKey(key)).toBe(true);
     }

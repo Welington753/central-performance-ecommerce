@@ -51,6 +51,26 @@ describe('UsersRolesPermissions migration (Postgres real)', () => {
     await dataSource.destroy();
   });
 
+  /**
+   * `undoLastMigration()` sozinho só desfaz a migration mais RECENTE da
+   * cadeia — migrations adicionadas depois desta (ex.: `marketplace-problems`,
+   * CP1 de "Problemas") empilham por cima e passam a ser "a última". Desfaz
+   * repetidamente até a tabela `roles` (criada por ESTA migration) sumir,
+   * isolando corretamente esta migration não importa quantas vieram depois.
+   */
+  async function undoUntilRolesTableGone(): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const exists = await dataSource.query<Array<{ exists: boolean }>>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'roles') AS exists`,
+      );
+      if (!exists[0].exists) return;
+      await dataSource.undoLastMigration();
+    }
+    throw new Error(
+      'Tabela "roles" ainda existe após 20 tentativas de undoLastMigration().',
+    );
+  }
+
   it('roda a cadeia inteira de migrations (incluindo as anteriores) sem erro, idempotente se já aplicada', async () => {
     // Nunca assume banco vazio: `runMigrations()` deve ser seguro tanto num
     // Postgres descartável do zero (aplica tudo) quanto já na "head" (nenhum
@@ -105,7 +125,7 @@ describe('UsersRolesPermissions migration (Postgres real)', () => {
       // insere usuários "preexistentes" direto na tabela `users` (que já
       // existia antes desta migration), depois reaplica — reproduzindo
       // exatamente o cenário de um banco em produção sendo migrado.
-      await dataSource.undoLastMigration();
+      await undoUntilRolesTableGone();
 
       adminUserId = randomUUID();
       commonUserId = randomUUID();
@@ -182,7 +202,7 @@ describe('UsersRolesPermissions migration (Postgres real)', () => {
       'SELECT count(*)::text AS count FROM users',
     );
 
-    await dataSource.undoLastMigration();
+    await undoUntilRolesTableGone();
 
     const rolesTableExists = await dataSource.query<Array<{ exists: boolean }>>(
       `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'roles') AS exists`,
