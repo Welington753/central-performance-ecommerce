@@ -1,5 +1,6 @@
 import { NotFoundException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import type { AccountScope } from '../../users/account-scope.types';
 import { Marketplace } from '../contracts/marketplace.enum';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import type { MlLogisticsReclassificationJobRow } from './ml-logistics-reclassification-jobs-persistence.service';
@@ -70,7 +71,7 @@ function buildService(options: {
 }) {
   const accountsService = {
     findByIdOrFail: jest.fn().mockResolvedValue(account()),
-    findAll: jest.fn().mockResolvedValue([account()]),
+    findAllForScope: jest.fn().mockResolvedValue([account()]),
     ...options.accountsService,
   };
   const jobsPersistence = {
@@ -314,7 +315,7 @@ describe('MlLogisticsReclassificationService', () => {
     it('startAll only targets connected Mercado Livre accounts', async () => {
       const { service, accountsService, jobsPersistence } = buildService({
         accountsService: {
-          findAll: jest.fn().mockResolvedValue([
+          findAllForScope: jest.fn().mockResolvedValue([
             account({ id: 'ml-1' }),
             account({
               id: 'shopee-1',
@@ -332,7 +333,7 @@ describe('MlLogisticsReclassificationService', () => {
           findByIdOrFail: jest.fn().mockResolvedValue(account({ id: 'ml-1' })),
         },
       });
-      await service.startAll();
+      await service.startAll({ mode: 'ALL' });
       expect(jobsPersistence.createIfAbsent).toHaveBeenCalledTimes(1);
       expect(accountsService.findByIdOrFail).toHaveBeenCalledWith('ml-1');
     });
@@ -340,7 +341,7 @@ describe('MlLogisticsReclassificationService', () => {
     it('getStatusForAllAccounts never includes Shopee/Amazon rows', async () => {
       const { service } = buildService({
         accountsService: {
-          findAll: jest
+          findAllForScope: jest
             .fn()
             .mockResolvedValue([
               account({ id: 'ml-1' }),
@@ -348,9 +349,22 @@ describe('MlLogisticsReclassificationService', () => {
             ]),
         },
       });
-      const statuses = await service.getStatusForAllAccounts();
+      const statuses = await service.getStatusForAllAccounts({ mode: 'ALL' });
       expect(statuses).toHaveLength(1);
       expect(statuses[0].accountId).toBe('ml-1');
+    });
+
+    it('Checkpoint 5A: repassa o scope a findAllForScope — nunca a findAll (SELECTED vazio/NONE não podem virar ALL)', async () => {
+      const { service, accountsService } = buildService({
+        accountsService: {
+          findAllForScope: jest.fn().mockResolvedValue([]),
+        },
+      });
+      const scope: AccountScope = { mode: 'SELECTED', accountIds: [] };
+
+      await service.getStatusForAllAccounts(scope);
+
+      expect(accountsService.findAllForScope).toHaveBeenCalledWith(scope);
     });
   });
 });

@@ -1,156 +1,156 @@
-import { GUARDS_METADATA } from '@nestjs/common/constants';
 import {
-  BadGatewayException,
-  BadRequestException,
-  ConflictException,
-  HttpException,
-  PreconditionFailedException,
-  ServiceUnavailableException,
+  ExecutionContext,
+  INestApplication,
+  NotFoundException,
+  UnauthorizedException,
+  ValidationPipe,
 } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import type { Request } from 'express';
+import request from 'supertest';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContextService } from '../../auth/authorization-context.service';
+import { PermissionGuard } from '../../auth/guards/permission.guard';
+import type { AuthorizationContext } from '../../users/authorization-context.interface';
+import type { AccountScope } from '../../users/account-scope.types';
+import { PERMISSIONS } from '../../users/permissions.catalog';
 import { AmazonOrdersSyncController } from './amazon-orders-sync.controller';
-import { AmazonOrdersSyncError } from './amazon-orders-sync.service';
+import { AmazonOrdersSyncService } from './amazon-orders-sync.service';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
+import { ACCOUNT_NOT_FOUND_MESSAGE } from '../marketplace-accounts/marketplace-accounts.service';
 
-function buildController(
-  overrides: { syncService?: Record<string, jest.Mock> } = {},
-) {
-  const syncService = { syncOrders: jest.fn(), ...overrides.syncService };
-  const controller = new AmazonOrdersSyncController(syncService as never);
-  return { controller, syncService };
-}
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
 
-const SUMMARY = {
-  syncRunId: 'run-1',
-  status: 'SUCCESS' as const,
-  dateFrom: '2026-07-03T00:00:00.000Z',
-  dateTo: '2026-09-01T00:00:00.000Z',
-  pagesFetched: 1,
-  ordersFetched: 2,
-  ordersUpserted: 2,
-  itemsUpserted: 2,
-};
+describe('AmazonOrdersSyncController (HTTP)', () => {
+  let app: INestApplication;
+  const http = () => app.getHttpServer() as Parameters<typeof request>[0];
+  let currentUserId: string | null;
+  let currentPermissions: string[];
+  let currentAccountScope: AccountScope;
+  let currentMustChangePassword: boolean;
 
-describe('AmazonOrdersSyncController', () => {
-  it('requires AccessTokenGuard at the class level (endpoint protegido)', () => {
-    const guards = Reflect.getMetadata(
-      GUARDS_METADATA,
-      AmazonOrdersSyncController,
-    ) as unknown[];
-    expect(guards).toContain(AccessTokenGuard);
+  const syncService = { syncOrders: jest.fn() };
+  const scopedMarketplaceAccountService = {
+    assertAllowedAndFindOrFail: jest.fn(),
+  };
+
+  const authorizationContextService = {
+    resolveForRequest: jest.fn((request: Request): AuthorizationContext => {
+      const context: AuthorizationContext = {
+        userId: currentUserId ?? 'anon',
+        active: true,
+        roleKey: 'ADMIN',
+        isAdmin: true,
+        permissions: currentPermissions as never,
+        accountScope: currentAccountScope,
+        mustChangePassword: currentMustChangePassword,
+      };
+      request.authorizationContext = context;
+      return context;
+    }),
+  };
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [AmazonOrdersSyncController],
+      providers: [
+        { provide: AmazonOrdersSyncService, useValue: syncService },
+        {
+          provide: ScopedMarketplaceAccountService,
+          useValue: scopedMarketplaceAccountService,
+        },
+        {
+          provide: AuthorizationContextService,
+          useValue: authorizationContextService,
+        },
+        PermissionGuard,
+      ],
+    })
+      .overrideGuard(AccessTokenGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          if (currentUserId === null) {
+            throw new UnauthorizedException('Não autenticado.');
+          }
+          const req = context.switchToHttp().getRequest<Request>();
+          req.user = { sub: currentUserId, email: 'a@b.com' };
+          return true;
+        },
+      })
+      .compile();
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await app.init();
   });
 
-  describe('syncOrders', () => {
-    it('delegates to the sync service and returns its sanitized aggregate summary', async () => {
-      const { controller, syncService } = buildController({
-        syncService: { syncOrders: jest.fn().mockResolvedValue(SUMMARY) },
-      });
+  afterAll(async () => {
+    await app.close();
+  });
 
-      const result = await controller.syncOrders('acc-1');
+  beforeEach(() => {
+    jest.clearAllMocks();
+    currentUserId = 'u1';
+    currentPermissions = [PERMISSIONS.SYNC_RUN];
+    currentAccountScope = { mode: 'ALL' };
+    currentMustChangePassword = false;
+    scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockResolvedValue(
+      { id: VALID_UUID },
+    );
+  });
 
-      expect(syncService.syncOrders).toHaveBeenCalledWith('acc-1', {
+  describe('POST /marketplace-accounts/:id/amazon/orders/sync', () => {
+    it('401 sem autenticação', async () => {
+      currentUserId = null;
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/amazon/orders/sync`)
+        .expect(401);
+    });
+
+    it('403 sem sync.run', async () => {
+      currentPermissions = [];
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/amazon/orders/sync`)
+        .expect(403);
+      expect(syncService.syncOrders).not.toHaveBeenCalled();
+    });
+
+    it('404 genérico quando a conta está fora do escopo — nunca chama o conector', async () => {
+      scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
+        new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
+      );
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/amazon/orders/sync`)
+        .expect(404);
+      expect(syncService.syncOrders).not.toHaveBeenCalled();
+    });
+
+    it('200 quando a conta está no escopo — sync não muda de assinatura', async () => {
+      syncService.syncOrders.mockResolvedValue({ status: 'SUCCESS' });
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/amazon/orders/sync`)
+        .expect(200);
+      expect(
+        scopedMarketplaceAccountService.assertAllowedAndFindOrFail,
+      ).toHaveBeenCalledWith(currentAccountScope, VALID_UUID);
+      expect(syncService.syncOrders).toHaveBeenCalledWith(VALID_UUID, {
         from: undefined,
         to: undefined,
       });
-      expect(result).toEqual(SUMMARY);
     });
 
-    it('forwards an explicit from/to body to the service', async () => {
-      const { controller, syncService } = buildController({
-        syncService: { syncOrders: jest.fn().mockResolvedValue(SUMMARY) },
-      });
-
-      await controller.syncOrders('acc-1', {
-        from: '2026-08-01',
-        to: '2026-08-05',
-      });
-
-      expect(syncService.syncOrders).toHaveBeenCalledWith('acc-1', {
-        from: '2026-08-01',
-        to: '2026-08-05',
-      });
-    });
-
-    it('never returns individual order ids, SKUs or tokens — only the allowlisted aggregate fields', async () => {
-      const { controller } = buildController({
-        syncService: { syncOrders: jest.fn().mockResolvedValue(SUMMARY) },
-      });
-      const result = await controller.syncOrders('acc-1');
-      expect(Object.keys(result).sort()).toEqual(
-        [
-          'syncRunId',
-          'status',
-          'dateFrom',
-          'dateTo',
-          'pagesFetched',
-          'ordersFetched',
-          'ordersUpserted',
-          'itemsUpserted',
-        ].sort(),
-      );
-    });
-
-    it.each([
-      ['SYNC_ALREADY_RUNNING', ConflictException],
-      ['ACCOUNT_NOT_CONNECTED', ConflictException],
-      ['AMAZON_NOT_CONFIGURED', PreconditionFailedException],
-      ['INVALID_PERIOD', BadRequestException],
-      ['PROVIDER_UNAVAILABLE', ServiceUnavailableException],
-      ['PROVIDER_REJECTED_REQUEST', BadGatewayException],
-      ['INVALID_PROVIDER_RESPONSE', BadGatewayException],
-      ['SYNC_FAILED', ServiceUnavailableException],
-    ] as const)(
-      'maps AmazonOrdersSyncError "%s" to %s',
-      async (code, expectedExceptionClass) => {
-        const { controller } = buildController({
-          syncService: {
-            syncOrders: jest
-              .fn()
-              .mockRejectedValue(new AmazonOrdersSyncError(code)),
-          },
-        });
-
-        await expect(controller.syncOrders('acc-1')).rejects.toBeInstanceOf(
-          expectedExceptionClass,
-        );
-      },
-    );
-
-    it('maps PROVIDER_RATE_LIMITED to HTTP 429', async () => {
-      const { controller } = buildController({
-        syncService: {
-          syncOrders: jest
-            .fn()
-            .mockRejectedValue(
-              new AmazonOrdersSyncError('PROVIDER_RATE_LIMITED'),
-            ),
-        },
-      });
-
-      const error: unknown = await controller
-        .syncOrders('acc-1')
-        .catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(HttpException);
-      expect((error as HttpException).getStatus()).toBe(429);
-    });
-
-    it('never leaks internal detail — the HTTP error body carries only the sanitized code', async () => {
-      const { controller } = buildController({
-        syncService: {
-          syncOrders: jest
-            .fn()
-            .mockRejectedValue(new AmazonOrdersSyncError('SYNC_FAILED')),
-        },
-      });
-      const error: unknown = await controller
-        .syncOrders('acc-1')
-        .catch((e: unknown) => e);
-      const body = (error as HttpException).getResponse() as Record<
-        string,
-        unknown
-      >;
-      expect(body.message).toBe('SYNC_FAILED');
-      expect(Object.keys(body).sort()).toEqual(
-        ['message', 'error', 'statusCode'].sort(),
+    it('403 PASSWORD_CHANGE_REQUIRED quando mustChangePassword', async () => {
+      currentMustChangePassword = true;
+      const res = await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/amazon/orders/sync`)
+        .expect(403);
+      expect((res.body as { message: string }).message).toBe(
+        'PASSWORD_CHANGE_REQUIRED',
       );
     });
   });

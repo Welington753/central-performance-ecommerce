@@ -1,7 +1,7 @@
 import { getRepositoryToken } from '@nestjs/typeorm';
 import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
-import { DataSource } from 'typeorm';
+import { DataSource, Repository } from 'typeorm';
 import { createTestDataSource } from '../../test-utils/create-test-data-source';
 import { Marketplace } from '../contracts/marketplace.enum';
 import {
@@ -254,7 +254,8 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
 
     userId = randomUUID();
     await dataSource.query(
-      `INSERT INTO users (id, name, email, password_hash, active) VALUES ($1, 'Test User', $2, 'x', true)`,
+      `INSERT INTO users (id, name, email, password_hash, active, role_id)
+       VALUES ($1, 'Test User', $2, 'x', true, (SELECT id FROM roles WHERE key = 'ADMIN'))`,
       [userId, `test-${userId}@example.com`],
     );
   });
@@ -721,13 +722,13 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
 
   it('disconnect never touches sync_runs or marketplace_orders rows belonging to the account', async () => {
     const id = await seedAccount({ status: 'CONNECTED' });
-    const runId = await dataSource.query(
+    const runId: Array<{ id: string }> = await dataSource.query(
       `INSERT INTO sync_runs (marketplace_account_id, marketplace, type, status, started_at, date_from, date_to)
          VALUES ($1, 'SHOPEE', 'MANUAL', 'SUCCESS', now(), now(), now())
        RETURNING id`,
       [id],
     );
-    const orderRows = await dataSource.query(
+    const orderRows: Array<{ id: string }> = await dataSource.query(
       `INSERT INTO marketplace_orders
          (marketplace_account_id, external_order_id, status, currency_id, total_amount,
           date_created, marketplace_last_updated, updated_at)
@@ -750,7 +751,7 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
     expect(Number(ordersAfter[0].count)).toBe(1);
   });
 
-  it('disconnect fails PENDING oauth_authorization_requests for the account, never touches PROCESSING ones, never touches another account\'s PENDING request', async () => {
+  it("disconnect fails PENDING oauth_authorization_requests for the account, never touches PROCESSING ones, never touches another account's PENDING request", async () => {
     const id = await seedAccount({ status: 'CONNECTED' });
     const otherId = await seedAccount({ status: 'CONNECTED' });
     const processingAccountId = await seedAccount({ status: 'CONNECTED' });
@@ -765,17 +766,31 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
          ($1, $4, $5, 'SHOPEE', $7, 'PENDING', now() + interval '10 minutes', NULL),
          ($2, $8, $5, 'SHOPEE', $9, 'PROCESSING', now() + interval '10 minutes', now()),
          ($3, $6, $5, 'SHOPEE', $10, 'PENDING', now() + interval '10 minutes', NULL)`,
-      [pendingId, processingId, otherPendingId, id, userId, otherId, randomUUID(), processingAccountId, randomUUID(), randomUUID()],
+      [
+        pendingId,
+        processingId,
+        otherPendingId,
+        id,
+        userId,
+        otherId,
+        randomUUID(),
+        processingAccountId,
+        randomUUID(),
+        randomUUID(),
+      ],
     );
 
     await service.disconnect(id);
 
-    const rows: Array<{ id: string; status: string; failure_code: string | null }> =
-      await dataSource.query(
-        `SELECT id, status, failure_code FROM oauth_authorization_requests
+    const rows: Array<{
+      id: string;
+      status: string;
+      failure_code: string | null;
+    }> = await dataSource.query(
+      `SELECT id, status, failure_code FROM oauth_authorization_requests
           WHERE id IN ($1, $2, $3) ORDER BY id`,
-        [pendingId, processingId, otherPendingId],
-      );
+      [pendingId, processingId, otherPendingId],
+    );
     const byId = Object.fromEntries(rows.map((r) => [r.id, r]));
     expect(byId[pendingId].status).toBe('FAILED');
     expect(byId[pendingId].failure_code).toBe('ACCOUNT_DISCONNECTED');
@@ -806,9 +821,9 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
   });
 
   it('disconnect throws NotFoundException for a non-existent account id', async () => {
-    await expect(service.disconnect('00000000-0000-4000-8000-000000000000')).rejects.toThrow(
-      /não encontrada/i,
-    );
+    await expect(
+      service.disconnect('00000000-0000-4000-8000-000000000000'),
+    ).rejects.toThrow(/não encontrada/i);
   });
 
   describe('disconnect retry sob corrida de concorrência', () => {
@@ -888,5 +903,115 @@ describe('MarketplaceAccountsService CAS methods (real Postgres)', () => {
       expect(rows[0].status).toBe('CONNECTED');
       expect(rows[0].token_version).toBe(3);
     });
+  });
+});
+
+/**
+ * Suíte própria (Checkpoint 5A), deliberadamente ISOLADA da suíte
+ * `MarketplaceAccountsService CAS methods (real Postgres)` acima: aquela
+ * suíte tem um `beforeEach` pré-existente que insere uma linha em `users`
+ * sem `role_id` — hoje uma falha pré-existente e não relacionada a este
+ * checkpoint (`role_id` é `NOT NULL` desde a migration de RBAC do
+ * Checkpoint 3; confirmado reproduzível em HEAD, sem nenhuma mudança deste
+ * checkpoint, via `git stash`). `findAllForScope` não precisa de nenhuma
+ * linha em `users` — nunca reaproveita aquele `beforeEach` quebrado, para
+ * nunca precisar "corrigi-lo" por conta própria fora de escopo.
+ */
+describe('MarketplaceAccountsService.findAllForScope (Checkpoint 5A — filtro SQL real, nunca em memória)', () => {
+  let dataSource: DataSource;
+  let service: MarketplaceAccountsService;
+
+  beforeAll(async () => {
+    dataSource = await createTestDataSource([MarketplaceAccount]);
+    service = new MarketplaceAccountsService(
+      dataSource.getRepository(MarketplaceAccount),
+      dataSource,
+    );
+  });
+
+  afterAll(async () => {
+    await dataSource.destroy();
+  });
+
+  beforeEach(async () => {
+    await dataSource.query('TRUNCATE TABLE marketplace_accounts CASCADE');
+  });
+
+  async function seedAccount(): Promise<string> {
+    const id = randomUUID();
+    await dataSource.query(
+      `INSERT INTO marketplace_accounts (id, marketplace, status, token_version)
+       VALUES ($1, 'MERCADO_LIVRE', 'DISCONNECTED', 0)`,
+      [id],
+    );
+    return id;
+  }
+
+  function repositoryOf(
+    targetService: MarketplaceAccountsService,
+  ): Repository<MarketplaceAccount> {
+    return (
+      targetService as unknown as { repository: Repository<MarketplaceAccount> }
+    ).repository;
+  }
+
+  it('ALL devolve todas as contas — mesmo contrato de findAll()', async () => {
+    const idA = await seedAccount();
+    const idB = await seedAccount();
+
+    const result = await service.findAllForScope({ mode: 'ALL' });
+
+    expect(result.map((account) => account.id).sort()).toEqual(
+      [idA, idB].sort(),
+    );
+  });
+
+  it('SELECTED devolve só as contas cujo id está em accountIds, via IN() real', async () => {
+    const allowed = await seedAccount();
+    await seedAccount(); // fora do escopo — nunca deve aparecer
+
+    const result = await service.findAllForScope({
+      mode: 'SELECTED',
+      accountIds: [allowed],
+    });
+
+    expect(result.map((account) => account.id)).toEqual([allowed]);
+  });
+
+  it('SELECTED nunca vaza uma conta cujo id não foi pedido, mesmo junto de um id inexistente', async () => {
+    const allowed = await seedAccount();
+    const ghostId = randomUUID();
+
+    const result = await service.findAllForScope({
+      mode: 'SELECTED',
+      accountIds: [allowed, ghostId],
+    });
+
+    expect(result.map((account) => account.id)).toEqual([allowed]);
+  });
+
+  it('SELECTED com accountIds vazio devolve [] SEM consultar o banco (nunca "buscar todas")', async () => {
+    await seedAccount();
+    const findSpy = jest.spyOn(repositoryOf(service), 'find');
+
+    const result = await service.findAllForScope({
+      mode: 'SELECTED',
+      accountIds: [],
+    });
+
+    expect(result).toEqual([]);
+    expect(findSpy).not.toHaveBeenCalled();
+    findSpy.mockRestore();
+  });
+
+  it('NONE devolve [] SEM consultar o banco', async () => {
+    await seedAccount();
+    const findSpy = jest.spyOn(repositoryOf(service), 'find');
+
+    const result = await service.findAllForScope({ mode: 'NONE' });
+
+    expect(result).toEqual([]);
+    expect(findSpy).not.toHaveBeenCalled();
+    findSpy.mockRestore();
   });
 });

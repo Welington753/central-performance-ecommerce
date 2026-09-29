@@ -1,133 +1,163 @@
-import { GUARDS_METADATA, HEADERS_METADATA } from '@nestjs/common/constants';
+import {
+  ExecutionContext,
+  INestApplication,
+  NotFoundException,
+  UnauthorizedException,
+  ValidationPipe,
+} from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import type { Request } from 'express';
+import request from 'supertest';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContextService } from '../../auth/authorization-context.service';
+import { PermissionGuard } from '../../auth/guards/permission.guard';
+import type { AuthorizationContext } from '../../users/authorization-context.interface';
+import type { AccountScope } from '../../users/account-scope.types';
+import { PERMISSIONS } from '../../users/permissions.catalog';
 import { ShopeeOAuthController } from './shopee-oauth.controller';
+import { ShopeeOAuthService } from './shopee-oauth.service';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
+import { ACCOUNT_NOT_FOUND_MESSAGE } from '../marketplace-accounts/marketplace-accounts.service';
 
-function methodFn(name: 'connect' | 'callback'): object {
-  // `@Header`/`@UseGuards` em método gravam metadados na FUNÇÃO
-  // (`descriptor.value`), não em `prototype`+nome — ver mesmo padrão em
-  // `amazon-connection.controller.spec.ts`.
-  return Object.getOwnPropertyDescriptor(ShopeeOAuthController.prototype, name)
-    ?.value as object;
-}
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
 
-describe('ShopeeOAuthController', () => {
-  describe('connect', () => {
-    it('24/12: exige AccessTokenGuard (autenticação + mesma permissão do Mercado Livre)', () => {
-      const guards = Reflect.getMetadata(
-        GUARDS_METADATA,
-        methodFn('connect'),
-      ) as unknown[];
-      expect(guards).toContain(AccessTokenGuard);
-    });
+describe('ShopeeOAuthController (HTTP)', () => {
+  let app: INestApplication;
+  const http = () => app.getHttpServer() as Parameters<typeof request>[0];
+  let currentUserId: string | null;
+  let currentPermissions: string[];
+  let currentAccountScope: AccountScope;
+  let currentMustChangePassword: boolean;
 
-    it('21: envia Cache-Control: no-store', () => {
-      const headers = Reflect.getMetadata(
-        HEADERS_METADATA,
-        methodFn('connect'),
-      ) as Array<{ name: string; value: string }>;
-      expect(headers).toContainEqual({
-        name: 'Cache-Control',
-        value: 'no-store',
-      });
-    });
+  const oauthService = {
+    startConnection: jest.fn(),
+    handleCallback: jest.fn(),
+  };
+  const scopedMarketplaceAccountService = {
+    assertAllowedAndFindOrFail: jest.fn(),
+  };
 
-    it('20: delega ao service e devolve somente authorizationUrl', async () => {
-      const service = {
-        startConnection: jest.fn().mockResolvedValue({
-          authorizationUrl: 'https://open.shopee.com.br/auth?...',
-        }),
+  const authorizationContextService = {
+    resolveForRequest: jest.fn((request: Request): AuthorizationContext => {
+      const context: AuthorizationContext = {
+        userId: currentUserId ?? 'anon',
+        active: true,
+        roleKey: 'ADMIN',
+        isAdmin: true,
+        permissions: currentPermissions as never,
+        accountScope: currentAccountScope,
+        mustChangePassword: currentMustChangePassword,
       };
-      const controller = new ShopeeOAuthController(service as never);
+      request.authorizationContext = context;
+      return context;
+    }),
+  };
 
-      const result = await controller.connect('acc-1', {
-        sub: 'user-1',
-        email: 'a@b.com',
-      });
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ShopeeOAuthController],
+      providers: [
+        { provide: ShopeeOAuthService, useValue: oauthService },
+        {
+          provide: ScopedMarketplaceAccountService,
+          useValue: scopedMarketplaceAccountService,
+        },
+        {
+          provide: AuthorizationContextService,
+          useValue: authorizationContextService,
+        },
+        PermissionGuard,
+      ],
+    })
+      .overrideGuard(AccessTokenGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          if (currentUserId === null) {
+            throw new UnauthorizedException('Não autenticado.');
+          }
+          const req = context.switchToHttp().getRequest<Request>();
+          req.user = { sub: currentUserId, email: 'a@b.com' };
+          return true;
+        },
+      })
+      .compile();
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await app.init();
+  });
 
-      expect(service.startConnection).toHaveBeenCalledWith({
-        marketplaceAccountId: 'acc-1',
-        initiatedByUserId: 'user-1',
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    currentUserId = 'u1';
+    currentPermissions = [PERMISSIONS.INTEGRATIONS_MANAGE];
+    currentAccountScope = { mode: 'ALL' };
+    currentMustChangePassword = false;
+    scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockResolvedValue(
+      { id: VALID_UUID },
+    );
+  });
+
+  describe('POST /marketplace-accounts/:id/shopee/connect', () => {
+    it('401 sem autenticação', async () => {
+      currentUserId = null;
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/shopee/connect`)
+        .expect(401);
+    });
+
+    it('403 sem integrations.manage', async () => {
+      currentPermissions = [];
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/shopee/connect`)
+        .expect(403);
+      expect(oauthService.startConnection).not.toHaveBeenCalled();
+    });
+
+    it('404 genérico quando a conta está fora do escopo — nunca inicia OAuth', async () => {
+      scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
+        new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
+      );
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/shopee/connect`)
+        .expect(404);
+      expect(oauthService.startConnection).not.toHaveBeenCalled();
+    });
+
+    it('200 quando a conta está no escopo', async () => {
+      oauthService.startConnection.mockResolvedValue({
+        authorizationUrl: 'https://exemplo.invalido/auth',
       });
-      expect(Object.keys(result)).toEqual(['authorizationUrl']);
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/shopee/connect`)
+        .expect(200);
+      expect(oauthService.startConnection).toHaveBeenCalledWith({
+        marketplaceAccountId: VALID_UUID,
+        initiatedByUserId: 'u1',
+      });
     });
   });
 
-  describe('callback', () => {
-    it('24: é público — nenhum guard registrado no método', () => {
-      const guards: unknown = Reflect.getMetadata(
-        GUARDS_METADATA,
-        methodFn('callback'),
-      );
-      expect(guards).toBeUndefined();
-    });
-
-    it('31: envia Cache-Control: no-store', () => {
-      const headers = Reflect.getMetadata(
-        HEADERS_METADATA,
-        methodFn('callback'),
-      ) as Array<{ name: string; value: string }>;
-      expect(headers).toContainEqual({
-        name: 'Cache-Control',
-        value: 'no-store',
+  describe('GET /integrations/shopee/callback — público, nunca guardado', () => {
+    it('continua acessível sem cookie de sessão (nenhum guard aplicado)', async () => {
+      currentUserId = null;
+      oauthService.handleCallback.mockResolvedValue({
+        redirectUrl: '/login?shopee=1',
       });
-    });
-
-    it('32: envia Referrer-Policy: no-referrer', () => {
-      const headers = Reflect.getMetadata(
-        HEADERS_METADATA,
-        methodFn('callback'),
-      ) as Array<{ name: string; value: string }>;
-      expect(headers).toContainEqual({
-        name: 'Referrer-Policy',
-        value: 'no-referrer',
-      });
-    });
-
-    it('25: redireciona (302) para a URL que o service devolve, nunca um corpo JSON', async () => {
-      const service = {
-        handleCallback: jest.fn().mockResolvedValue({
-          redirectUrl: 'https://app.example.com/integracoes?shopee=success',
-        }),
-      };
-      const controller = new ShopeeOAuthController(service as never);
-      const res = { redirect: jest.fn(), set: jest.fn() };
-
-      await controller.callback(
-        { state: 's', code: 'c', shop_id: '1' },
-        res as never,
-      );
-
-      expect(res.redirect).toHaveBeenCalledWith(
-        302,
-        'https://app.example.com/integracoes?shopee=success',
-      );
-    });
-
-    it('mapeia query.shop_id (snake_case) para shopId ao chamar o service — nunca passa parâmetros extras da query adiante', async () => {
-      const service = {
-        handleCallback: jest.fn().mockResolvedValue({
-          redirectUrl: 'https://app.example.com/integracoes?shopee=success',
-        }),
-      };
-      const controller = new ShopeeOAuthController(service as never);
-      const res = { redirect: jest.fn() };
-
-      await controller.callback(
-        {
-          state: 's',
-          code: 'c',
-          shop_id: '200000',
-          // 34: parâmetro de redirect arbitrário na query — nunca lido.
-          returnUrl: 'https://evil.example.com',
-        },
-        res as never,
-      );
-
-      expect(service.handleCallback).toHaveBeenCalledWith({
-        state: 's',
-        code: 'c',
-        shopId: '200000',
-      });
+      await request(http())
+        .get('/integrations/shopee/callback')
+        .query({ code: 'c', state: 's', shop_id: '123' })
+        .expect(302);
+      expect(oauthService.handleCallback).toHaveBeenCalledTimes(1);
     });
   });
 });

@@ -159,7 +159,8 @@ describe('POST /marketplace-accounts/:id/shopee/sync-orders — fronteira HTTP r
 
     userId = randomUUID();
     await dataSource.query(
-      `INSERT INTO users (id, name, email, password_hash, active) VALUES ($1, 'Test User', $2, 'x', true)`,
+      `INSERT INTO users (id, name, email, password_hash, active, role_id, account_scope_mode)
+       VALUES ($1, 'Test User', $2, 'x', true, (SELECT id FROM roles WHERE key = 'ADMIN'), 'ALL')`,
       [userId, `test-${userId}@example.com`],
     );
 

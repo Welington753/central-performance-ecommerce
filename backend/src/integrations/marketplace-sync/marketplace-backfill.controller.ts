@@ -14,6 +14,14 @@ import {
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContext } from '../../auth/decorators/authorization-context.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
+import type { AuthorizationContext as AuthorizationContextType } from '../../users/authorization-context.interface';
+import { PERMISSIONS } from '../../users/permissions.catalog';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import {
   BackfillError,
   MarketplaceBackfillService,
@@ -21,17 +29,35 @@ import {
   type BackfillStatus,
 } from './marketplace-backfill.service';
 
+/**
+ * Checkpoint 5A: leitura (`status`) exige `sync.view`; ações (`start`/
+ * `pause`/`resume`/`next-chunk`) exigem `sync.backfill`. Toda rota valida a
+ * conta via `ScopedMarketplaceAccountService` (404 genérico se fora do
+ * escopo) ANTES de chamar o service — inclusive `next-chunk`, também
+ * chamado direto por `MarketplaceBackfillWorkerService` (o worker nunca
+ * passa por este controller, então seu método interno nunca muda de
+ * assinatura).
+ */
 @ApiTags('marketplace-sync')
 @ApiCookieAuth()
-@UseGuards(AccessTokenGuard)
+@UseGuards(AccessTokenGuard, PermissionGuard)
 @Controller('marketplace-accounts/:id/backfill')
 export class MarketplaceBackfillController {
-  constructor(private readonly backfillService: MarketplaceBackfillService) {}
+  constructor(
+    private readonly backfillService: MarketplaceBackfillService,
+    private readonly scopedMarketplaceAccountService: ScopedMarketplaceAccountService,
+  ) {}
 
   @Get('status')
+  @RequirePermissions(PERMISSIONS.SYNC_VIEW)
   async status(
     @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<BackfillStatus> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     return this.backfillService.getStatus(id);
   }
 
@@ -45,7 +71,15 @@ export class MarketplaceBackfillController {
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('start')
   @HttpCode(HttpStatus.OK)
-  async start(@Param('id', ParseUUIDPipe) id: string): Promise<BackfillStatus> {
+  @RequirePermissions(PERMISSIONS.SYNC_BACKFILL)
+  async start(
+    @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
+  ): Promise<BackfillStatus> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.backfillService.startBackfill(id);
     } catch (error) {
@@ -59,16 +93,30 @@ export class MarketplaceBackfillController {
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('pause')
   @HttpCode(HttpStatus.OK)
-  async pause(@Param('id', ParseUUIDPipe) id: string): Promise<BackfillStatus> {
+  @RequirePermissions(PERMISSIONS.SYNC_BACKFILL)
+  async pause(
+    @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
+  ): Promise<BackfillStatus> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     return this.backfillService.pauseBackfill(id);
   }
 
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('resume')
   @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.SYNC_BACKFILL)
   async resume(
     @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<BackfillStatus> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.backfillService.resumeBackfill(id);
     } catch (error) {
@@ -86,9 +134,15 @@ export class MarketplaceBackfillController {
   @Throttle({ default: { limit: 10, ttl: 60000 } })
   @Post('next-chunk')
   @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.SYNC_BACKFILL)
   async nextChunk(
     @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<BackfillChunkResult> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.backfillService.runNextChunk(id);
     } catch (error) {

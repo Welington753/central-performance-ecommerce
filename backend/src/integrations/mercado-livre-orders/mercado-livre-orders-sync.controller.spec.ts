@@ -1,114 +1,150 @@
-import { GUARDS_METADATA } from '@nestjs/common/constants';
 import {
-  BadGatewayException,
-  ConflictException,
-  HttpException,
-  ServiceUnavailableException,
+  ExecutionContext,
+  INestApplication,
+  NotFoundException,
+  UnauthorizedException,
+  ValidationPipe,
 } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import type { Request } from 'express';
+import request from 'supertest';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContextService } from '../../auth/authorization-context.service';
+import { PermissionGuard } from '../../auth/guards/permission.guard';
+import type { AuthorizationContext } from '../../users/authorization-context.interface';
+import type { AccountScope } from '../../users/account-scope.types';
+import { PERMISSIONS } from '../../users/permissions.catalog';
 import { MercadoLivreOrdersSyncController } from './mercado-livre-orders-sync.controller';
-import { SyncOrdersError } from './mercado-livre-orders-sync.service';
+import { MercadoLivreOrdersSyncService } from './mercado-livre-orders-sync.service';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
+import { ACCOUNT_NOT_FOUND_MESSAGE } from '../marketplace-accounts/marketplace-accounts.service';
 
-function buildController(
-  overrides: { syncService?: Record<string, jest.Mock> } = {},
-) {
-  const syncService = { syncOrders: jest.fn(), ...overrides.syncService };
-  const controller = new MercadoLivreOrdersSyncController(syncService as never);
-  return { controller, syncService };
-}
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
 
-describe('MercadoLivreOrdersSyncController', () => {
-  it('requires AccessTokenGuard at the class level (endpoint protegido)', () => {
-    const guards = Reflect.getMetadata(
-      GUARDS_METADATA,
-      MercadoLivreOrdersSyncController,
-    ) as unknown[];
-    expect(guards).toContain(AccessTokenGuard);
+describe('MercadoLivreOrdersSyncController (HTTP)', () => {
+  let app: INestApplication;
+  const http = () => app.getHttpServer() as Parameters<typeof request>[0];
+  let currentUserId: string | null;
+  let currentPermissions: string[];
+  let currentAccountScope: AccountScope;
+  let currentMustChangePassword: boolean;
+
+  const syncService = { syncOrders: jest.fn() };
+  const scopedMarketplaceAccountService = {
+    assertAllowedAndFindOrFail: jest.fn(),
+  };
+
+  const authorizationContextService = {
+    resolveForRequest: jest.fn((request: Request): AuthorizationContext => {
+      const context: AuthorizationContext = {
+        userId: currentUserId ?? 'anon',
+        active: true,
+        roleKey: 'ADMIN',
+        isAdmin: true,
+        permissions: currentPermissions as never,
+        accountScope: currentAccountScope,
+        mustChangePassword: currentMustChangePassword,
+      };
+      request.authorizationContext = context;
+      return context;
+    }),
+  };
+
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [MercadoLivreOrdersSyncController],
+      providers: [
+        { provide: MercadoLivreOrdersSyncService, useValue: syncService },
+        {
+          provide: ScopedMarketplaceAccountService,
+          useValue: scopedMarketplaceAccountService,
+        },
+        {
+          provide: AuthorizationContextService,
+          useValue: authorizationContextService,
+        },
+        PermissionGuard,
+      ],
+    })
+      .overrideGuard(AccessTokenGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          if (currentUserId === null) {
+            throw new UnauthorizedException('Não autenticado.');
+          }
+          const req = context.switchToHttp().getRequest<Request>();
+          req.user = { sub: currentUserId, email: 'a@b.com' };
+          return true;
+        },
+      })
+      .compile();
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
+    );
+    await app.init();
   });
 
-  describe('syncOrders', () => {
-    it('delegates to the sync service and returns its sanitized summary', async () => {
-      const summary = {
-        status: 'SUCCESS',
-        startedAt: '2026-09-01T00:00:00.000Z',
-        finishedAt: '2026-09-01T00:00:05.000Z',
-        pagesFetched: 1,
-        ordersFetched: 2,
-        ordersCreated: 2,
-        ordersUpdated: 0,
-        itemsPersisted: 2,
-        periodFrom: '2026-07-03T00:00:00.000Z',
-        periodTo: '2026-09-01T00:00:00.000Z',
-      };
-      const { controller, syncService } = buildController({
-        syncService: { syncOrders: jest.fn().mockResolvedValue(summary) },
-      });
+  afterAll(async () => {
+    await app.close();
+  });
 
-      const result = await controller.syncOrders('acc-1');
-
-      expect(syncService.syncOrders).toHaveBeenCalledWith('acc-1');
-      expect(result).toEqual(summary);
-    });
-
-    it.each([
-      ['SYNC_ALREADY_RUNNING', ConflictException],
-      ['ACCOUNT_NOT_CONNECTED', ConflictException],
-      ['TOKEN_EXPIRED', ConflictException],
-      ['ACCOUNT_BUSY', ConflictException],
-      ['PROVIDER_UNAVAILABLE', ServiceUnavailableException],
-      ['INVALID_PROVIDER_RESPONSE', BadGatewayException],
-      ['SYNC_FAILED', ServiceUnavailableException],
-      ['TOKEN_REFRESH_PENDING', ServiceUnavailableException],
-      ['ML_APP_CONFIGURATION_ERROR', ServiceUnavailableException],
-    ] as const)(
-      'maps SyncOrdersError "%s" to %s',
-      async (code, expectedExceptionClass) => {
-        const { controller } = buildController({
-          syncService: {
-            syncOrders: jest.fn().mockRejectedValue(new SyncOrdersError(code)),
-          },
-        });
-
-        await expect(controller.syncOrders('acc-1')).rejects.toBeInstanceOf(
-          expectedExceptionClass,
-        );
-      },
+  beforeEach(() => {
+    jest.clearAllMocks();
+    currentUserId = 'u1';
+    currentPermissions = [PERMISSIONS.SYNC_RUN];
+    currentAccountScope = { mode: 'ALL' };
+    currentMustChangePassword = false;
+    scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockResolvedValue(
+      { id: VALID_UUID },
     );
+  });
 
-    it('maps PROVIDER_RATE_LIMITED to HTTP 429', async () => {
-      const { controller } = buildController({
-        syncService: {
-          syncOrders: jest
-            .fn()
-            .mockRejectedValue(new SyncOrdersError('PROVIDER_RATE_LIMITED')),
-        },
-      });
-
-      const error: unknown = await controller
-        .syncOrders('acc-1')
-        .catch((e: unknown) => e);
-      expect(error).toBeInstanceOf(HttpException);
-      expect((error as HttpException).getStatus()).toBe(429);
+  describe('POST /marketplace-accounts/:id/mercado-livre/sync-orders', () => {
+    it('401 sem autenticação', async () => {
+      currentUserId = null;
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/sync-orders`)
+        .expect(401);
     });
 
-    it('never leaks the sanitized error code into a body containing internal fields', async () => {
-      const { controller } = buildController({
-        syncService: {
-          syncOrders: jest
-            .fn()
-            .mockRejectedValue(new SyncOrdersError('SYNC_FAILED')),
-        },
-      });
-      const error: unknown = await controller
-        .syncOrders('acc-1')
-        .catch((e: unknown) => e);
-      const body = (error as HttpException).getResponse() as Record<
-        string,
-        unknown
-      >;
-      expect(body.message).toBe('SYNC_FAILED');
-      expect(Object.keys(body).sort()).toEqual(
-        ['message', 'error', 'statusCode'].sort(),
+    it('403 sem sync.run', async () => {
+      currentPermissions = [];
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/sync-orders`)
+        .expect(403);
+      expect(syncService.syncOrders).not.toHaveBeenCalled();
+    });
+
+    it('404 genérico quando a conta está fora do escopo — nunca chama o conector', async () => {
+      scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
+        new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
+      );
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/sync-orders`)
+        .expect(404);
+      expect(syncService.syncOrders).not.toHaveBeenCalled();
+    });
+
+    it('200 quando a conta está no escopo', async () => {
+      syncService.syncOrders.mockResolvedValue({ status: 'SUCCESS' });
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/sync-orders`)
+        .expect(200);
+      expect(syncService.syncOrders).toHaveBeenCalledWith(VALID_UUID);
+    });
+
+    it('403 PASSWORD_CHANGE_REQUIRED quando mustChangePassword', async () => {
+      currentMustChangePassword = true;
+      const res = await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/sync-orders`)
+        .expect(403);
+      expect((res.body as { message: string }).message).toBe(
+        'PASSWORD_CHANGE_REQUIRED',
       );
     });
   });

@@ -12,6 +12,14 @@ import {
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContext } from '../../auth/decorators/authorization-context.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
+import type { AuthorizationContext as AuthorizationContextType } from '../../users/authorization-context.interface';
+import { PERMISSIONS } from '../../users/permissions.catalog';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import {
   ShopeeShopInfoPublicDto,
   ShopeeShopService,
@@ -34,9 +42,13 @@ import {
 @ApiCookieAuth()
 @Controller()
 export class ShopeeShopController {
-  constructor(private readonly service: ShopeeShopService) {}
+  constructor(
+    private readonly service: ShopeeShopService,
+    private readonly scopedMarketplaceAccountService: ScopedMarketplaceAccountService,
+  ) {}
 
-  @UseGuards(AccessTokenGuard)
+  @UseGuards(AccessTokenGuard, PermissionGuard)
+  @RequirePermissions(PERMISSIONS.INTEGRATIONS_VIEW)
   // Chama a Shop API da Shopee a cada requisição (sem cache) — mesmo limite
   // de `connect`/`verify` para conter abuso de uma API externa com rate
   // limit próprio.
@@ -47,7 +59,12 @@ export class ShopeeShopController {
   @Get('marketplace-accounts/:id/shopee/shop-info')
   async getShopInfo(
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<ShopeeShopInfoPublicDto> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.service.getShopInfo(id);
     } catch (error) {

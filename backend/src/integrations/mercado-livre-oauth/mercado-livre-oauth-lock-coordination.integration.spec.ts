@@ -83,7 +83,8 @@ describe('Callback vs refresh — same advisory lock (real Postgres)', () => {
 
     userId = randomUUID();
     await dataSource.query(
-      `INSERT INTO users (id, name, email, password_hash, active) VALUES ($1, 'Test User', $2, 'x', true)`,
+      `INSERT INTO users (id, name, email, password_hash, active, role_id)
+       VALUES ($1, 'Test User', $2, 'x', true, (SELECT id FROM roles WHERE key = 'ADMIN'))`,
       [userId, `test-${userId}@example.com`],
     );
 

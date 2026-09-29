@@ -9,8 +9,12 @@ import {
 } from '@nestjs/common';
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
-import { AdminGuard } from '../../auth/guards/admin.guard';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
+import { PERMISSIONS } from '../../users/permissions.catalog';
 import type { AccessTokenPayload } from '../../auth/interfaces/access-token-payload.interface';
 import {
   MonthlyRevenueGoalLookupResponseDto,
@@ -34,13 +38,15 @@ const GOAL_CURRENCY = 'BRL';
 
 /**
  * Meta mensal CONSOLIDADA de faturamento (Checkpoint BI-1, "Metas e
- * Ritmo") — nunca por conta/marketplace individual. Leitura para qualquer
- * usuário autenticado; criação/alteração restrita a administrador
- * (`AdminGuard`, sempre composto DEPOIS de `AccessTokenGuard`).
+ * Ritmo") — nunca por conta/marketplace individual. Checkpoint 5A: substitui
+ * `AdminGuard` por `PermissionGuard` genérico — leitura exige `goals.view`
+ * (ADMIN/ANALYST/VIEWER, conforme preset), alteração exige `goals.manage`
+ * (hoje só ADMIN por padrão, mas nunca checado via `is_admin` diretamente —
+ * via permissão resolvida). Sem account scope: meta é global, não por conta.
  */
 @ApiTags('marketplace-analytics-goals')
 @ApiCookieAuth()
-@UseGuards(AccessTokenGuard)
+@UseGuards(AccessTokenGuard, PermissionGuard)
 @Controller('marketplace-analytics/goals')
 export class MonthlyRevenueGoalsController {
   constructor(
@@ -49,6 +55,7 @@ export class MonthlyRevenueGoalsController {
   ) {}
 
   @Get('monthly')
+  @RequirePermissions(PERMISSIONS.GOALS_VIEW)
   async getMonthlyGoal(
     @Query('year') yearRaw?: string,
     @Query('month') monthRaw?: string,
@@ -63,7 +70,7 @@ export class MonthlyRevenueGoalsController {
   }
 
   @Put('monthly')
-  @UseGuards(AdminGuard)
+  @RequirePermissions(PERMISSIONS.GOALS_MANAGE)
   async upsertMonthlyGoal(
     @Body() dto: UpsertMonthlyRevenueGoalDto,
     @CurrentUser() user?: AccessTokenPayload,
@@ -81,6 +88,7 @@ export class MonthlyRevenueGoalsController {
   }
 
   @Get('monthly-progress')
+  @RequirePermissions(PERMISSIONS.GOALS_VIEW)
   async getMonthlyProgress(
     @Query('year') yearRaw?: string,
     @Query('month') monthRaw?: string,

@@ -13,6 +13,14 @@ import {
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContext } from '../../auth/decorators/authorization-context.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
+import type { AuthorizationContext as AuthorizationContextType } from '../../users/authorization-context.interface';
+import { PERMISSIONS } from '../../users/permissions.catalog';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import { ShopeeOrdersSyncError } from './shopee-orders-sync-error';
 import {
   ShopeeOrdersSyncService,
@@ -36,19 +44,33 @@ import {
  * mesma família Shopee, mesmo significado exato de código. Mantém a API
  * Shopee internamente consistente.
  */
+/**
+ * Checkpoint 5A: exige `sync.run` e conta dentro do `accountScope` do
+ * usuário — checagem no controller, nunca em `syncOrders` (também chamado
+ * direto por `MarketplaceAutoSyncService`, o worker automático).
+ */
 @ApiTags('shopee-orders')
 @ApiCookieAuth()
-@UseGuards(AccessTokenGuard)
+@UseGuards(AccessTokenGuard, PermissionGuard)
 @Controller('marketplace-accounts/:id/shopee')
 export class ShopeeOrdersSyncController {
-  constructor(private readonly syncService: ShopeeOrdersSyncService) {}
+  constructor(
+    private readonly syncService: ShopeeOrdersSyncService,
+    private readonly scopedMarketplaceAccountService: ScopedMarketplaceAccountService,
+  ) {}
 
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('sync-orders')
   @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.SYNC_RUN)
   async syncOrders(
     @Param('id', new ParseUUIDPipe({ version: '4' })) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<ShopeeOrdersSyncSummary> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.syncService.syncOrders(id);
     } catch (error) {

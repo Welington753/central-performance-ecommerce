@@ -1,6 +1,13 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource, InjectRepository } from '@nestjs/typeorm';
-import { DataSource, LessThanOrEqual, QueryRunner, Repository } from 'typeorm';
+import {
+  DataSource,
+  In,
+  LessThanOrEqual,
+  QueryRunner,
+  Repository,
+} from 'typeorm';
+import type { AccountScope } from '../../users/account-scope.types';
 import type { Marketplace } from '../contracts/marketplace.enum';
 import type { CreateMarketplaceAccountInput } from './dto/create-marketplace-account.input';
 import {
@@ -16,6 +23,15 @@ import {
 export interface FindMarketplaceAccountsFilter {
   marketplace?: Marketplace;
 }
+
+/**
+ * Mensagem ÚNICA de "conta não encontrada" — usada por `findByIdOrFail` E por
+ * `ScopedMarketplaceAccountService` (Checkpoint 5A) quando o escopo nega uma
+ * conta que na verdade existe. Extraída para constante só para as duas nunca
+ * poderem divergir: uma conta inexistente e uma conta fora do escopo do
+ * usuário precisam ser 100% indistinguíveis pela resposta HTTP.
+ */
+export const ACCOUNT_NOT_FOUND_MESSAGE = 'Conta de marketplace não encontrada.';
 
 export type ApplySuccessfulConnectionOutcome =
   'applied' | 'version_conflict' | 'external_seller_conflict';
@@ -36,6 +52,31 @@ export class MarketplaceAccountsService {
       where: filter.marketplace ? { marketplace: filter.marketplace } : {},
       order: { createdAt: 'DESC' },
     });
+  }
+
+  /**
+   * Variante scope-aware de `findAll()` (Checkpoint 5A) — SOMENTE para
+   * requisições HTTP de usuário (`GET /marketplace-accounts`). `findAll()`
+   * acima nunca muda: workers (`MarketplaceAutoSyncService`) e services fora
+   * de escopo deste checkpoint (`buyer-enrichment.service`,
+   * `marketplace-analytics.service`) continuam usando-o sem nenhuma
+   * restrição de escopo de usuário — eles não têm usuário.
+   *
+   * Filtro sempre em SQL (`In()`), nunca carrega tudo para filtrar em
+   * memória. `NONE` e `SELECTED` com lista vazia devolvem `[]` ANTES de
+   * qualquer consulta — nunca um `IN ()` (sintaxe inválida/comportamento
+   * incerto) nem, por omissão, um "buscar todas" disfarçado.
+   */
+  async findAllForScope(scope: AccountScope): Promise<MarketplaceAccount[]> {
+    if (scope.mode === 'NONE') return [];
+    if (scope.mode === 'SELECTED') {
+      if (scope.accountIds.length === 0) return [];
+      return this.repository.find({
+        where: { id: In(scope.accountIds) },
+        order: { createdAt: 'DESC' },
+      });
+    }
+    return this.repository.find({ order: { createdAt: 'DESC' } });
   }
 
   /**
@@ -117,7 +158,7 @@ export class MarketplaceAccountsService {
   async findByIdOrFail(id: string): Promise<MarketplaceAccount> {
     const account = await this.repository.findOne({ where: { id } });
     if (!account) {
-      throw new NotFoundException('Conta de marketplace não encontrada.');
+      throw new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE);
     }
     return account;
   }

@@ -14,16 +14,14 @@ import { PermissionGuard } from '../../auth/guards/permission.guard';
 import type { AuthorizationContext } from '../../users/authorization-context.interface';
 import type { AccountScope } from '../../users/account-scope.types';
 import { PERMISSIONS } from '../../users/permissions.catalog';
-import { ShopeeShopController } from './shopee-shop.controller';
-import { ShopeeShopService } from './shopee-shop.service';
+import { MarketplaceBackfillController } from './marketplace-backfill.controller';
+import { MarketplaceBackfillService } from './marketplace-backfill.service';
 import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import { ACCOUNT_NOT_FOUND_MESSAGE } from '../marketplace-accounts/marketplace-accounts.service';
 
-// `ShopeeShopController` exige UUID v4 (`ParseUUIDPipe({ version: '4' })`,
-// Checkpoint CP2J-R1) — o nibble de versão precisa ser '4'.
-const VALID_UUID = '11111111-1111-4111-8111-111111111111';
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
 
-describe('ShopeeShopController (HTTP)', () => {
+describe('MarketplaceBackfillController (HTTP)', () => {
   let app: INestApplication;
   const http = () => app.getHttpServer() as Parameters<typeof request>[0];
   let currentUserId: string | null;
@@ -31,7 +29,13 @@ describe('ShopeeShopController (HTTP)', () => {
   let currentAccountScope: AccountScope;
   let currentMustChangePassword: boolean;
 
-  const shopService = { getShopInfo: jest.fn() };
+  const backfillService = {
+    getStatus: jest.fn(),
+    startBackfill: jest.fn(),
+    pauseBackfill: jest.fn(),
+    resumeBackfill: jest.fn(),
+    runNextChunk: jest.fn(),
+  };
   const scopedMarketplaceAccountService = {
     assertAllowedAndFindOrFail: jest.fn(),
   };
@@ -54,9 +58,9 @@ describe('ShopeeShopController (HTTP)', () => {
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
-      controllers: [ShopeeShopController],
+      controllers: [MarketplaceBackfillController],
       providers: [
-        { provide: ShopeeShopService, useValue: shopService },
+        { provide: MarketplaceBackfillService, useValue: backfillService },
         {
           provide: ScopedMarketplaceAccountService,
           useValue: scopedMarketplaceAccountService,
@@ -98,7 +102,7 @@ describe('ShopeeShopController (HTTP)', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     currentUserId = 'u1';
-    currentPermissions = [PERMISSIONS.INTEGRATIONS_VIEW];
+    currentPermissions = [PERMISSIONS.SYNC_VIEW, PERMISSIONS.SYNC_BACKFILL];
     currentAccountScope = { mode: 'ALL' };
     currentMustChangePassword = false;
     scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockResolvedValue(
@@ -106,48 +110,75 @@ describe('ShopeeShopController (HTTP)', () => {
     );
   });
 
-  describe('GET /marketplace-accounts/:id/shopee/shop-info', () => {
+  describe('GET /marketplace-accounts/:id/backfill/status', () => {
     it('401 sem autenticação', async () => {
       currentUserId = null;
       await request(http())
-        .get(`/marketplace-accounts/${VALID_UUID}/shopee/shop-info`)
+        .get(`/marketplace-accounts/${VALID_UUID}/backfill/status`)
         .expect(401);
     });
 
-    it('403 sem integrations.view', async () => {
+    it('403 sem sync.view', async () => {
       currentPermissions = [];
       await request(http())
-        .get(`/marketplace-accounts/${VALID_UUID}/shopee/shop-info`)
+        .get(`/marketplace-accounts/${VALID_UUID}/backfill/status`)
         .expect(403);
-      expect(shopService.getShopInfo).not.toHaveBeenCalled();
     });
 
-    it('404 genérico quando a conta está fora do escopo — nunca chama a Shop API', async () => {
+    it('404 genérico quando a conta está fora do escopo — nunca chama getStatus', async () => {
       scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
         new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
       );
       await request(http())
-        .get(`/marketplace-accounts/${VALID_UUID}/shopee/shop-info`)
+        .get(`/marketplace-accounts/${VALID_UUID}/backfill/status`)
         .expect(404);
-      expect(shopService.getShopInfo).not.toHaveBeenCalled();
+      expect(backfillService.getStatus).not.toHaveBeenCalled();
     });
 
     it('200 quando a conta está no escopo', async () => {
-      shopService.getShopInfo.mockResolvedValue({ shopName: 'Loja Teste' });
+      backfillService.getStatus.mockResolvedValue({ status: 'NOT_STARTED' });
       await request(http())
-        .get(`/marketplace-accounts/${VALID_UUID}/shopee/shop-info`)
+        .get(`/marketplace-accounts/${VALID_UUID}/backfill/status`)
         .expect(200);
-      expect(shopService.getShopInfo).toHaveBeenCalledWith(VALID_UUID);
-    });
-
-    it('403 PASSWORD_CHANGE_REQUIRED quando mustChangePassword', async () => {
-      currentMustChangePassword = true;
-      const res = await request(http())
-        .get(`/marketplace-accounts/${VALID_UUID}/shopee/shop-info`)
-        .expect(403);
-      expect((res.body as { message: string }).message).toBe(
-        'PASSWORD_CHANGE_REQUIRED',
-      );
+      expect(backfillService.getStatus).toHaveBeenCalledWith(VALID_UUID);
     });
   });
+
+  describe.each([
+    ['start', 'startBackfill'],
+    ['pause', 'pauseBackfill'],
+    ['resume', 'resumeBackfill'],
+    ['next-chunk', 'runNextChunk'],
+  ] as const)(
+    'POST /marketplace-accounts/:id/backfill/%s',
+    (route, serviceMethod) => {
+      it('403 sem sync.backfill — sync.view sozinho não libera escrita', async () => {
+        currentPermissions = [PERMISSIONS.SYNC_VIEW];
+        await request(http())
+          .post(`/marketplace-accounts/${VALID_UUID}/backfill/${route}`)
+          .expect(403);
+        expect(backfillService[serviceMethod]).not.toHaveBeenCalled();
+      });
+
+      it('404 genérico quando a conta está fora do escopo — nunca chama o service', async () => {
+        scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
+          new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
+        );
+        await request(http())
+          .post(`/marketplace-accounts/${VALID_UUID}/backfill/${route}`)
+          .expect(404);
+        expect(backfillService[serviceMethod]).not.toHaveBeenCalled();
+      });
+
+      it('200 quando a conta está no escopo', async () => {
+        backfillService[serviceMethod].mockResolvedValue({
+          status: 'IN_PROGRESS',
+        });
+        await request(http())
+          .post(`/marketplace-accounts/${VALID_UUID}/backfill/${route}`)
+          .expect(200);
+        expect(backfillService[serviceMethod]).toHaveBeenCalledWith(VALID_UUID);
+      });
+    },
+  );
 });

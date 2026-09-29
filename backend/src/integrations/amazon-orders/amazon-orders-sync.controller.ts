@@ -18,6 +18,14 @@ import {
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContext } from '../../auth/decorators/authorization-context.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
+import type { AuthorizationContext as AuthorizationContextType } from '../../users/authorization-context.interface';
+import { PERMISSIONS } from '../../users/permissions.catalog';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import {
   AmazonOrdersSyncError,
   AmazonOrdersSyncService,
@@ -33,20 +41,35 @@ export interface AmazonOrdersSyncRequestBody {
   to?: string;
 }
 
+/**
+ * Checkpoint 5A: exige `sync.run` e que a conta esteja no `accountScope` do
+ * usuário — checagem SEMPRE no controller, nunca dentro de `syncOrders`
+ * (chamado também por `MarketplaceAutoSyncService`, o worker automático, que
+ * nunca deve depender de contexto HTTP/usuário).
+ */
 @ApiTags('amazon-orders')
 @ApiCookieAuth()
-@UseGuards(AccessTokenGuard)
+@UseGuards(AccessTokenGuard, PermissionGuard)
 @Controller('marketplace-accounts/:id/amazon')
 export class AmazonOrdersSyncController {
-  constructor(private readonly syncService: AmazonOrdersSyncService) {}
+  constructor(
+    private readonly syncService: AmazonOrdersSyncService,
+    private readonly scopedMarketplaceAccountService: ScopedMarketplaceAccountService,
+  ) {}
 
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('orders/sync')
   @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.SYNC_RUN)
   async syncOrders(
     @Param('id', ParseUUIDPipe) id: string,
     @Body() body: AmazonOrdersSyncRequestBody = {},
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<AmazonOrdersSyncSummary> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.syncService.syncOrders(id, {
         from: typeof body.from === 'string' ? body.from : undefined,

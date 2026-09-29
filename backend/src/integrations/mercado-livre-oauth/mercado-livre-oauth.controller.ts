@@ -14,8 +14,16 @@ import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import type { Response } from 'express';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContext } from '../../auth/decorators/authorization-context.decorator';
 import { CurrentUser } from '../../auth/decorators/current-user.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
 import type { AccessTokenPayload } from '../../auth/interfaces/access-token-payload.interface';
+import type { AuthorizationContext as AuthorizationContextType } from '../../users/authorization-context.interface';
+import { PERMISSIONS } from '../../users/permissions.catalog';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import type { CallbackQuery } from './callback-params.validator';
 import {
   MercadoLivreOAuthService,
@@ -25,10 +33,14 @@ import {
 @ApiTags('mercado-livre-oauth')
 @Controller()
 export class MercadoLivreOAuthController {
-  constructor(private readonly service: MercadoLivreOAuthService) {}
+  constructor(
+    private readonly service: MercadoLivreOAuthService,
+    private readonly scopedMarketplaceAccountService: ScopedMarketplaceAccountService,
+  ) {}
 
   @ApiCookieAuth()
-  @UseGuards(AccessTokenGuard)
+  @UseGuards(AccessTokenGuard, PermissionGuard)
+  @RequirePermissions(PERMISSIONS.INTEGRATIONS_MANAGE)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('marketplace-accounts/:id/mercado-livre/connect')
   @HttpCode(HttpStatus.OK)
@@ -41,7 +53,12 @@ export class MercadoLivreOAuthController {
     // sem um usuário autenticado válido — por isso `user` não é opcional, e
     // não há `user!` escondendo essa garantia do compilador.
     @CurrentUser() user: AccessTokenPayload,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<{ authorizationUrl: string }> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     return this.service.startConnection({
       marketplaceAccountId: id,
       initiatedByUserId: user.sub,
@@ -58,13 +75,19 @@ export class MercadoLivreOAuthController {
    * `ACCOUNT_BUSY` (do service) viram 409 via o vocabulário fechado usual.
    */
   @ApiCookieAuth()
-  @UseGuards(AccessTokenGuard)
+  @UseGuards(AccessTokenGuard, PermissionGuard)
+  @RequirePermissions(PERMISSIONS.INTEGRATIONS_MANAGE)
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('marketplace-accounts/:id/mercado-livre/recover')
   @HttpCode(HttpStatus.OK)
   async recover(
     @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<{ outcome: RecoverConnectionOutcome }> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     const outcome = await this.service.recoverConnection(id);
     return { outcome };
   }

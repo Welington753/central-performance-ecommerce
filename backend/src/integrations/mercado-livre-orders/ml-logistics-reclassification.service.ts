@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Marketplace } from '../contracts/marketplace.enum';
+import type { AccountScope } from '../../users/account-scope.types';
 import { MarketplaceAccountStatus } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
 import { LogisticsReclassificationRepository } from '../marketplace-orders/logistics-reclassification.repository';
@@ -79,12 +80,19 @@ export class MlLogisticsReclassificationService {
     return this.toStatus(account.id, account.nickname, remaining, job);
   }
 
-  async getStatusForAllAccounts(): Promise<
-    MlLogisticsReclassificationAccountStatus[]
-  > {
-    const accounts = (await this.marketplaceAccountsService.findAll()).filter(
-      (a) => a.marketplace === Marketplace.MERCADO_LIVRE,
-    );
+  /**
+   * `scope` (Checkpoint 5A) é OBRIGATÓRIO — nunca opcional (esquecer o
+   * argumento nunca deve virar "todas as contas" por omissão). Filtra via
+   * `findAllForScope` (SQL real) ANTES do filtro por marketplace já
+   * existente — operações globais só alcançam contas ML que o usuário pode
+   * ver.
+   */
+  async getStatusForAllAccounts(
+    scope: AccountScope,
+  ): Promise<MlLogisticsReclassificationAccountStatus[]> {
+    const accounts = (
+      await this.marketplaceAccountsService.findAllForScope(scope)
+    ).filter((a) => a.marketplace === Marketplace.MERCADO_LIVRE);
     const jobs = await this.jobsPersistence.findAll();
     const jobByAccountId = new Map(
       jobs.map((job) => [job.marketplaceAccountId, job]),
@@ -145,8 +153,12 @@ export class MlLogisticsReclassificationService {
     return this.getStatus(account.id);
   }
 
-  async startAll(): Promise<MlLogisticsReclassificationAccountStatus[]> {
-    const accounts = (await this.marketplaceAccountsService.findAll()).filter(
+  async startAll(
+    scope: AccountScope,
+  ): Promise<MlLogisticsReclassificationAccountStatus[]> {
+    const accounts = (
+      await this.marketplaceAccountsService.findAllForScope(scope)
+    ).filter(
       (a) =>
         a.marketplace === Marketplace.MERCADO_LIVRE &&
         a.status === MarketplaceAccountStatus.CONNECTED,
@@ -168,10 +180,12 @@ export class MlLogisticsReclassificationService {
     return this.getStatus(accountId);
   }
 
-  async pauseAll(): Promise<MlLogisticsReclassificationAccountStatus[]> {
-    const accounts = (await this.marketplaceAccountsService.findAll()).filter(
-      (a) => a.marketplace === Marketplace.MERCADO_LIVRE,
-    );
+  async pauseAll(
+    scope: AccountScope,
+  ): Promise<MlLogisticsReclassificationAccountStatus[]> {
+    const accounts = (
+      await this.marketplaceAccountsService.findAllForScope(scope)
+    ).filter((a) => a.marketplace === Marketplace.MERCADO_LIVRE);
     const results = await Promise.allSettled(
       accounts.map((a) => this.pause(a.id)),
     );
@@ -192,10 +206,12 @@ export class MlLogisticsReclassificationService {
     return this.getStatus(accountId);
   }
 
-  async resumeAll(): Promise<MlLogisticsReclassificationAccountStatus[]> {
-    const accounts = (await this.marketplaceAccountsService.findAll()).filter(
-      (a) => a.marketplace === Marketplace.MERCADO_LIVRE,
-    );
+  async resumeAll(
+    scope: AccountScope,
+  ): Promise<MlLogisticsReclassificationAccountStatus[]> {
+    const accounts = (
+      await this.marketplaceAccountsService.findAllForScope(scope)
+    ).filter((a) => a.marketplace === Marketplace.MERCADO_LIVRE);
     const results = await Promise.allSettled(
       accounts.map((a) => this.resume(a.id)),
     );

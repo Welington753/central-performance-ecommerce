@@ -26,6 +26,7 @@ describe('POST /marketplace-accounts — fronteira HTTP real (Postgres real, Che
   let app: INestApplication;
   let dataSource: DataSource;
   let jwtService: JwtService;
+  let userId: string;
 
   const ACCESS_TOKEN_SECRET = 'x'.repeat(32);
 
@@ -74,13 +75,26 @@ describe('POST /marketplace-accounts — fronteira HTTP real (Postgres real, Che
     await app.close();
   });
 
+  // Checkpoint 5A: a rota agora exige PermissionGuard (integrations.view/
+  // integrations.manage) — um JWT de um `sub` sem linha em `users` é
+  // corretamente negado (403), não mais um "qualquer autenticado passa".
+  // Cria um ADMIN real com escopo ALL (o mesmo nível de acesso que esta
+  // suíte sempre assumiu implicitamente) antes de assinar o token — nunca
+  // afrouxa o guard para o teste passar.
   beforeEach(async () => {
     await dataSource.query('TRUNCATE TABLE marketplace_accounts CASCADE');
+    await dataSource.query('TRUNCATE TABLE users CASCADE');
+    userId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO users (id, name, email, password_hash, active, is_admin, role_id, account_scope_mode)
+       VALUES ($1, 'Test Admin', $2, 'x', true, true, (SELECT id FROM roles WHERE key = 'ADMIN'), 'ALL')`,
+      [userId, `test-${userId}@example.com`],
+    );
   });
 
   function accessTokenCookie(): string {
     const token = jwtService.sign(
-      { sub: randomUUID(), email: 'test@example.com' },
+      { sub: userId, email: `test-${userId}@example.com` },
       { secret: ACCESS_TOKEN_SECRET, expiresIn: '15m' },
     );
     return `${ACCESS_TOKEN_COOKIE_NAME}=${token}`;
@@ -241,7 +255,9 @@ describe('POST /marketplace-accounts — fronteira HTTP real (Postgres real, Che
 
   it('returns 404 when disconnecting a non-existent account id', async () => {
     const response = await request(app.getHttpServer())
-      .post('/marketplace-accounts/00000000-0000-4000-8000-000000000000/disconnect')
+      .post(
+        '/marketplace-accounts/00000000-0000-4000-8000-000000000000/disconnect',
+      )
       .set('Cookie', accessTokenCookie());
 
     expect(response.status).toBe(404);

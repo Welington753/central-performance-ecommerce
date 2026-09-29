@@ -14,27 +14,49 @@ import {
 import { ApiCookieAuth, ApiTags } from '@nestjs/swagger';
 import { Throttle } from '@nestjs/throttler';
 import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContext } from '../../auth/decorators/authorization-context.decorator';
+import {
+  PermissionGuard,
+  RequirePermissions,
+} from '../../auth/guards/permission.guard';
+import type { AuthorizationContext as AuthorizationContextType } from '../../users/authorization-context.interface';
+import { PERMISSIONS } from '../../users/permissions.catalog';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
 import {
   MercadoLivreOrdersSyncService,
   SyncOrdersError,
   type SyncOrdersSummary,
 } from './mercado-livre-orders-sync.service';
 
+/**
+ * Checkpoint 5A: exige `sync.run` e conta dentro do `accountScope` do
+ * usuário — checagem no controller, nunca em `syncOrders` (também chamado
+ * direto por `MarketplaceAutoSyncService`, o worker automático).
+ */
 @ApiTags('mercado-livre-orders')
 @ApiCookieAuth()
-@UseGuards(AccessTokenGuard)
+@UseGuards(AccessTokenGuard, PermissionGuard)
 @Controller('marketplace-accounts/:id/mercado-livre')
 export class MercadoLivreOrdersSyncController {
-  constructor(private readonly syncService: MercadoLivreOrdersSyncService) {}
+  constructor(
+    private readonly syncService: MercadoLivreOrdersSyncService,
+    private readonly scopedMarketplaceAccountService: ScopedMarketplaceAccountService,
+  ) {}
 
   // Sem `@Body()`: a rota nunca aceita um corpo livre (design "Endpoints
   // autenticados") — o único parâmetro é o `:id` da própria URL.
   @Throttle({ default: { limit: 5, ttl: 60000 } })
   @Post('sync-orders')
   @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.SYNC_RUN)
   async syncOrders(
     @Param('id', ParseUUIDPipe) id: string,
+    @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<SyncOrdersSummary> {
+    await this.scopedMarketplaceAccountService.assertAllowedAndFindOrFail(
+      context.accountScope,
+      id,
+    );
     try {
       return await this.syncService.syncOrders(id);
     } catch (error) {

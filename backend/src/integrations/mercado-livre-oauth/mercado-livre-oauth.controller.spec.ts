@@ -1,84 +1,191 @@
+import {
+  ExecutionContext,
+  INestApplication,
+  NotFoundException,
+  UnauthorizedException,
+  ValidationPipe,
+} from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import type { Request } from 'express';
+import request from 'supertest';
+import { AccessTokenGuard } from '../../auth/guards/access-token.guard';
+import { AuthorizationContextService } from '../../auth/authorization-context.service';
+import { PermissionGuard } from '../../auth/guards/permission.guard';
+import type { AuthorizationContext } from '../../users/authorization-context.interface';
+import type { AccountScope } from '../../users/account-scope.types';
+import { PERMISSIONS } from '../../users/permissions.catalog';
 import { MercadoLivreOAuthController } from './mercado-livre-oauth.controller';
+import { MercadoLivreOAuthService } from './mercado-livre-oauth.service';
+import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
+import { ACCOUNT_NOT_FOUND_MESSAGE } from '../marketplace-accounts/marketplace-accounts.service';
 
-describe('MercadoLivreOAuthController.connect', () => {
-  it('delegates to the service with the account id and the authenticated user id', async () => {
-    const service = {
-      startConnection: jest.fn().mockResolvedValue({
-        authorizationUrl: 'https://auth.mercadolivre.com.br/authorization?...',
-      }),
-    };
-    const controller = new MercadoLivreOAuthController(service as never);
+const VALID_UUID = '11111111-1111-1111-1111-111111111111';
 
-    const result = await controller.connect('acc-1', {
-      sub: 'user-1',
-      email: 'a@b.com',
-    });
+describe('MercadoLivreOAuthController (HTTP)', () => {
+  let app: INestApplication;
+  const http = () => app.getHttpServer() as Parameters<typeof request>[0];
+  let currentUserId: string | null;
+  let currentPermissions: string[];
+  let currentAccountScope: AccountScope;
+  let currentMustChangePassword: boolean;
 
-    expect(service.startConnection).toHaveBeenCalledWith({
-      marketplaceAccountId: 'acc-1',
-      initiatedByUserId: 'user-1',
-    });
-    expect(result.authorizationUrl).toContain('authorization');
-  });
+  const oauthService = {
+    startConnection: jest.fn(),
+    recoverConnection: jest.fn(),
+    handleCallback: jest.fn(),
+  };
+  const scopedMarketplaceAccountService = {
+    assertAllowedAndFindOrFail: jest.fn(),
+  };
 
-  it('callback: redirects (302) to whatever URL the service returns, never a JSON body', async () => {
-    const service = {
-      handleCallback: jest.fn().mockResolvedValue({
-        redirectUrl:
-          'https://app.example.com/integracoes?ml=success&reason=success',
-      }),
-    };
-    const controller = new MercadoLivreOAuthController(service as never);
-    const res = { redirect: jest.fn() };
-
-    await controller.callback({ state: 's', code: 'c' }, res as never);
-
-    expect(service.handleCallback).toHaveBeenCalledWith({
-      state: 's',
-      code: 'c',
-    });
-    expect(res.redirect).toHaveBeenCalledWith(
-      302,
-      'https://app.example.com/integracoes?ml=success&reason=success',
-    );
-  });
-});
-
-describe('MercadoLivreOAuthController.recover', () => {
-  it('delegates to the service and returns the outcome as a 200 JSON body — never an exception for a normal recoverable outcome', async () => {
-    const service = {
-      recoverConnection: jest.fn().mockResolvedValue('RECOVERED'),
-    };
-    const controller = new MercadoLivreOAuthController(service as never);
-
-    const result = await controller.recover('acc-1');
-
-    expect(service.recoverConnection).toHaveBeenCalledWith('acc-1');
-    expect(result).toEqual({ outcome: 'RECOVERED' });
-  });
-
-  it.each(['PENDING_RETRY', 'RECONNECT_REQUIRED', 'CONFIGURATION_ERROR'])(
-    'passes through the %s outcome unchanged',
-    async (outcome) => {
-      const service = {
-        recoverConnection: jest.fn().mockResolvedValue(outcome),
+  const authorizationContextService = {
+    resolveForRequest: jest.fn((request: Request): AuthorizationContext => {
+      const context: AuthorizationContext = {
+        userId: currentUserId ?? 'anon',
+        active: true,
+        roleKey: 'ADMIN',
+        isAdmin: true,
+        permissions: currentPermissions as never,
+        accountScope: currentAccountScope,
+        mustChangePassword: currentMustChangePassword,
       };
-      const controller = new MercadoLivreOAuthController(service as never);
+      request.authorizationContext = context;
+      return context;
+    }),
+  };
 
-      expect(await controller.recover('acc-1')).toEqual({ outcome });
-    },
-  );
-
-  it('propagates a service exception (e.g. ACCOUNT_NOT_RECOVERABLE) instead of swallowing it', async () => {
-    const service = {
-      recoverConnection: jest
-        .fn()
-        .mockRejectedValue(new Error('ACCOUNT_NOT_RECOVERABLE')),
-    };
-    const controller = new MercadoLivreOAuthController(service as never);
-
-    await expect(controller.recover('acc-1')).rejects.toThrow(
-      /ACCOUNT_NOT_RECOVERABLE/,
+  beforeAll(async () => {
+    const moduleRef = await Test.createTestingModule({
+      controllers: [MercadoLivreOAuthController],
+      providers: [
+        { provide: MercadoLivreOAuthService, useValue: oauthService },
+        {
+          provide: ScopedMarketplaceAccountService,
+          useValue: scopedMarketplaceAccountService,
+        },
+        {
+          provide: AuthorizationContextService,
+          useValue: authorizationContextService,
+        },
+        PermissionGuard,
+      ],
+    })
+      .overrideGuard(AccessTokenGuard)
+      .useValue({
+        canActivate: (context: ExecutionContext) => {
+          if (currentUserId === null) {
+            throw new UnauthorizedException('Não autenticado.');
+          }
+          const req = context.switchToHttp().getRequest<Request>();
+          req.user = { sub: currentUserId, email: 'a@b.com' };
+          return true;
+        },
+      })
+      .compile();
+    app = moduleRef.createNestApplication();
+    app.useGlobalPipes(
+      new ValidationPipe({
+        whitelist: true,
+        forbidNonWhitelisted: true,
+        transform: true,
+      }),
     );
+    await app.init();
+  });
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    currentUserId = 'u1';
+    currentPermissions = [PERMISSIONS.INTEGRATIONS_MANAGE];
+    currentAccountScope = { mode: 'ALL' };
+    currentMustChangePassword = false;
+    scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockResolvedValue(
+      { id: VALID_UUID },
+    );
+  });
+
+  describe('POST /marketplace-accounts/:id/mercado-livre/connect', () => {
+    it('401 sem autenticação', async () => {
+      currentUserId = null;
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/connect`)
+        .expect(401);
+    });
+
+    it('403 sem integrations.manage', async () => {
+      currentPermissions = [];
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/connect`)
+        .expect(403);
+      expect(oauthService.startConnection).not.toHaveBeenCalled();
+    });
+
+    it('404 genérico quando a conta está fora do escopo — nunca inicia OAuth', async () => {
+      scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
+        new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
+      );
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/connect`)
+        .expect(404);
+      expect(oauthService.startConnection).not.toHaveBeenCalled();
+    });
+
+    it('200 quando a conta está no escopo', async () => {
+      oauthService.startConnection.mockResolvedValue({
+        authorizationUrl: 'https://exemplo.invalido/auth',
+      });
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/connect`)
+        .expect(200);
+      expect(oauthService.startConnection).toHaveBeenCalledWith({
+        marketplaceAccountId: VALID_UUID,
+        initiatedByUserId: 'u1',
+      });
+    });
+  });
+
+  describe('POST /marketplace-accounts/:id/mercado-livre/recover', () => {
+    it('403 sem integrations.manage', async () => {
+      currentPermissions = [];
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/recover`)
+        .expect(403);
+    });
+
+    it('404 genérico quando a conta está fora do escopo — nunca chama recoverConnection', async () => {
+      scopedMarketplaceAccountService.assertAllowedAndFindOrFail.mockRejectedValue(
+        new NotFoundException(ACCOUNT_NOT_FOUND_MESSAGE),
+      );
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/recover`)
+        .expect(404);
+      expect(oauthService.recoverConnection).not.toHaveBeenCalled();
+    });
+
+    it('200 quando a conta está no escopo', async () => {
+      oauthService.recoverConnection.mockResolvedValue('RECOVERED');
+      await request(http())
+        .post(`/marketplace-accounts/${VALID_UUID}/mercado-livre/recover`)
+        .expect(200);
+      expect(oauthService.recoverConnection).toHaveBeenCalledWith(VALID_UUID);
+    });
+  });
+
+  describe('GET /integrations/mercado-livre/callback — público, nunca guardado', () => {
+    it('continua acessível sem cookie de sessão (nenhum guard aplicado)', async () => {
+      currentUserId = null;
+      oauthService.handleCallback.mockResolvedValue({
+        redirectUrl: '/login?ml=1',
+      });
+      await request(http())
+        .get('/integrations/mercado-livre/callback')
+        .query({ code: 'c', state: 's' })
+        .expect(302);
+      expect(oauthService.handleCallback).toHaveBeenCalledTimes(1);
+    });
   });
 });
