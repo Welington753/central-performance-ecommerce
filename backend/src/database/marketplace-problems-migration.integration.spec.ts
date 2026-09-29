@@ -61,6 +61,26 @@ describe('MarketplaceProblems migration (Postgres real)', () => {
     await dataSource.destroy();
   });
 
+  /**
+   * `undoLastMigration()` sozinho só desfaz a migration mais RECENTE —
+   * migrations adicionadas depois desta (ex.: `marketplace-problems-refresh-cursor`,
+   * CP2-A) empilham por cima e passam a ser "a última". Desfaz repetidamente
+   * até a tabela `marketplace_problems` (criada por ESTA migration) sumir —
+   * mesma correção aplicada em `users-roles-permissions-migration.integration.spec.ts`.
+   */
+  async function undoUntilMarketplaceProblemsGone(): Promise<void> {
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const exists = await dataSource.query<Array<{ exists: boolean }>>(
+        `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'marketplace_problems') AS exists`,
+      );
+      if (!exists[0].exists) return;
+      await dataSource.undoLastMigration();
+    }
+    throw new Error(
+      'Tabela "marketplace_problems" ainda existe após 20 tentativas de undoLastMigration().',
+    );
+  }
+
   it('cria marketplace_problems com os tipos/defaults esperados, sem enum nativo', async () => {
     const columns = await dataSource.query<ColumnRow[]>(
       `SELECT column_name, data_type, is_nullable, column_default
@@ -167,7 +187,7 @@ describe('MarketplaceProblems migration (Postgres real)', () => {
   });
 
   it('down remove as tabelas novas, as 3 permission keys novas, e restaura o CHECK de 16 chaves; up reaplica tudo', async () => {
-    await dataSource.undoLastMigration();
+    await undoUntilMarketplaceProblemsGone();
 
     const tablesAfterDown = await dataSource.query<
       Array<{ table_name: string }>

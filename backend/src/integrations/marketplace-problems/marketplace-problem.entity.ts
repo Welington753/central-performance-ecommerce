@@ -150,6 +150,18 @@ export class MarketplaceProblem {
   @Column({ type: 'timestamptz' })
   lastUpdated!: Date;
 
+  /**
+   * Última vez que o estado deste claim foi confirmado com o Mercado Livre
+   * (por qualquer fonte: janela de criação, censo de abertos ou refresh
+   * individual — CP2). `NULL` até a primeira sincronização real (CP1 nunca
+   * grava esta coluna). Usada só para ordenar a fila de refresh
+   * (`ORDER BY last_checked_at ASC NULLS FIRST, id ASC` — ver índice na
+   * migration), nunca para decidir se um evento é aceito (isso é
+   * `last_updated`, do próprio claim).
+   */
+  @Column({ type: 'timestamptz', nullable: true })
+  lastCheckedAt!: Date | null;
+
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt!: Date;
 
