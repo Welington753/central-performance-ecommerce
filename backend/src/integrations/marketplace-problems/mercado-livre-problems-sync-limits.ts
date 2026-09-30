@@ -3,9 +3,9 @@ import { assertPositiveIntegerSync } from './mercado-livre-claim-enrichment.util
 import { WINDOW_SPLIT_OVERLAP_MS } from './mercado-livre-claims-window.util';
 
 const DEFAULT_MAX_CLAIMS = 200;
-const HARD_MAX_CLAIMS = 2000;
+export const HARD_MAX_CLAIMS = 2000;
 const DEFAULT_MAX_HTTP_CALLS = 800;
-const HARD_MAX_HTTP_CALLS = 5000;
+export const HARD_MAX_HTTP_CALLS = 5000;
 // Bem acima de 2 * WINDOW_SPLIT_OVERLAP_MS (2000ms) — a recursão de divisão
 // de `commitSafeSubWindow` converge para esse ponto fixo, nunca abaixo dele.
 const DEFAULT_MIN_SPLIT_MS = 5 * 60 * 1000;

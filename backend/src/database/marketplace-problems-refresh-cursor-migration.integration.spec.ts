@@ -77,7 +77,17 @@ describe('MarketplaceProblemsRefreshCursor migration (Postgres real)', () => {
       [account.id],
     );
 
-    await dataSource.undoLastMigration();
+    // `undoLastMigration()` sozinho só desfaz a migration mais RECENTE —
+    // migrations adicionadas depois desta (ex.: `marketplace-problems-sync-jobs`,
+    // CP2-C) empilham por cima. Desfaz até `last_checked_at` sumir.
+    for (let attempt = 0; attempt < 20; attempt++) {
+      const present = await dataSource.query<unknown[]>(
+        `SELECT 1 FROM information_schema.columns
+         WHERE table_name = 'marketplace_problems' AND column_name = 'last_checked_at'`,
+      );
+      if (present.length === 0) break;
+      await dataSource.undoLastMigration();
+    }
 
     const columnsAfterDown = await dataSource.query<ColumnRow[]>(
       `SELECT column_name FROM information_schema.columns
