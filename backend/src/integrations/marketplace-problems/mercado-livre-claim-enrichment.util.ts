@@ -3,7 +3,20 @@ import type { RawDetailPlayer } from '../mercado-livre-claims/mercado-livre-clai
 import type { ClaimsSearchValidation } from '../mercado-livre-claims/mercado-livre-claims-search-response';
 import type { ProblemActionInput } from './mercado-livre-claim-to-problem.mapper';
 import type { SearchPageResult } from './mercado-livre-claims-window.util';
-import type { ProblemsSyncStopReason } from './mercado-livre-problems-sync.service';
+import type {
+  ProblemsSyncFailureCode,
+  ProblemsSyncStopReason,
+} from './mercado-livre-problems-sync.types';
+
+/** Chamada POR-CLAIM que originou a classificação. */
+export type ClaimOperation = 'core' | 'detail' | 'reputation' | 'reason';
+
+const UNAUTHORIZED_CODE: Record<ClaimOperation, ProblemsSyncFailureCode> = {
+  core: 'CORE_UNAUTHORIZED',
+  detail: 'DETAIL_UNAUTHORIZED',
+  reputation: 'REPUTATION_UNAUTHORIZED',
+  reason: 'REASON_UNAUTHORIZED',
+};
 
 /**
  * Classificação das 4 chamadas POR-CLAIM (`fetchClaim`/`fetchClaimDetail`/
@@ -11,23 +24,29 @@ import type { ProblemsSyncStopReason } from './mercado-livre-problems-sync.servi
  * claim/enriquecimento atual (CP2-B nunca aborta o lote inteiro por causa
  * disso); os demais são sintomas sistêmicos (token/limite/indisponibilidade)
  * e sempre abortam a execução inteira em `MercadoLivreProblemsSyncService`.
+ *
+ * 401 é sempre global (token recusado). 403 num endpoint de UM claim é
+ * isolado: a mesma conta segue buscando e lendo os demais claims, então não
+ * há evidência de falha de autenticação da conta inteira.
  */
 export type ClaimOutcomeClassification =
   | { kind: 'ok' }
-  | { kind: 'isolated' }
-  | { kind: 'abort_auth' }
+  | { kind: 'isolated'; forbidden: boolean }
+  | { kind: 'abort_auth'; failureCode: ProblemsSyncFailureCode }
   | { kind: 'abort_provider' }
   | { kind: 'abort_rate_limit'; retryAfterMs: number | null };
 
 export function classifyClaimsHttpOutcome(
   outcome: ClaimsHttpOutcome<unknown>,
+  operation: ClaimOperation,
 ): ClaimOutcomeClassification {
   switch (outcome.kind) {
     case 'success':
       return { kind: 'ok' };
     case 'unauthorized':
+      return { kind: 'abort_auth', failureCode: UNAUTHORIZED_CODE[operation] };
     case 'forbidden':
-      return { kind: 'abort_auth' };
+      return { kind: 'isolated', forbidden: true };
     case 'provider_unavailable':
       return { kind: 'abort_provider' };
     case 'rate_limited':
@@ -35,7 +54,7 @@ export function classifyClaimsHttpOutcome(
     case 'not_found':
     case 'invalid_response':
     case 'invalid_request':
-      return { kind: 'isolated' };
+      return { kind: 'isolated', forbidden: false };
   }
 }
 
@@ -44,12 +63,19 @@ export function classifyClaimsHttpOutcome(
  * reaproveita `isolated`: uma página de busca que falhe não tem como saber
  * com segurança quais claims ficaram de fora dela, então qualquer resultado
  * diferente de sucesso torna a cobertura da janela/censo INCOMPLETA e para a
- * descoberta imediatamente (nunca "isolado por página").
+ * descoberta imediatamente (nunca "isolado por página"). 401 e 403 na busca
+ * são globais: sem busca, a conta inteira fica sem cobertura.
  */
 export type SearchOutcomeClassification =
   | { kind: 'ok' }
   | { kind: 'SEARCH_CONTRACT_ERROR' }
-  | { kind: 'TERMINAL_AUTH_ERROR' }
+  | {
+      kind: 'TERMINAL_AUTH_ERROR';
+      failureCode: Extract<
+        ProblemsSyncFailureCode,
+        'SEARCH_UNAUTHORIZED' | 'SEARCH_FORBIDDEN'
+      >;
+    }
   | { kind: 'PROVIDER_UNAVAILABLE' }
   | { kind: 'RATE_LIMITED'; retryAfterMs: number | null };
 
@@ -60,8 +86,12 @@ export function classifySearchOutcome(
     case 'success':
       return { kind: 'ok' };
     case 'unauthorized':
+      return {
+        kind: 'TERMINAL_AUTH_ERROR',
+        failureCode: 'SEARCH_UNAUTHORIZED',
+      };
     case 'forbidden':
-      return { kind: 'TERMINAL_AUTH_ERROR' };
+      return { kind: 'TERMINAL_AUTH_ERROR', failureCode: 'SEARCH_FORBIDDEN' };
     case 'provider_unavailable':
       return { kind: 'PROVIDER_UNAVAILABLE' };
     case 'rate_limited':
@@ -136,6 +166,7 @@ export type ProcessOutcomeStopReason = Extract<
 export interface ProcessCandidatesOutcome {
   stopReason: ProcessOutcomeStopReason;
   retryAfterMs: number | null;
+  failureCode: ProblemsSyncFailureCode | null;
   callsUsed: number;
   counters: ProblemsSyncCounters;
 }
@@ -153,6 +184,7 @@ export function abortFrom(
       return {
         stopReason: 'TERMINAL_AUTH_ERROR',
         retryAfterMs: null,
+        failureCode: classification.failureCode,
         callsUsed,
         counters,
       };
@@ -160,6 +192,7 @@ export function abortFrom(
       return {
         stopReason: 'RATE_LIMITED',
         retryAfterMs: classification.retryAfterMs,
+        failureCode: null,
         callsUsed,
         counters,
       };
@@ -167,6 +200,7 @@ export function abortFrom(
       return {
         stopReason: 'PROVIDER_UNAVAILABLE',
         retryAfterMs: null,
+        failureCode: null,
         callsUsed,
         counters,
       };
@@ -177,18 +211,35 @@ export function abortFrom(
 
 export function stopReasonFromSearchClassification(
   classification: SearchOutcomeClassification,
-): { stopReason: ProblemsSyncStopReason; retryAfterMs: number | null } {
+): {
+  stopReason: ProblemsSyncStopReason;
+  retryAfterMs: number | null;
+  failureCode: ProblemsSyncFailureCode | null;
+} {
   switch (classification.kind) {
     case 'SEARCH_CONTRACT_ERROR':
-      return { stopReason: 'SEARCH_CONTRACT_ERROR', retryAfterMs: null };
+      return {
+        stopReason: 'SEARCH_CONTRACT_ERROR',
+        retryAfterMs: null,
+        failureCode: null,
+      };
     case 'TERMINAL_AUTH_ERROR':
-      return { stopReason: 'TERMINAL_AUTH_ERROR', retryAfterMs: null };
+      return {
+        stopReason: 'TERMINAL_AUTH_ERROR',
+        retryAfterMs: null,
+        failureCode: classification.failureCode,
+      };
     case 'PROVIDER_UNAVAILABLE':
-      return { stopReason: 'PROVIDER_UNAVAILABLE', retryAfterMs: null };
+      return {
+        stopReason: 'PROVIDER_UNAVAILABLE',
+        retryAfterMs: null,
+        failureCode: null,
+      };
     case 'RATE_LIMITED':
       return {
         stopReason: 'RATE_LIMITED',
         retryAfterMs: classification.retryAfterMs,
+        failureCode: null,
       };
     case 'ok':
       throw new Error(
@@ -232,9 +283,11 @@ export function zeroProblemsSyncResult(
   pagesFetched: number,
   coverageFrom: string | null,
   nextWindowFrom: string | null,
+  failureCode: ProblemsSyncFailureCode | null = null,
 ): {
   complete: false;
   stopReason: ProblemsSyncStopReason;
+  failureCode: ProblemsSyncFailureCode | null;
   retryAfterMs: number | null;
   coverageFrom: string | null;
   claimsFound: number;
@@ -254,6 +307,7 @@ export function zeroProblemsSyncResult(
   return {
     complete: false,
     stopReason,
+    failureCode,
     retryAfterMs,
     coverageFrom,
     claimsFound: 0,

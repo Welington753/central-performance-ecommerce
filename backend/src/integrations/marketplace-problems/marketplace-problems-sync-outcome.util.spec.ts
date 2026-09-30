@@ -57,6 +57,7 @@ function report(
     stopReason: 'COMPLETED',
     retryAfterMs: null,
     thrownCode: null,
+    failureCode: null,
     creationCursorAdvancedTo: null,
     censusCompletedInFull: false,
     claimsProcessed: 0,
@@ -236,6 +237,65 @@ describe('buildCommitUpdate', () => {
       expect(update.status).toBe('FAILED_AUTH');
       expect(update.lastErrorCode).toBe(code);
       expect(update.attemptCount).toBe(1);
+    });
+
+    it.each([
+      'SEARCH_UNAUTHORIZED',
+      'SEARCH_FORBIDDEN',
+      'CORE_UNAUTHORIZED',
+      'DETAIL_UNAUTHORIZED',
+      'REPUTATION_UNAUTHORIZED',
+      'REASON_UNAUTHORIZED',
+    ] as const)(
+      'TERMINAL_AUTH_ERROR com diagnóstico %s: FAILED_AUTH grava o código específico e mantém o cursor',
+      (failureCode) => {
+        const update = buildCommitUpdate(
+          job({ attemptCount: 0 }),
+          report({ stopReason: 'TERMINAL_AUTH_ERROR', failureCode }),
+          NOW,
+          CONFIG,
+        );
+        expect(update.status).toBe('FAILED_AUTH');
+        expect(update.lastErrorCode).toBe(failureCode);
+        expect(update.attemptCount).toBe(0);
+        expect(update.windowCursorAt).toEqual(CURSOR);
+      },
+    );
+  });
+
+  describe('403 em fetch_core (CORE_FORBIDDEN)', () => {
+    it('cobertura incompleta: WAITING_RETRY retomável, nunca FAILED_AUTH, cursor mantido e código específico', () => {
+      const update = buildCommitUpdate(
+        job({ attemptCount: 0 }),
+        report({
+          stopReason: 'CORE_COVERAGE_INCOMPLETE',
+          failureCode: 'CORE_FORBIDDEN',
+          claimsPersisted: 3,
+        }),
+        NOW,
+        CONFIG,
+      );
+      expect(update.status).toBe('WAITING_RETRY');
+      expect(update.lastErrorCode).toBe('CORE_FORBIDDEN');
+      expect(update.attemptCount).toBe(1);
+      expect(update.windowCursorAt).toEqual(CURSOR);
+      expect(update.claimsPersistedDelta).toBe(3);
+    });
+
+    it('diagnóstico nunca vaza em sucesso/yield', () => {
+      for (const stopReason of [
+        'COMPLETED',
+        'CALL_BUDGET_EXHAUSTED',
+      ] as const) {
+        expect(
+          buildCommitUpdate(
+            job(),
+            report({ stopReason, failureCode: 'CORE_FORBIDDEN' }),
+            NOW,
+            CONFIG,
+          ).lastErrorCode,
+        ).toBeNull();
+      }
     });
   });
 

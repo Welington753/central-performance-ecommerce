@@ -69,7 +69,12 @@ function classify(report: ProblemsSyncTickReport): {
   }
   const kind = STOP_REASON_KIND[report.stopReason];
   const isProblem = kind !== 'SUCCESS' && kind !== 'YIELD';
-  return { kind, errorCode: isProblem ? report.stopReason : null };
+  // Diagnóstico específico (ex.: SEARCH_FORBIDDEN) no lugar do stopReason
+  // genérico — mesma coluna `last_error_code`, vocabulário fechado.
+  return {
+    kind,
+    errorCode: isProblem ? (report.failureCode ?? report.stopReason) : null,
+  };
 }
 
 /**

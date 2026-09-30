@@ -4,8 +4,6 @@ import { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-li
 import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import {
-  classifySearchOutcome,
-  stopReasonFromSearchClassification,
   toSearchPageOutcome,
   assertValidSyncDate,
   assertPositiveIntegerSync,
@@ -26,6 +24,7 @@ import {
 } from './mercado-livre-problems-sync-limits';
 import {
   assembleResult,
+  resultFromCensusSearchFailure,
   resultFromOutcome,
   resultFromUncommittedWindow,
   type WindowCommit,
@@ -156,17 +155,7 @@ export class MercadoLivreProblemsSyncService {
     let callsUsed = 1;
     const probe = toSearchPageOutcome(probeRaw);
     if (probe.kind !== 'success') {
-      const { stopReason, retryAfterMs } = stopReasonFromSearchClassification(
-        classifySearchOutcome(probeRaw),
-      );
-      return zeroProblemsSyncResult(
-        stopReason,
-        retryAfterMs,
-        callsUsed,
-        callsUsed,
-        null,
-        null,
-      );
+      return resultFromCensusSearchFailure(probeRaw, callsUsed);
     }
 
     const total = probe.data.total;
@@ -191,16 +180,7 @@ export class MercadoLivreProblemsSyncService {
         callsUsed += 1;
         const page = toSearchPageOutcome(pageRaw);
         if (page.kind !== 'success') {
-          const { stopReason, retryAfterMs } =
-            stopReasonFromSearchClassification(classifySearchOutcome(pageRaw));
-          return zeroProblemsSyncResult(
-            stopReason,
-            retryAfterMs,
-            callsUsed,
-            callsUsed,
-            null,
-            null,
-          );
+          return resultFromCensusSearchFailure(pageRaw, callsUsed);
         }
         for (const id of page.data.ids) ids.add(id);
         offset += SEARCH_PAGE_LIMIT;

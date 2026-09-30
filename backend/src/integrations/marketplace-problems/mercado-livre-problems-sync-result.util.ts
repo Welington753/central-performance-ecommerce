@@ -1,4 +1,6 @@
+import type { ClaimsHttpOutcome } from '../mercado-livre-claims/mercado-livre-claims-http.client';
 import {
+  classifySearchOutcome,
   zeroProblemsSyncResult,
   stopReasonFromSearchClassification,
   type ProcessCandidatesOutcome,
@@ -30,6 +32,7 @@ export function resultFromOutcome(
   return {
     complete: outcome.stopReason === 'COMPLETED',
     stopReason: outcome.stopReason,
+    failureCode: outcome.failureCode,
     retryAfterMs: outcome.retryAfterMs,
     claimsProcessed: outcome.counters.claimsProcessed,
     claimsCoreCovered: outcome.counters.claimsCoreCovered,
@@ -60,6 +63,24 @@ export function assembleResult(
   };
 }
 
+/** Busca direta do censo (sonda/paginação) que falhou: nada processado. */
+export function resultFromCensusSearchFailure(
+  outcome: ClaimsHttpOutcome<unknown>,
+  callsUsed: number,
+): ProblemsSyncResult {
+  const { stopReason, retryAfterMs, failureCode } =
+    stopReasonFromSearchClassification(classifySearchOutcome(outcome));
+  return zeroProblemsSyncResult(
+    stopReason,
+    retryAfterMs,
+    callsUsed,
+    callsUsed,
+    null,
+    null,
+    failureCode,
+  );
+}
+
 /** Resultado para os ramos de `commitSafeSubWindow` que NÃO commitaram
  * (search_error / safety_limit / claim_budget / call_budget). */
 export function resultFromUncommittedWindow(
@@ -69,9 +90,8 @@ export function resultFromUncommittedWindow(
   totalCalls: number,
 ): ProblemsSyncResult {
   if (commit.kind === 'search_error') {
-    const { stopReason, retryAfterMs } = stopReasonFromSearchClassification(
-      commit.classification,
-    );
+    const { stopReason, retryAfterMs, failureCode } =
+      stopReasonFromSearchClassification(commit.classification);
     return zeroProblemsSyncResult(
       stopReason,
       retryAfterMs,
@@ -79,6 +99,7 @@ export function resultFromUncommittedWindow(
       totalCalls,
       coverageFrom,
       window.from.toISOString(),
+      failureCode,
     );
   }
   const stopReason: ProblemsSyncStopReason =

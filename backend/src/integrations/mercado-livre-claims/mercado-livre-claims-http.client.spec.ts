@@ -319,6 +319,30 @@ describe('MercadoLivreClaimsHttpClient', () => {
       },
     );
 
+    it.each([401, 403])(
+      'status %i em qualquer operação: UMA única chamada, sem retry HTTP',
+      async (status) => {
+        const fetchImpl = createFetchMock();
+        fetchImpl.mockResolvedValue(jsonResponse(status, {}));
+        const client = new MercadoLivreClaimsHttpClient(
+          fakeConfigService(),
+          fetchImpl,
+        );
+        await client.searchClaims({
+          accessToken: 't',
+          sellerUserId: 's',
+          status: 'opened',
+          offset: 0,
+          limit: 100,
+        });
+        await client.fetchClaim('t', 'claim-1');
+        await client.fetchClaimDetail('t', 'claim-1');
+        await client.fetchClaimReputationImpact('t', 'claim-1');
+        await client.fetchClaimReason('t', 'PDD1');
+        expect(fetchImpl).toHaveBeenCalledTimes(5);
+      },
+    );
+
     it('429 mapeia para rate_limited com retryAfterMs do header', async () => {
       const fetchImpl = createFetchMock();
       fetchImpl.mockResolvedValue(

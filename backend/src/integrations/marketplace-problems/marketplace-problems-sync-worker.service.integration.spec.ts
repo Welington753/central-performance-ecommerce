@@ -24,6 +24,7 @@ function report(
     stopReason: 'COMPLETED',
     retryAfterMs: null,
     thrownCode: null,
+    failureCode: null,
     creationCursorAdvancedTo: null,
     censusCompletedInFull: false,
     claimsProcessed: 2,

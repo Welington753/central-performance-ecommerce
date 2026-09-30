@@ -86,11 +86,26 @@ const JOB_STATUS_LABELS: Record<ProblemsSyncJobStatus | "NOT_STARTED", string> =
   FAILED_AUTH: "Autorização necessária",
 };
 
+const API_AUTH_REFUSED = "A API recusou a autorização da conta";
+
+/**
+ * Só `TOKEN_EXPIRED` (refresh token recusado no OAuth) e conta desconectada
+ * mandam reconectar. 401/403 da API de Claims nunca provam token expirado:
+ * 401 = autorização recusada; 403 = acesso negado a um recurso específico.
+ */
 const ERROR_LABELS: Record<string, string> = {
   PROVIDER_UNAVAILABLE: "Mercado Livre indisponível no momento",
   RATE_LIMITED: "Limite de requisições do Mercado Livre atingido",
-  TERMINAL_AUTH_ERROR: "Autorização expirada — reconecte a conta",
-  TOKEN_EXPIRED: "Autorização expirada — reconecte a conta",
+  // Código legado (antes do diagnóstico por operação): não distingue 401 de 403.
+  TERMINAL_AUTH_ERROR: API_AUTH_REFUSED,
+  TOKEN_EXPIRED: "Token expirado — reconecte a conta",
+  SEARCH_UNAUTHORIZED: API_AUTH_REFUSED,
+  CORE_UNAUTHORIZED: API_AUTH_REFUSED,
+  DETAIL_UNAUTHORIZED: API_AUTH_REFUSED,
+  REPUTATION_UNAUTHORIZED: API_AUTH_REFUSED,
+  REASON_UNAUTHORIZED: API_AUTH_REFUSED,
+  SEARCH_FORBIDDEN: "O Mercado Livre negou acesso à busca de reclamações desta conta",
+  CORE_FORBIDDEN: "O Mercado Livre negou acesso a uma reclamação específica",
   ACCOUNT_NOT_CONNECTED: "Conta desconectada — reconecte a conta",
   ACCOUNT_BUSY: "Conta ocupada por outra operação",
   TOKEN_REFRESH_PENDING: "Renovação de autorização pendente",

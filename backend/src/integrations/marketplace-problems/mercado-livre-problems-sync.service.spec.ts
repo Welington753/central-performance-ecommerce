@@ -1095,3 +1095,247 @@ describe('MercadoLivreProblemsSyncService — status explícito em toda busca (i
     expect(short.persistence.upsertProblem).not.toHaveBeenCalled();
   });
 });
+
+describe('MercadoLivreProblemsSyncService — 401/403 por operação (incidente: falso FAILED_AUTH)', () => {
+  const window = {
+    from: new Date('2026-01-01T00:00:00.000Z'),
+    to: new Date('2026-01-01T01:00:00.000Z'),
+  };
+  const forbidden = <T = never>(): ClaimsHttpOutcome<T> => ({
+    kind: 'forbidden',
+  });
+  const reputationOk = () =>
+    ok({
+      reputation: { impact: 'not_applies', hasIncentive: null, dueDate: null },
+    });
+  const reasonOk = () =>
+    ok({
+      reason: {
+        flow: 'mediations',
+        name: 'Motivo',
+        detail: null,
+        status: 'active',
+        triage: [],
+        allowedFlows: [],
+        expectedResolutions: [],
+      },
+    });
+  /** Só `closed` devolve candidatos: 1 id por candidato, sem repetição entre status. */
+  const searchOnlyClosed = (ids: string[]) =>
+    jest
+      .fn()
+      .mockImplementation((input: SearchClaimsInput) =>
+        Promise.resolve(
+          claimSearchSuccess(input.status === 'closed' ? ids : []),
+        ),
+      );
+  const fetchClaimById = () =>
+    jest
+      .fn()
+      .mockImplementation((_t: string, id: string) =>
+        Promise.resolve(ok({ claim: rawClaim(id, { reasonId: 'PDD1' }) })),
+      );
+  const upsertedIds = (upsertProblem: jest.Mock): string[] =>
+    (upsertProblem.mock.calls as Array<[UpsertProblemInput]>).map(
+      (call) => call[0].externalClaimId,
+    );
+
+  it.each([
+    ['detail', 'detailFailures'],
+    ['reputation', 'reputationFailures'],
+    ['reason', 'reasonLookupFailures'],
+  ] as const)(
+    '403 em %s é falha isolada de enriquecimento: core persiste com fetched:false e os demais claims continuam',
+    async (operation, counter) => {
+      const failOnlyC1 = <T>(success: (id: string) => ClaimsHttpOutcome<T>) =>
+        jest
+          .fn()
+          .mockImplementation((_t: string, id: string) =>
+            Promise.resolve(id === 'c1' ? forbidden() : success(id)),
+          );
+      const httpClient: Record<string, jest.Mock> = {
+        searchClaims: searchOnlyClosed(['c1', 'c2']),
+        fetchClaim: fetchClaimById(),
+        fetchClaimDetail: jest
+          .fn()
+          .mockImplementation((_t: string, id: string) =>
+            Promise.resolve(ok({ claim: rawClaimDetail(id) })),
+          ),
+        fetchClaimReputationImpact: jest.fn().mockResolvedValue(reputationOk()),
+        fetchClaimReason: jest.fn().mockResolvedValue(reasonOk()),
+      };
+      if (operation === 'detail') {
+        httpClient.fetchClaimDetail = failOnlyC1((id) =>
+          ok({ claim: rawClaimDetail(id) }),
+        );
+      } else if (operation === 'reputation') {
+        httpClient.fetchClaimReputationImpact = failOnlyC1(reputationOk);
+      } else {
+        // O reason é compartilhado: 403 no 1º claim, sucesso no 2º (cache ainda vazio).
+        httpClient.fetchClaimReason = jest
+          .fn()
+          .mockResolvedValueOnce(forbidden())
+          .mockResolvedValue(reasonOk());
+      }
+      const { service, persistence, reasonCache } = build({ httpClient });
+
+      const result = await service.syncCreationWindow('acc-1', window);
+
+      expect(upsertedIds(persistence.upsertProblem)).toEqual(['c1', 'c2']);
+      const [first, second] = (
+        persistence.upsertProblem.mock.calls as Array<[UpsertProblemInput]>
+      ).map((call) => call[0]);
+      if (operation === 'detail') {
+        expect(first.detail).toEqual({ fetched: false });
+        expect(second.detail.fetched).toBe(true);
+      }
+      if (operation === 'reputation') {
+        expect(first.reputation).toEqual({ fetched: false });
+        expect(second.reputation.fetched).toBe(true);
+      }
+      if (operation === 'reason') {
+        expect(reasonCache.upsert).toHaveBeenCalledTimes(1);
+      }
+      expect(result[counter]).toBe(1);
+      expect(result.claimsCoreCovered).toBe(2);
+      expect(result.claimsFailed).toBe(0);
+      expect(result.stopReason).toBe('COMPLETED');
+      expect(result.failureCode).toBeNull();
+      expect(result.nextWindowFrom).not.toBe(window.from.toISOString());
+    },
+  );
+
+  it.each([
+    ['detail', 'fetchClaimDetail', 'DETAIL_UNAUTHORIZED'],
+    ['reputation', 'fetchClaimReputationImpact', 'REPUTATION_UNAUTHORIZED'],
+    ['reason', 'fetchClaimReason', 'REASON_UNAUTHORIZED'],
+  ] as const)(
+    '401 em %s continua terminal para o lote, com código específico e sem nova chamada',
+    async (_operation, method, failureCode) => {
+      const failing = jest.fn().mockResolvedValue(unauthorized());
+      const { service, persistence, httpClient } = build({
+        httpClient: {
+          searchClaims: searchOnlyClosed(['c1', 'c2']),
+          fetchClaim: fetchClaimById(),
+          fetchClaimDetail: jest
+            .fn()
+            .mockResolvedValue(ok({ claim: rawClaimDetail('c1') })),
+          fetchClaimReputationImpact: jest
+            .fn()
+            .mockResolvedValue(reputationOk()),
+          fetchClaimReason: jest.fn().mockResolvedValue(reasonOk()),
+          [method]: failing,
+        },
+      });
+
+      const result = await service.syncCreationWindow('acc-1', window);
+
+      expect(result.stopReason).toBe('TERMINAL_AUTH_ERROR');
+      expect(result.failureCode).toBe(failureCode);
+      expect(result.nextWindowFrom).toBe(window.from.toISOString());
+      expect(failing).toHaveBeenCalledTimes(1);
+      expect(httpClient.fetchClaim).toHaveBeenCalledTimes(1);
+      expect(persistence.upsertProblem).not.toHaveBeenCalled();
+    },
+  );
+
+  it('401 em fetch_core continua terminal com CORE_UNAUTHORIZED', async () => {
+    const { service, httpClient } = build({
+      httpClient: {
+        searchClaims: searchOnlyClosed(['c1', 'c2']),
+        fetchClaim: jest.fn().mockResolvedValue(unauthorized()),
+      },
+    });
+    const result = await service.syncCreationWindow('acc-1', window);
+    expect(result.stopReason).toBe('TERMINAL_AUTH_ERROR');
+    expect(result.failureCode).toBe('CORE_UNAUTHORIZED');
+    expect(httpClient.fetchClaim).toHaveBeenCalledTimes(1);
+  });
+
+  it('403 em fetch_core NÃO é falha de autenticação: cobertura incompleta com CORE_FORBIDDEN, janela não avança, demais claims persistem', async () => {
+    const { service, persistence } = build({
+      httpClient: {
+        searchClaims: searchOnlyClosed(['c1', 'c2', 'c3']),
+        fetchClaim: jest
+          .fn()
+          .mockImplementation((_t: string, id: string) =>
+            Promise.resolve(
+              id === 'c2' ? forbidden() : ok({ claim: rawClaim(id) }),
+            ),
+          ),
+      },
+    });
+
+    const result = await service.syncCreationWindow('acc-1', window);
+
+    expect(result.stopReason).toBe('CORE_COVERAGE_INCOMPLETE');
+    expect(result.failureCode).toBe('CORE_FORBIDDEN');
+    expect(result.complete).toBe(false);
+    expect(result.nextWindowFrom).toBe(window.from.toISOString());
+    expect(result.claimsCoreCovered).toBe(2);
+    expect(result.claimsFailed).toBe(1);
+    expect(upsertedIds(persistence.upsertProblem)).toEqual(['c1', 'c3']);
+  });
+
+  it('404 isolado em fetch_core mantém CORE_COVERAGE_INCOMPLETE sem código de 403', async () => {
+    const { service } = build({
+      httpClient: {
+        searchClaims: searchOnlyClosed(['c1']),
+        fetchClaim: jest.fn().mockResolvedValue(notFound()),
+      },
+    });
+    const result = await service.syncCreationWindow('acc-1', window);
+    expect(result.stopReason).toBe('CORE_COVERAGE_INCOMPLETE');
+    expect(result.failureCode).toBeNull();
+  });
+
+  it.each([
+    ['opened', 'forbidden', 'SEARCH_FORBIDDEN'],
+    ['closed', 'forbidden', 'SEARCH_FORBIDDEN'],
+    ['opened', 'unauthorized', 'SEARCH_UNAUTHORIZED'],
+    ['closed', 'unauthorized', 'SEARCH_UNAUTHORIZED'],
+  ] as const)(
+    'busca de criação %s -> %s: terminal com código específico, janela não avança, nada processado',
+    async (failingStatus, kind, failureCode) => {
+      const { service, httpClient, persistence } = build({
+        httpClient: {
+          searchClaims: jest
+            .fn()
+            .mockImplementation((input: SearchClaimsInput) =>
+              Promise.resolve(
+                input.status === failingStatus
+                  ? { kind }
+                  : claimSearchSuccess(['c1']),
+              ),
+            ),
+          fetchClaim: fetchClaimById(),
+        },
+      });
+
+      const result = await service.syncCreationWindow('acc-1', window);
+
+      expect(result.stopReason).toBe('TERMINAL_AUTH_ERROR');
+      expect(result.failureCode).toBe(failureCode);
+      expect(result.nextWindowFrom).toBe(window.from.toISOString());
+      expect(httpClient.fetchClaim).not.toHaveBeenCalled();
+      expect(persistence.upsertProblem).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each([
+    ['forbidden', 'SEARCH_FORBIDDEN'],
+    ['unauthorized', 'SEARCH_UNAUTHORIZED'],
+  ] as const)(
+    'busca do censo -> %s: terminal com %s, sem processamento',
+    async (kind, failureCode) => {
+      const { service, httpClient } = build({
+        httpClient: { searchClaims: jest.fn().mockResolvedValue({ kind }) },
+      });
+      const result = await service.censusOpenClaims('acc-1', 'opened', null);
+      expect(result.stopReason).toBe('TERMINAL_AUTH_ERROR');
+      expect(result.failureCode).toBe(failureCode);
+      expect(httpClient.searchClaims).toHaveBeenCalledTimes(1);
+      expect(httpClient.fetchClaim).not.toHaveBeenCalled();
+    },
+  );
+});

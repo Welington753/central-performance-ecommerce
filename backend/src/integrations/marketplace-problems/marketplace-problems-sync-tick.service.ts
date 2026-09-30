@@ -4,6 +4,7 @@ import type { ProblemsSyncWorkerConfig } from './marketplace-problems-sync-worke
 import { MercadoLivreProblemsSyncService } from './mercado-livre-problems-sync.service';
 import { ProblemsSyncError } from './mercado-livre-problems-sync-preflight.util';
 import type {
+  ProblemsSyncFailureCode,
   ProblemsSyncResult,
   ProblemsSyncStopReason,
 } from './mercado-livre-problems-sync.types';
@@ -31,6 +32,8 @@ export interface ProblemsSyncTickReport {
   stopReason: ProblemsSyncStopReason;
   retryAfterMs: number | null;
   thrownCode: ProblemsSyncTickThrownCode | null;
+  /** Diagnóstico sanitizado da última etapa (operação + natureza do 401/403). */
+  failureCode: ProblemsSyncFailureCode | null;
   /** Novo cursor da janela de criação; `null` quando a criação não avançou. */
   creationCursorAdvancedTo: Date | null;
   /**
@@ -70,6 +73,7 @@ export class MarketplaceProblemsSyncTickService {
       stopReason: 'COMPLETED',
       retryAfterMs: null,
       thrownCode: null,
+      failureCode: null,
       creationCursorAdvancedTo: null,
       censusCompletedInFull: false,
       claimsProcessed: 0,
@@ -94,6 +98,7 @@ export class MarketplaceProblemsSyncTickService {
       remainingCalls -= result.httpCallsMade;
       report.stopReason = result.stopReason;
       report.retryAfterMs = result.retryAfterMs;
+      report.failureCode = result.failureCode;
       return result.stopReason === 'COMPLETED';
     };
 

@@ -54,6 +54,7 @@ function result(
     httpCallsMade: 0,
     pagesFetched: 0,
     nextWindowFrom: null,
+    failureCode: null,
     ...overrides,
   };
 }
@@ -191,6 +192,30 @@ describe('MarketplaceProblemsSyncTickService', () => {
       expect(report.retryAfterMs).toBe(
         stopReason === 'RATE_LIMITED' ? 7000 : null,
       );
+      expect(report.failureCode).toBeNull();
+    },
+  );
+
+  it.each([
+    ['TERMINAL_AUTH_ERROR', 'SEARCH_FORBIDDEN'],
+    ['CORE_COVERAGE_INCOMPLETE', 'CORE_FORBIDDEN'],
+  ] as const)(
+    'criação com %s propaga o diagnóstico %s ao relatório do tick',
+    async (stopReason, failureCode) => {
+      const { tick } = build({
+        syncCreationWindow: jest.fn().mockResolvedValue(
+          result({
+            complete: false,
+            stopReason,
+            failureCode,
+            nextWindowFrom: CURSOR.toISOString(),
+          }),
+        ),
+      });
+      const report = await tick.runTick(job(), NOW, CONFIG);
+      expect(report.stopReason).toBe(stopReason);
+      expect(report.failureCode).toBe(failureCode);
+      expect(report.creationCursorAdvancedTo).toBeNull();
     },
   );
 

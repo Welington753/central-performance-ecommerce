@@ -456,9 +456,20 @@ describe("/problemas", () => {
       render(<ProblemasPage />);
       const panel = await screen.findByRole("region", { name: "Sincronização de problemas" });
       expect(await within(panel).findByText(/^Autorização necessária/)).toBeInTheDocument();
-      expect(within(panel).getByText("Autorização expirada — reconecte a conta")).toBeInTheDocument();
+      expect(within(panel).getByText("Token expirado — reconecte a conta")).toBeInTheDocument();
       expect(within(panel).getByRole("button", { name: /Retomar/ })).toBeInTheDocument();
       expect(within(panel).queryByText(WORKER_DISABLED_TEXT)).not.toBeInTheDocument();
+    });
+
+    it("403 específico da API: nunca manda reconectar nem fala em token expirado", async () => {
+      setup({
+        permissions: ["problems.view", "problems.sync"],
+        sync: [syncStatus({ workerEnabled: true, jobStatus: "FAILED_AUTH", lastErrorCode: "SEARCH_FORBIDDEN" })],
+      });
+      render(<ProblemasPage />);
+      const panel = await screen.findByRole("region", { name: "Sincronização de problemas" });
+      expect(await within(panel).findByText("O Mercado Livre negou acesso à busca de reclamações desta conta")).toBeInTheDocument();
+      expect(within(panel).queryByText(/reconecte|expirad/i)).not.toBeInTheDocument();
     });
   });
 });

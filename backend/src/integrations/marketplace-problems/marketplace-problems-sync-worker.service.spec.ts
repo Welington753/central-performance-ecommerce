@@ -54,6 +54,7 @@ function okReport(
     stopReason: 'COMPLETED',
     retryAfterMs: null,
     thrownCode: null,
+    failureCode: null,
     creationCursorAdvancedTo: null,
     censusCompletedInFull: false,
     claimsProcessed: 1,

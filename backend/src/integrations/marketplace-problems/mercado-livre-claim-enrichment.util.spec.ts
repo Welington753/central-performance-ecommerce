@@ -15,27 +15,40 @@ function outcome(
 }
 
 describe('classifyClaimsHttpOutcome', () => {
-  it('classifica unauthorized como abort_auth', () => {
-    expect(classifyClaimsHttpOutcome(outcome('unauthorized'))).toEqual({
-      kind: 'abort_auth',
-    });
-  });
+  it.each([
+    ['core', 'CORE_UNAUTHORIZED'],
+    ['detail', 'DETAIL_UNAUTHORIZED'],
+    ['reputation', 'REPUTATION_UNAUTHORIZED'],
+    ['reason', 'REASON_UNAUTHORIZED'],
+  ] as const)(
+    'unauthorized em %s é abort_auth global com %s',
+    (operation, failureCode) => {
+      expect(
+        classifyClaimsHttpOutcome(outcome('unauthorized'), operation),
+      ).toEqual({ kind: 'abort_auth', failureCode });
+    },
+  );
 
-  it('classifica forbidden como abort_auth', () => {
-    expect(classifyClaimsHttpOutcome(outcome('forbidden'))).toEqual({
-      kind: 'abort_auth',
-    });
-  });
+  it.each(['core', 'detail', 'reputation', 'reason'] as const)(
+    'forbidden em %s é isolado (403 de um claim nunca derruba a conta)',
+    (operation) => {
+      expect(
+        classifyClaimsHttpOutcome(outcome('forbidden'), operation),
+      ).toEqual({ kind: 'isolated', forbidden: true });
+    },
+  );
 
   it('classifica rate_limited como abort_rate_limit preservando retryAfterMs', () => {
-    expect(classifyClaimsHttpOutcome(outcome('rate_limited'))).toEqual({
+    expect(classifyClaimsHttpOutcome(outcome('rate_limited'), 'core')).toEqual({
       kind: 'abort_rate_limit',
       retryAfterMs: 5000,
     });
   });
 
   it('classifica provider_unavailable como abort_provider', () => {
-    expect(classifyClaimsHttpOutcome(outcome('provider_unavailable'))).toEqual({
+    expect(
+      classifyClaimsHttpOutcome(outcome('provider_unavailable'), 'core'),
+    ).toEqual({
       kind: 'abort_provider',
     });
   });
@@ -43,14 +56,15 @@ describe('classifyClaimsHttpOutcome', () => {
   it.each(['not_found', 'invalid_response', 'invalid_request'] as const)(
     'classifica %s como isolated',
     (kind) => {
-      expect(classifyClaimsHttpOutcome(outcome(kind))).toEqual({
+      expect(classifyClaimsHttpOutcome(outcome(kind), 'detail')).toEqual({
         kind: 'isolated',
+        forbidden: false,
       });
     },
   );
 
   it('classifica success como ok', () => {
-    expect(classifyClaimsHttpOutcome(outcome('success'))).toEqual({
+    expect(classifyClaimsHttpOutcome(outcome('success'), 'core')).toEqual({
       kind: 'ok',
     });
   });
@@ -70,11 +84,15 @@ describe('classifySearchOutcome', () => {
     },
   );
 
-  it.each(['unauthorized', 'forbidden'] as const)(
-    'classifica %s como TERMINAL_AUTH_ERROR',
-    (kind) => {
+  it.each([
+    ['unauthorized', 'SEARCH_UNAUTHORIZED'],
+    ['forbidden', 'SEARCH_FORBIDDEN'],
+  ] as const)(
+    'classifica %s como TERMINAL_AUTH_ERROR com %s',
+    (kind, failureCode) => {
       expect(classifySearchOutcome(outcome(kind))).toEqual({
         kind: 'TERMINAL_AUTH_ERROR',
+        failureCode,
       });
     },
   );

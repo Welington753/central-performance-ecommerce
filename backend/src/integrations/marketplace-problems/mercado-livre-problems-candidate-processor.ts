@@ -40,7 +40,8 @@ export class MercadoLivreProblemsCandidateProcessor {
    * sucesso **e** `upsertProblem` terminou sem lançar — uma falha isolada de
    * `fetchClaim` marca `CORE_COVERAGE_INCOMPLETE` no resultado final (nunca
    * avança janela/cursor), mas o laço continua para os candidatos seguintes,
-   * aproveitando o lote.
+   * aproveitando o lote. 403 de `fetchClaim` segue esse caminho isolado
+   * (diagnóstico `CORE_FORBIDDEN`); 403 de enriquecimento vira `{fetched:false}`.
    */
   async processCandidates(
     ids: string[],
@@ -51,6 +52,7 @@ export class MercadoLivreProblemsCandidateProcessor {
     let remainingHttpCalls = remainingHttpCallsAtStart;
     const counters = emptyProblemsSyncCounters();
     let anyCoreFailure = false;
+    let anyCoreForbidden = false;
     const callsUsedSoFar = () => remainingHttpCallsAtStart - remainingHttpCalls;
 
     for (let i = 0; i < ids.length; i += 1) {
@@ -63,12 +65,13 @@ export class MercadoLivreProblemsCandidateProcessor {
       );
       remainingHttpCalls -= 1;
       counters.claimsProcessed += 1;
-      const claimClass = classifyClaimsHttpOutcome(claimOutcome);
+      const claimClass = classifyClaimsHttpOutcome(claimOutcome, 'core');
       const claimAbort = abortFrom(claimClass, callsUsedSoFar(), counters);
       if (claimAbort) return claimAbort;
       if (claimClass.kind === 'isolated') {
         counters.claimsFailed += 1;
         anyCoreFailure = true;
+        anyCoreForbidden ||= claimClass.forbidden;
         continue;
       }
       if (claimOutcome.kind !== 'success') {
@@ -86,7 +89,7 @@ export class MercadoLivreProblemsCandidateProcessor {
           externalClaimId,
         );
         remainingHttpCalls -= 1;
-        const detailClass = classifyClaimsHttpOutcome(detailOutcome);
+        const detailClass = classifyClaimsHttpOutcome(detailOutcome, 'detail');
         const detailAbort = abortFrom(detailClass, callsUsedSoFar(), counters);
         if (detailAbort) return detailAbort;
         if (detailClass.kind === 'isolated') {
@@ -120,7 +123,10 @@ export class MercadoLivreProblemsCandidateProcessor {
             externalClaimId,
           );
         remainingHttpCalls -= 1;
-        const reputationClass = classifyClaimsHttpOutcome(reputationOutcome);
+        const reputationClass = classifyClaimsHttpOutcome(
+          reputationOutcome,
+          'reputation',
+        );
         const reputationAbort = abortFrom(
           reputationClass,
           callsUsedSoFar(),
@@ -156,6 +162,7 @@ export class MercadoLivreProblemsCandidateProcessor {
           counters.claimsFailed += 1;
           return {
             stopReason: 'PERSISTENCE_UNAVAILABLE',
+            failureCode: null,
             retryAfterMs: null,
             callsUsed: callsUsedSoFar(),
             counters,
@@ -170,7 +177,10 @@ export class MercadoLivreProblemsCandidateProcessor {
             claim.reasonId,
           );
           remainingHttpCalls -= 1;
-          const reasonClass = classifyClaimsHttpOutcome(reasonOutcome);
+          const reasonClass = classifyClaimsHttpOutcome(
+            reasonOutcome,
+            'reason',
+          );
           const reasonAbort = abortFrom(
             reasonClass,
             callsUsedSoFar(),
@@ -198,6 +208,7 @@ export class MercadoLivreProblemsCandidateProcessor {
               counters.claimsFailed += 1;
               return {
                 stopReason: 'PERSISTENCE_UNAVAILABLE',
+                failureCode: null,
                 retryAfterMs: null,
                 callsUsed: callsUsedSoFar(),
                 counters,
@@ -225,6 +236,7 @@ export class MercadoLivreProblemsCandidateProcessor {
         counters.claimsFailed += 1;
         return {
           stopReason: 'PERSISTENCE_UNAVAILABLE',
+          failureCode: null,
           retryAfterMs: null,
           callsUsed: callsUsedSoFar(),
           counters,
@@ -234,6 +246,7 @@ export class MercadoLivreProblemsCandidateProcessor {
 
     return {
       stopReason: anyCoreFailure ? 'CORE_COVERAGE_INCOMPLETE' : 'COMPLETED',
+      failureCode: anyCoreForbidden ? 'CORE_FORBIDDEN' : null,
       retryAfterMs: null,
       callsUsed: callsUsedSoFar(),
       counters,
