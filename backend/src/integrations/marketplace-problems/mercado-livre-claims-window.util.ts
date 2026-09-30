@@ -47,58 +47,72 @@ export type CommitSafeSubWindowResult =
  * dividir, sempre tenta a metade ESQUERDA primeiro (progresso cronológico
  * determinístico), com `WINDOW_SPLIT_OVERLAP_MS` de sobreposição para nunca
  * perder um claim exatamente no ponto de divisão.
+ *
+ * Com VÁRIAS buscas (ex.: um status por busca), cada sub-janela candidata é
+ * sondada em todas, na ordem dada, e a decisão de caber é conjunta (soma dos
+ * totais e das páginas; teto de offset por busca): ou a sub-janela inteira é
+ * commitada com a união deduplicada de todas, ou nenhuma. Falha em qualquer
+ * busca interrompe sem commitar.
  */
 export async function commitSafeSubWindow(
-  fetchPage: FetchWindowPage,
+  fetchPages: FetchWindowPage | readonly FetchWindowPage[],
   window: WindowRange,
   remainingClaimBudget: number,
   remainingHttpCallBudget: number,
   minSplitMs: number,
 ): Promise<CommitSafeSubWindowResult> {
+  const fetchers = typeof fetchPages === 'function' ? [fetchPages] : fetchPages;
   let candidate = window;
   let remainingCalls = remainingHttpCallBudget;
   let callsUsed = 0;
+  const searchError = (
+    outcome: ClaimsHttpOutcome<SearchPageResult>,
+  ): CommitSafeSubWindowResult => ({
+    kind: 'search_error',
+    classification: classifySearchOutcome(outcome),
+    callsUsed,
+  });
 
   for (;;) {
-    if (remainingCalls < 1) {
+    if (remainingCalls < fetchers.length) {
       return { kind: 'call_budget_exhausted', callsUsed };
     }
 
-    const probe = await fetchPage(candidate, 0, PAGE_LIMIT);
-    remainingCalls -= 1;
-    callsUsed += 1;
-
-    if (probe.kind !== 'success') {
-      return {
-        kind: 'search_error',
-        classification: classifySearchOutcome(probe),
-        callsUsed,
-      };
+    const probes: SearchPageResult[] = [];
+    for (const fetchPage of fetchers) {
+      const probe = await fetchPage(candidate, 0, PAGE_LIMIT);
+      remainingCalls -= 1;
+      callsUsed += 1;
+      if (probe.kind !== 'success') return searchError(probe);
+      probes.push(probe.data);
     }
 
-    const total = probe.data.total;
-    const pagesNeeded = total > 0 ? Math.ceil(total / PAGE_LIMIT) : 0;
-    const additionalSearchCalls = Math.max(pagesNeeded - 1, 0);
-    const fitsCap = total <= MAX_OFFSET_PLUS_LIMIT - PAGE_LIMIT;
+    let total = 0;
+    let additionalSearchCalls = 0;
+    let fitsCap = true;
+    for (const probe of probes) {
+      const pagesNeeded =
+        probe.total > 0 ? Math.ceil(probe.total / PAGE_LIMIT) : 0;
+      total += probe.total;
+      additionalSearchCalls += Math.max(pagesNeeded - 1, 0);
+      fitsCap &&= probe.total <= MAX_OFFSET_PLUS_LIMIT - PAGE_LIMIT;
+    }
     const fitsClaimBudget = total <= remainingClaimBudget;
     const fitsCallReservation = additionalSearchCalls + total <= remainingCalls;
 
     if (fitsCap && fitsClaimBudget && fitsCallReservation) {
-      const ids = new Set<string>(probe.data.ids);
-      let offset = PAGE_LIMIT;
-      while (offset < total) {
-        const page = await fetchPage(candidate, offset, PAGE_LIMIT);
-        remainingCalls -= 1;
-        callsUsed += 1;
-        if (page.kind !== 'success') {
-          return {
-            kind: 'search_error',
-            classification: classifySearchOutcome(page),
-            callsUsed,
-          };
+      const ids = new Set<string>();
+      for (const [index, fetchPage] of fetchers.entries()) {
+        for (const id of probes[index].ids) ids.add(id);
+        let offset = PAGE_LIMIT;
+        while (offset < probes[index].total) {
+          const page = await fetchPage(candidate, offset, PAGE_LIMIT);
+          remainingCalls -= 1;
+          callsUsed += 1;
+          if (page.kind !== 'success') return searchError(page);
+          for (const id of page.data.ids) ids.add(id);
+          offset += PAGE_LIMIT;
         }
-        for (const id of page.data.ids) ids.add(id);
-        offset += PAGE_LIMIT;
       }
       // Confirmação defensiva (sempre verdadeira por construção: a reserva
       // acima já garantiu `total` chamadas de fetchClaim disponíveis após a

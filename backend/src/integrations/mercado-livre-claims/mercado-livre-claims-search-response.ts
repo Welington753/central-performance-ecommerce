@@ -39,9 +39,13 @@ export interface ClaimsSearchPaging {
   limit: number;
 }
 
+/** Estágio em que o validador da busca reprovou o corpo (só para diagnóstico). */
+export type ClaimsSearchValidationStage =
+  'envelope' | 'data' | 'paging' | 'item';
+
 export type ClaimsSearchValidation =
   | { valid: true; data: RawClaimSummary[]; paging: ClaimsSearchPaging }
-  | { valid: false };
+  | { valid: false; stage?: ClaimsSearchValidationStage };
 
 export function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -168,16 +172,16 @@ function validatePaging(raw: unknown): ClaimsSearchPaging | null {
 export function validateClaimsSearchResponseBody(
   body: unknown,
 ): ClaimsSearchValidation {
-  if (!isRecord(body)) return { valid: false };
-  if (!Array.isArray(body.data)) return { valid: false };
+  if (!isRecord(body)) return { valid: false, stage: 'envelope' };
+  if (!Array.isArray(body.data)) return { valid: false, stage: 'data' };
 
   const paging = validatePaging(body.paging);
-  if (paging === null) return { valid: false };
+  if (paging === null) return { valid: false, stage: 'paging' };
 
   const data: RawClaimSummary[] = [];
   for (const rawClaim of body.data) {
     const claim = validateClaimCore(rawClaim);
-    if (claim === null) return { valid: false };
+    if (claim === null) return { valid: false, stage: 'item' };
     data.push(claim);
   }
 

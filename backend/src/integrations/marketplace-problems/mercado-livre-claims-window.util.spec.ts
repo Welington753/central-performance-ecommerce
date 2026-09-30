@@ -290,6 +290,162 @@ describe('commitSafeSubWindow', () => {
   });
 });
 
+describe('commitSafeSubWindow com várias buscas (um status por busca) na MESMA janela', () => {
+  function recording(
+    answer: (
+      r: WindowRange,
+      offset: number,
+    ) => ClaimsHttpOutcome<SearchPageResult>,
+  ) {
+    const calls: Array<{ range: WindowRange; offset: number }> = [];
+    const fetchPage: FetchWindowPage = (r, offset) => {
+      calls.push({ range: r, offset });
+      return Promise.resolve(answer(r, offset));
+    };
+    return { fetchPage, calls };
+  }
+
+  it('sonda TODAS as buscas no mesmo range e commita a união deduplicada; callsUsed soma as duas', async () => {
+    const opened = recording(() => ok(['a', 'dup'], 2));
+    const closed = recording(() => ok(['dup', 'b'], 2));
+    const result = await commitSafeSubWindow(
+      [opened.fetchPage, closed.fetchPage],
+      range('2026-01-01T00:00:00.000Z', '2026-01-01T00:10:00.000Z'),
+      100,
+      100,
+      1,
+    );
+    expect(result).toMatchObject({ kind: 'committed', callsUsed: 2 });
+    if (result.kind === 'committed') {
+      expect([...result.ids].sort()).toEqual(['a', 'b', 'dup']);
+    }
+    expect(opened.calls).toHaveLength(1);
+    expect(closed.calls).toHaveLength(1);
+    expect(opened.calls[0].range).toEqual(closed.calls[0].range);
+  });
+
+  it('divisão e paginação valem para as duas buscas: toda subjanela sondada é consultada nos dois status', async () => {
+    const minSplitMs = 5000;
+    const big = (r: WindowRange) =>
+      r.to.getTime() - r.from.getTime() > 30 * 60 * 1000;
+    const page = (prefix: string) => (r: WindowRange, offset: number) =>
+      big(r)
+        ? ok([], 20000)
+        : ok(
+            Array.from(
+              { length: offset === 0 ? 100 : 20 },
+              (_, i) => `${prefix}-${offset + i}`,
+            ),
+            120,
+          );
+    const opened = recording(page('o'));
+    const closed = recording(page('c'));
+    const result = await commitSafeSubWindow(
+      [opened.fetchPage, closed.fetchPage],
+      range('2026-01-01T00:00:00.000Z', '2026-01-01T02:00:00.000Z'),
+      1000,
+      1000,
+      minSplitMs,
+    );
+    expect(result.kind).toBe('committed');
+    if (result.kind === 'committed') expect(result.ids).toHaveLength(240);
+    const key = (c: { range: WindowRange; offset: number }) =>
+      `${c.range.from.toISOString()}|${c.range.to.toISOString()}|${c.offset}`;
+    expect(opened.calls.map(key)).toEqual(closed.calls.map(key));
+    expect(opened.calls.filter((c) => c.offset === 100)).toHaveLength(1);
+  });
+
+  it.each([
+    ['primeira', 0],
+    ['segunda', 1],
+  ])(
+    'falha só na %s busca -> search_error, nunca commita a janela',
+    async (_label, failingIndex) => {
+      const fetchers = [0, 1].map((i) =>
+        recording(() =>
+          i === failingIndex ? { kind: 'invalid_request' } : ok(['x'], 1),
+        ),
+      );
+      const result = await commitSafeSubWindow(
+        fetchers.map((f) => f.fetchPage),
+        range('2026-01-01T00:00:00.000Z', '2026-01-01T00:10:00.000Z'),
+        100,
+        100,
+        1,
+      );
+      expect(result.kind).toBe('search_error');
+      expect(result.callsUsed).toBe(failingIndex + 1);
+    },
+  );
+
+  it('falha na paginação da segunda busca -> search_error', async () => {
+    const opened = recording(() => ok(['o'], 1));
+    const closed = recording((_r, offset) =>
+      offset === 0
+        ? ok(
+            Array.from({ length: 100 }, (_, i) => `c${i}`),
+            150,
+          )
+        : { kind: 'provider_unavailable' },
+    );
+    const result = await commitSafeSubWindow(
+      [opened.fetchPage, closed.fetchPage],
+      range('2026-01-01T00:00:00.000Z', '2026-01-01T00:10:00.000Z'),
+      1000,
+      1000,
+      1,
+    );
+    expect(result).toMatchObject({ kind: 'search_error', callsUsed: 3 });
+  });
+
+  it('reserva de chamadas soma os totais das duas buscas: cabe exato commita, 1 a menos não commita', async () => {
+    const fetchers = () => [
+      recording(() => ok(['o1', 'o2'], 2)).fetchPage,
+      recording(() => ok(['c1', 'c2', 'c3'], 3)).fetchPage,
+    ];
+    const window = range(
+      '2026-01-01T00:00:00.000Z',
+      '2026-01-01T00:00:04.000Z',
+    );
+    // 2 sondas + 5 fetchClaim reservados = 7.
+    const fits = await commitSafeSubWindow(fetchers(), window, 100, 7, 5000);
+    expect(fits).toMatchObject({ kind: 'committed', callsUsed: 2 });
+    const short = await commitSafeSubWindow(fetchers(), window, 100, 6, 5000);
+    expect(short.kind).toBe('call_budget_exhausted');
+    const claims = await commitSafeSubWindow(fetchers(), window, 4, 100, 5000);
+    expect(claims.kind).toBe('claim_budget_exhausted');
+  });
+
+  it('orçamento menor que o número de buscas -> call_budget_exhausted sem sondar nenhuma', async () => {
+    const opened = recording(() => ok([], 0));
+    const closed = recording(() => ok([], 0));
+    const result = await commitSafeSubWindow(
+      [opened.fetchPage, closed.fetchPage],
+      range('2026-01-01T00:00:00.000Z', '2026-01-01T00:00:10.000Z'),
+      100,
+      1,
+      1,
+    );
+    expect(result).toEqual({ kind: 'call_budget_exhausted', callsUsed: 0 });
+    expect(opened.calls).toHaveLength(0);
+    expect(closed.calls).toHaveLength(0);
+  });
+
+  it('teto de offset é por busca: uma só acima do teto no minSplitMs -> safety_limit_reached', async () => {
+    const result = await commitSafeSubWindow(
+      [
+        recording(() => ok([], 5)).fetchPage,
+        recording(() => ok([], 50000)).fetchPage,
+      ],
+      range('2026-01-01T00:00:00.000Z', '2026-01-01T02:00:00.000Z'),
+      1000000,
+      1000000,
+      5000,
+    );
+    expect(result.kind).toBe('safety_limit_reached');
+  });
+});
+
 describe('progresso multi-execução (sem starvation, orçamento de chamadas pequeno)', () => {
   it('cobre todos os claims eventualmente, avançando nextWindowFrom a cada execução', async () => {
     const windowFromMs = new Date('2026-01-01T00:00:00.000Z').getTime();

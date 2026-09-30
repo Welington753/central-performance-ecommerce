@@ -282,7 +282,8 @@ describe('MercadoLivreProblemsSyncService.syncCreationWindow — fluxo feliz e c
     expect(result.reasonCacheRefreshed).toBe(1);
     expect(result.complete).toBe(true);
     expect(result.stopReason).toBe('COMPLETED');
-    expect(httpClient.searchClaims).toHaveBeenCalledTimes(1);
+    // 1 busca por status (opened + closed) na mesma janela.
+    expect(httpClient.searchClaims).toHaveBeenCalledTimes(2);
   });
 
   it('reason cache fresco: fetchClaimReason NUNCA é chamado', async () => {
@@ -621,14 +622,20 @@ describe('MercadoLivreProblemsSyncService.syncCreationWindow — fluxo feliz e c
       );
     const { service, httpClient, persistence } = build({
       httpClient: {
-        searchClaims: jest.fn().mockResolvedValue(claimSearchSuccess(ids)),
+        searchClaims: jest
+          .fn()
+          .mockImplementation((input: SearchClaimsInput) =>
+            Promise.resolve(
+              claimSearchSuccess(input.status === 'closed' ? ids : []),
+            ),
+          ),
         fetchClaim: fetchClaimMock,
       },
     });
-    // 1 chamada de busca + 3 fetchClaim = 4 chamadas — orçamento exato, zero sobra.
+    // 2 buscas (opened + closed) + 3 fetchClaim = 5 chamadas — orçamento exato, zero sobra.
     const result = await service.syncCreationWindow('acc-1', window, {
       maxClaims: 10,
-      maxHttpCalls: 4,
+      maxHttpCalls: 5,
     });
 
     expect(persistence.upsertProblem).toHaveBeenCalledTimes(3);
@@ -800,5 +807,291 @@ describe('MercadoLivreProblemsSyncService.censusOpenClaims', () => {
     );
     expect(result.coverageFrom).toBe(coverageFrom.toISOString());
     expect(httpClient.searchClaims).toHaveBeenCalled();
+  });
+});
+
+describe('MercadoLivreProblemsSyncService — status explícito em toda busca (incidente: busca sem status = 400)', () => {
+  const window = {
+    from: new Date('2026-08-01T00:00:00.000Z'),
+    to: new Date('2026-08-01T02:00:00.000Z'),
+  };
+  const searchCalls = (mock: jest.Mock) =>
+    (mock.mock.calls as SearchClaimsInput[][]).map(([input]) => input);
+
+  /** Mock de busca por status: cada status devolve só os seus ids (paginados). */
+  const searchByStatus = (
+    idsByStatus: Record<string, string[]>,
+    fail: Record<string, ClaimsHttpOutcome<never>> = {},
+  ) =>
+    jest.fn().mockImplementation((input: SearchClaimsInput) => {
+      const failure = input.status ? fail[input.status] : undefined;
+      if (failure) return Promise.resolve(failure);
+      const ids = idsByStatus[input.status ?? ''] ?? [];
+      return Promise.resolve(
+        ok({
+          valid: true,
+          data: ids
+            .slice(input.offset, input.offset + input.limit)
+            .map((id) => rawClaim(id, { status: input.status })),
+          paging: { total: ids.length, offset: input.offset, limit: 100 },
+        }),
+      );
+    });
+  const fetchAny = () =>
+    jest
+      .fn()
+      .mockImplementation((_t: string, id: string) =>
+        Promise.resolve(ok({ claim: rawClaim(id) })),
+      );
+  const creationKey = (input: SearchClaimsInput) =>
+    `${input.dateRange!.after.toISOString()}|${input.dateRange!.before.toISOString()}|${input.offset}`;
+
+  it('criação consulta opened E closed (com range) em TODA janela, inclusive após divisão e paginação', async () => {
+    const opened = Array.from({ length: 120 }, (_, i) => `o${i}`);
+    const closed = Array.from({ length: 130 }, (_, i) => `c${i}`);
+    const inner = searchByStatus({ opened, closed });
+    const { service, httpClient, persistence } = build({
+      httpClient: {
+        // Janela inteira acima do teto: força a divisão em subjanelas.
+        searchClaims: jest
+          .fn()
+          .mockImplementation((input: SearchClaimsInput) =>
+            input.dateRange!.before.getTime() -
+              input.dateRange!.after.getTime() >
+            30 * 60 * 1000
+              ? Promise.resolve(claimSearchSuccess([], 999999))
+              : (inner(input) as Promise<unknown>),
+          ),
+        fetchClaim: fetchAny(),
+      },
+    });
+
+    const result = await service.syncCreationWindow('acc-1', window, {
+      maxClaims: 1000,
+      maxHttpCalls: 1000,
+    });
+
+    const calls = searchCalls(httpClient.searchClaims);
+    for (const input of calls) {
+      expect(input.dateRange).toBeDefined();
+      expect(['opened', 'closed']).toContain(input.status);
+      expect(input.operation).toBe(
+        input.status === 'opened'
+          ? 'search_creation_opened'
+          : 'search_creation_closed',
+      );
+    }
+    const openedKeys = calls
+      .filter((c) => c.status === 'opened')
+      .map(creationKey);
+    const closedKeys = calls
+      .filter((c) => c.status === 'closed')
+      .map(creationKey);
+    // Mesmas subjanelas e mesmos offsets nos dois status; houve divisão e paginação.
+    expect(openedKeys).toEqual(closedKeys);
+    expect(
+      new Set(openedKeys.map((k) => k.split('|')[1])).size,
+    ).toBeGreaterThan(1);
+    expect(openedKeys.some((k) => k.endsWith('|100'))).toBe(true);
+    expect(result.stopReason).toBe('COMPLETED');
+    expect(result.claimsFound).toBe(250);
+    expect(persistence.upsertProblem).toHaveBeenCalledTimes(250);
+    expect(result.nextWindowFrom).not.toBe(window.from.toISOString());
+  });
+
+  it('claim opened criado na janela é persistido (core) antes de a janela avançar', async () => {
+    const { service, persistence } = build({
+      httpClient: {
+        searchClaims: searchByStatus({ opened: ['o1'], closed: [] }),
+        fetchClaim: fetchAny(),
+      },
+    });
+    const result = await service.syncCreationWindow('acc-1', window);
+    expect(persistence.upsertProblem).toHaveBeenCalledTimes(1);
+    expect(
+      lastCallArg<UpsertProblemInput>(persistence.upsertProblem),
+    ).toMatchObject({ externalClaimId: 'o1' });
+    expect(result.stopReason).toBe('COMPLETED');
+    expect(result.nextWindowFrom).not.toBe(window.from.toISOString());
+  });
+
+  it('candidato repetido nos dois status recebe UM único fetchClaim/upsert', async () => {
+    const fetchClaim = fetchAny();
+    const { service, persistence } = build({
+      httpClient: {
+        searchClaims: searchByStatus({
+          opened: ['dup', 'o1'],
+          closed: ['dup', 'c1'],
+        }),
+        fetchClaim,
+      },
+    });
+    const result = await service.syncCreationWindow('acc-1', window);
+    const fetchedIds = (fetchClaim.mock.calls as string[][]).map((c) => c[1]);
+    expect(fetchedIds.sort()).toEqual(['c1', 'dup', 'o1']);
+    expect(persistence.upsertProblem).toHaveBeenCalledTimes(3);
+    expect(result.claimsFound).toBe(3);
+    expect(result.stopReason).toBe('COMPLETED');
+  });
+
+  it('censo envia status=opened em TODA página (sonda, paginação e divisão por coverageFrom)', async () => {
+    const ids = Array.from({ length: 150 }, (_, i) => `c${i}`);
+    const { service, httpClient } = build({
+      httpClient: {
+        searchClaims: jest.fn().mockResolvedValue(claimSearchSuccess(ids)),
+        fetchClaim: jest.fn().mockResolvedValue(notFound()),
+      },
+    });
+    await service.censusOpenClaims('acc-1', 'opened', null, {
+      maxClaims: 1000,
+      maxHttpCalls: 1000,
+    });
+
+    const { service: split, httpClient: splitHttp } = build({
+      httpClient: {
+        searchClaims: jest
+          .fn()
+          .mockImplementation((input: SearchClaimsInput) =>
+            Promise.resolve(
+              input.dateRange
+                ? claimSearchSuccess([])
+                : claimSearchSuccess([], 999999),
+            ),
+          ),
+      },
+    });
+    await split.censusOpenClaims(
+      'acc-1',
+      'opened',
+      new Date('2026-08-01T00:00:00.000Z'),
+      { maxClaims: 1000, maxHttpCalls: 1000 },
+    );
+
+    const calls = [
+      ...searchCalls(httpClient.searchClaims),
+      ...searchCalls(splitHttp.searchClaims),
+    ];
+    expect(calls.length).toBeGreaterThanOrEqual(3);
+    for (const input of calls) {
+      expect(input.status).toBe('opened');
+      expect(input.operation).toBe('search_census');
+    }
+  });
+
+  it.each([
+    ['closed', 'invalid_request (HTTP 400)', { kind: 'invalid_request' }],
+    ['closed', 'invalid_response', { kind: 'invalid_response' }],
+    ['closed', '5xx', { kind: 'provider_unavailable' }],
+    ['opened', 'invalid_request (HTTP 400)', { kind: 'invalid_request' }],
+    ['opened', 'invalid_response', { kind: 'invalid_response' }],
+    ['opened', '5xx', { kind: 'provider_unavailable' }],
+  ] as const)(
+    'falha SÓ na busca %s com %s: nada processado e janela NÃO avança',
+    async (failingStatus, _label, outcome) => {
+      const { service, httpClient, persistence } = build({
+        httpClient: {
+          searchClaims: searchByStatus(
+            { opened: ['o1'], closed: ['c1'] },
+            { [failingStatus]: outcome },
+          ),
+          fetchClaim: fetchAny(),
+        },
+      });
+      const result = await service.syncCreationWindow('acc-1', window);
+      expect(result.stopReason).toBe(
+        outcome.kind === 'provider_unavailable'
+          ? 'PROVIDER_UNAVAILABLE'
+          : 'SEARCH_CONTRACT_ERROR',
+      );
+      expect(result.complete).toBe(false);
+      expect(result.claimsFound).toBe(0);
+      expect(result.nextWindowFrom).toBe(window.from.toISOString());
+      expect(httpClient.fetchClaim).not.toHaveBeenCalled();
+      expect(persistence.upsertProblem).not.toHaveBeenCalled();
+    },
+  );
+
+  it('safety limit em um dos status no minSplitMs: janela NÃO avança, nada processado', async () => {
+    const { service, httpClient } = build({
+      httpClient: {
+        searchClaims: jest
+          .fn()
+          .mockImplementation((input: SearchClaimsInput) =>
+            Promise.resolve(
+              input.status === 'opened'
+                ? claimSearchSuccess([], 999999)
+                : claimSearchSuccess([]),
+            ),
+          ),
+      },
+    });
+    const result = await service.syncCreationWindow('acc-1', window, {
+      maxClaims: 1000000,
+      maxHttpCalls: 1000000,
+    });
+    expect(result.stopReason).toBe('SAFETY_LIMIT_REACHED');
+    expect(result.nextWindowFrom).toBe(window.from.toISOString());
+    expect(httpClient.fetchClaim).not.toHaveBeenCalled();
+  });
+
+  it('repetição após falha parcial de core não duplica: mesmos ids reprocessados de forma idempotente', async () => {
+    let failC1 = true;
+    const fetchClaim = jest
+      .fn()
+      .mockImplementation((_t: string, id: string) =>
+        Promise.resolve(
+          id === 'c1' && failC1
+            ? invalidResponse()
+            : ok({ claim: rawClaim(id) }),
+        ),
+      );
+    const { service, persistence } = build({
+      httpClient: {
+        searchClaims: searchByStatus({ opened: ['o1'], closed: ['c1'] }),
+        fetchClaim,
+      },
+    });
+    const first = await service.syncCreationWindow('acc-1', window);
+    expect(first.nextWindowFrom).toBe(window.from.toISOString());
+    failC1 = false;
+    const second = await service.syncCreationWindow('acc-1', window);
+    expect(second.stopReason).toBe('COMPLETED');
+    const upserted = (
+      persistence.upsertProblem.mock.calls as UpsertProblemInput[][]
+    ).map(([input]) => input.externalClaimId);
+    // o1 regravado (idempotente, mesma chave) + c1 finalmente persistido; nunca 2x por execução.
+    expect(upserted.sort()).toEqual(['c1', 'o1', 'o1']);
+  });
+
+  it('orçamento inclui as buscas dos DOIS status: 2 buscas + 1 fetchClaim por candidato único, exatos', async () => {
+    const run = (maxHttpCalls: number) => {
+      const built = build({
+        httpClient: {
+          searchClaims: searchByStatus({
+            opened: ['o1', 'o2'],
+            closed: ['c1', 'c2', 'c3'],
+          }),
+          fetchClaim: fetchAny(),
+        },
+      });
+      return built.service
+        .syncCreationWindow('acc-1', window, { maxClaims: 5, maxHttpCalls })
+        .then((result) => ({ result, ...built }));
+    };
+
+    const exact = await run(7);
+    expect(exact.result.stopReason).toBe('COMPLETED');
+    expect(exact.result.httpCallsMade).toBe(7);
+    expect(exact.result.pagesFetched).toBe(2);
+    expect(exact.result.claimsFound).toBe(5);
+    expect(exact.persistence.upsertProblem).toHaveBeenCalledTimes(5);
+    // Reserva dos cores nunca é roubada por enriquecimento.
+    expect(exact.httpClient.fetchClaimDetail).not.toHaveBeenCalled();
+
+    const short = await run(6);
+    expect(short.result.stopReason).toBe('CALL_BUDGET_EXHAUSTED');
+    expect(short.result.nextWindowFrom).toBe(window.from.toISOString());
+    expect(short.httpClient.fetchClaim).not.toHaveBeenCalled();
+    expect(short.persistence.upsertProblem).not.toHaveBeenCalled();
   });
 });

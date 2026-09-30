@@ -43,6 +43,9 @@ export type {
   ProblemsSyncStopReason,
 } from './mercado-livre-problems-sync.types';
 
+/** Status de TODA sub-janela de criação (sem `status` = 400 em produção); `opened` primeiro: claim que fecha entre as buscas reaparece em `closed`. */
+export const CREATION_WINDOW_STATUSES = ['opened', 'closed'] as const;
+
 /**
  * Orquestração de sincronização do Mercado Livre Claims (CP2-B) — descobre
  * quais claims existem/mudaram e alimenta a persistência do CP2-A
@@ -89,19 +92,24 @@ export class MercadoLivreProblemsSyncService {
     const { accessToken, externalSellerId } =
       await this.preflight.resolveAccountAndToken(accountId);
 
-    const fetchPage: FetchWindowPage = async (range, offset, limit) => {
-      const outcome = await this.httpClient.searchClaims({
-        accessToken,
-        sellerUserId: externalSellerId,
-        dateRange: { after: range.from, before: range.to },
-        offset,
-        limit,
-      });
-      return toSearchPageOutcome(outcome);
-    };
+    const fetchPages = CREATION_WINDOW_STATUSES.map(
+      (status): FetchWindowPage =>
+        async (range, offset, limit) =>
+          toSearchPageOutcome(
+            await this.httpClient.searchClaims({
+              accessToken,
+              sellerUserId: externalSellerId,
+              status,
+              dateRange: { after: range.from, before: range.to },
+              offset,
+              limit,
+              operation: `search_creation_${status}`,
+            }),
+          ),
+    );
 
     const commit = await commitSafeSubWindow(
-      fetchPage,
+      fetchPages,
       window,
       maxClaims,
       maxHttpCalls,
@@ -143,6 +151,7 @@ export class MercadoLivreProblemsSyncService {
       status,
       offset: 0,
       limit: SEARCH_PAGE_LIMIT,
+      operation: 'search_census',
     });
     let callsUsed = 1;
     const probe = toSearchPageOutcome(probeRaw);
@@ -177,6 +186,7 @@ export class MercadoLivreProblemsSyncService {
           status,
           offset,
           limit: SEARCH_PAGE_LIMIT,
+          operation: 'search_census',
         });
         callsUsed += 1;
         const page = toSearchPageOutcome(pageRaw);
@@ -234,6 +244,7 @@ export class MercadoLivreProblemsSyncService {
         dateRange: { after: range.from, before: range.to },
         offset,
         limit,
+        operation: 'search_census',
       });
       return toSearchPageOutcome(outcome);
     };
