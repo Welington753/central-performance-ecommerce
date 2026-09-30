@@ -674,4 +674,67 @@ describe('MarketplaceProblemsPersistenceService (Postgres real)', () => {
       ).rejects.toThrow();
     });
   });
+
+  describe('findProblemsNeedingRefresh (CP2-B, item 7 do plano)', () => {
+    it('devolve só linhas com resolution_date IS NULL', async () => {
+      const openInput = baseInput();
+      const closedInput = baseInput({
+        resolutionDate: new Date('2026-01-11T00:00:00.000Z'),
+      });
+      const openResult = await service.upsertProblem(openInput);
+      const closedResult = await service.upsertProblem(closedInput);
+      const rows = await service.findProblemsNeedingRefresh(accountId, 100);
+      const ids = rows.map((r) => r.externalClaimId);
+      expect(ids).toContain(openInput.externalClaimId);
+      expect(ids).not.toContain(closedInput.externalClaimId);
+      expect(openResult.accepted).toBe(true);
+      expect(closedResult.accepted).toBe(true);
+    });
+
+    it('respeita LIMIT', async () => {
+      await service.upsertProblem(baseInput());
+      await service.upsertProblem(baseInput());
+      await service.upsertProblem(baseInput());
+      const rows = await service.findProblemsNeedingRefresh(accountId, 2);
+      expect(rows).toHaveLength(2);
+    });
+
+    it('ordena por last_checked_at ASC NULLS FIRST, id ASC', async () => {
+      // 1º upsert grava last_checked_at = now() (já "verificado"); o 2º tem
+      // o `last_checked_at` zerado manualmente depois (simula "nunca
+      // verificado" — NULLS FIRST deve colocá-lo antes do 1º).
+      const firstInput = baseInput();
+      const secondInput = baseInput();
+      await service.upsertProblem(firstInput);
+      const second = await service.upsertProblem(secondInput);
+      await dataSource.query(
+        `UPDATE marketplace_problems SET last_checked_at = NULL WHERE id = $1`,
+        [second.id],
+      );
+
+      const rows = await service.findProblemsNeedingRefresh(accountId, 100);
+      const secondPos = rows.findIndex(
+        (r) => r.externalClaimId === secondInput.externalClaimId,
+      );
+      const firstPos = rows.findIndex(
+        (r) => r.externalClaimId === firstInput.externalClaimId,
+      );
+      expect(secondPos).toBeGreaterThanOrEqual(0);
+      expect(firstPos).toBeGreaterThanOrEqual(0);
+      expect(secondPos).toBeLessThan(firstPos);
+    });
+
+    it('nunca devolve linha de outra conta', async () => {
+      const [otherAccount] = await dataSource.query<Array<{ id: string }>>(
+        `INSERT INTO marketplace_accounts (marketplace, nickname, encrypted_access_token, encrypted_refresh_token, encrypted_credential_metadata)
+         VALUES ('MERCADO_LIVRE', $1, 'x', 'x', 'x') RETURNING id`,
+        [`conta-${randomUUID()}`],
+      );
+      await service.upsertProblem(
+        baseInput({ marketplaceAccountId: otherAccount.id }),
+      );
+      const rows = await service.findProblemsNeedingRefresh(accountId, 100);
+      expect(rows).toHaveLength(0);
+    });
+  });
 });

@@ -194,4 +194,25 @@ export class MarketplaceProblemsPersistenceService {
       await queryRunner.release();
     }
   }
+
+  /**
+   * Fila de refresh do CP2-B (`MercadoLivreProblemsSyncService.
+   * refreshNonTerminalBatch`) — usa o índice
+   * `IX_marketplace_problems_refresh_queue` do CP2-A, sem cursor persistido:
+   * todo `upsertProblem` aceito grava `last_checked_at = now()`, o que já
+   * manda o registro para o fim da fila sozinho.
+   */
+  async findProblemsNeedingRefresh(
+    accountId: string,
+    limit: number,
+  ): Promise<Array<{ externalClaimId: string }>> {
+    return this.dataSource.query(
+      `SELECT external_claim_id AS "externalClaimId"
+         FROM marketplace_problems
+        WHERE marketplace_account_id = $1 AND resolution_date IS NULL
+        ORDER BY last_checked_at ASC NULLS FIRST, id ASC
+        LIMIT $2`,
+      [accountId, limit],
+    );
+  }
 }
