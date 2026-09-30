@@ -1,87 +1,47 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Marketplace } from '../contracts/marketplace.enum';
 import { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-livre-claims-http.client';
-import type { RawClaimReputationImpact } from '../mercado-livre-claims/mercado-livre-claim-reputation-response';
-import type { RawClaimDetailInfo } from '../mercado-livre-claims/mercado-livre-claim-detail-response';
 import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import {
-  mapClaimToProblemInput,
-  type FetchOutcome,
-  type ProblemActionInput,
-} from './mercado-livre-claim-to-problem.mapper';
-import {
-  classifyClaimsHttpOutcome,
   classifySearchOutcome,
-  flattenDetailActions,
-  abortFrom,
   stopReasonFromSearchClassification,
   toSearchPageOutcome,
   assertValidSyncDate,
   assertPositiveIntegerSync,
   zeroProblemsSyncResult,
-  emptyProblemsSyncCounters,
-  type ProcessCandidatesOutcome,
 } from './mercado-livre-claim-enrichment.util';
 import {
   commitSafeSubWindow,
   computeAdvancedWindowFrom,
-  WINDOW_SPLIT_OVERLAP_MS,
   type FetchWindowPage,
   type WindowRange,
 } from './mercado-livre-claims-window.util';
 import { MercadoLivreProblemsSyncPreflight } from './mercado-livre-problems-sync-preflight.util';
+import { MercadoLivreProblemsCandidateProcessor } from './mercado-livre-problems-candidate-processor';
+import {
+  MAX_OFFSET_PLUS_LIMIT,
+  ProblemsSyncLimits,
+  SEARCH_PAGE_LIMIT,
+} from './mercado-livre-problems-sync-limits';
+import {
+  assembleResult,
+  resultFromOutcome,
+  resultFromUncommittedWindow,
+  type WindowCommit,
+} from './mercado-livre-problems-sync-result.util';
+import type {
+  ProblemsSyncBudget,
+  ProblemsSyncResult,
+  ProblemsSyncStopReason,
+} from './mercado-livre-problems-sync.types';
 
 export { ProblemsSyncError } from './mercado-livre-problems-sync-preflight.util';
-
-export interface ProblemsSyncBudget {
-  maxClaims?: number;
-  maxHttpCalls?: number;
-}
-
-export type ProblemsSyncStopReason =
-  | 'COMPLETED'
-  | 'CORE_COVERAGE_INCOMPLETE'
-  | 'CLAIM_BUDGET_EXHAUSTED'
-  | 'CALL_BUDGET_EXHAUSTED'
-  | 'SAFETY_LIMIT_REACHED'
-  | 'SEARCH_CONTRACT_ERROR'
-  | 'TERMINAL_AUTH_ERROR'
-  | 'RATE_LIMITED'
-  | 'PROVIDER_UNAVAILABLE'
-  | 'PERSISTENCE_UNAVAILABLE';
-
-export interface ProblemsSyncResult {
-  complete: boolean;
-  stopReason: ProblemsSyncStopReason;
-  retryAfterMs: number | null;
-  coverageFrom: string | null;
-  claimsFound: number;
-  claimsProcessed: number;
-  claimsCoreCovered: number;
-  claimsPersisted: number;
-  claimsPreserved: number;
-  claimsFailed: number;
-  detailFailures: number;
-  reputationFailures: number;
-  reasonLookupFailures: number;
-  reasonCacheRefreshed: number;
-  httpCallsMade: number;
-  pagesFetched: number;
-  nextWindowFrom: string | null;
-}
-
-const DEFAULT_MAX_CLAIMS = 200;
-const HARD_MAX_CLAIMS = 2000;
-const DEFAULT_MAX_HTTP_CALLS = 800;
-const HARD_MAX_HTTP_CALLS = 5000;
-// Bem acima de 2 * WINDOW_SPLIT_OVERLAP_MS (2000ms) — a recursão de divisão
-// de `commitSafeSubWindow` converge para esse ponto fixo, nunca abaixo dele.
-const DEFAULT_MIN_SPLIT_MS = 5 * 60 * 1000;
-const DEFAULT_REASON_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
-const SEARCH_PAGE_LIMIT = 100;
-const MAX_OFFSET_PLUS_LIMIT = 10000;
+export type {
+  ProblemsSyncBudget,
+  ProblemsSyncResult,
+  ProblemsSyncStopReason,
+} from './mercado-livre-problems-sync.types';
 
 /**
  * Orquestração de sincronização do Mercado Livre Claims (CP2-B) — descobre
@@ -93,62 +53,23 @@ const MAX_OFFSET_PLUS_LIMIT = 10000;
  */
 @Injectable()
 export class MercadoLivreProblemsSyncService {
+  private readonly limits: ProblemsSyncLimits;
+  private readonly processor: MercadoLivreProblemsCandidateProcessor;
+
   constructor(
     private readonly preflight: MercadoLivreProblemsSyncPreflight,
     private readonly httpClient: MercadoLivreClaimsHttpClient,
-    private readonly reasonCache: MarketplaceProblemReasonsCacheRepository,
+    reasonCache: MarketplaceProblemReasonsCacheRepository,
     private readonly persistence: MarketplaceProblemsPersistenceService,
-    private readonly configService: ConfigService,
-  ) {}
-
-  private get minSplitMs(): number {
-    const configured = this.configService.get<number>(
-      'PROBLEMS_SYNC_MIN_WINDOW_SPLIT_MS',
-      DEFAULT_MIN_SPLIT_MS,
+    configService: ConfigService,
+  ) {
+    this.limits = new ProblemsSyncLimits(configService);
+    this.processor = new MercadoLivreProblemsCandidateProcessor(
+      httpClient,
+      reasonCache,
+      persistence,
+      this.limits,
     );
-    return Number.isFinite(configured) && configured > 0
-      ? Math.floor(configured)
-      : DEFAULT_MIN_SPLIT_MS;
-  }
-
-  private get reasonCacheTtlMs(): number {
-    const configured = this.configService.get<number>(
-      'PROBLEMS_SYNC_REASON_CACHE_TTL_MS',
-      DEFAULT_REASON_CACHE_TTL_MS,
-    );
-    return Number.isFinite(configured) && configured > 0
-      ? Math.floor(configured)
-      : DEFAULT_REASON_CACHE_TTL_MS;
-  }
-
-  private resolveMaxClaims(value: number | undefined): number {
-    if (value === undefined) {
-      return this.configService.get<number>(
-        'PROBLEMS_SYNC_MAX_CLAIMS_PER_RUN',
-        DEFAULT_MAX_CLAIMS,
-      );
-    }
-    assertPositiveIntegerSync(value, 'budget.maxClaims');
-    return Math.min(value, HARD_MAX_CLAIMS);
-  }
-
-  private resolveMaxHttpCalls(value: number | undefined): number {
-    if (value === undefined) {
-      return this.configService.get<number>(
-        'PROBLEMS_SYNC_MAX_HTTP_CALLS_PER_RUN',
-        DEFAULT_MAX_HTTP_CALLS,
-      );
-    }
-    assertPositiveIntegerSync(value, 'budget.maxHttpCalls');
-    return Math.min(value, HARD_MAX_HTTP_CALLS);
-  }
-
-  private assertMinSplitInvariant(): void {
-    if (this.minSplitMs <= 2 * WINDOW_SPLIT_OVERLAP_MS) {
-      throw new Error(
-        'minSplitMs precisa ser maior que 2 * WINDOW_SPLIT_OVERLAP_MS.',
-      );
-    }
   }
 
   async syncCreationWindow(
@@ -161,9 +82,9 @@ export class MercadoLivreProblemsSyncService {
     if (window.from.getTime() >= window.to.getTime()) {
       throw new Error('window.from precisa ser anterior a window.to.');
     }
-    const maxClaims = this.resolveMaxClaims(budget.maxClaims);
-    const maxHttpCalls = this.resolveMaxHttpCalls(budget.maxHttpCalls);
-    this.assertMinSplitInvariant();
+    const maxClaims = this.limits.resolveMaxClaims(budget.maxClaims);
+    const maxHttpCalls = this.limits.resolveMaxHttpCalls(budget.maxHttpCalls);
+    this.limits.assertMinSplitInvariant();
 
     const { accessToken, externalSellerId } =
       await this.preflight.resolveAccountAndToken(accountId);
@@ -184,7 +105,7 @@ export class MercadoLivreProblemsSyncService {
       window,
       maxClaims,
       maxHttpCalls,
-      this.minSplitMs,
+      this.limits.minSplitMs,
     );
 
     return this.finishFromWindowCommit(
@@ -209,9 +130,9 @@ export class MercadoLivreProblemsSyncService {
     if (coverageFrom !== null) {
       assertValidSyncDate(coverageFrom, 'coverageFrom');
     }
-    const maxClaims = this.resolveMaxClaims(budget.maxClaims);
-    const maxHttpCalls = this.resolveMaxHttpCalls(budget.maxHttpCalls);
-    this.assertMinSplitInvariant();
+    const maxClaims = this.limits.resolveMaxClaims(budget.maxClaims);
+    const maxHttpCalls = this.limits.resolveMaxHttpCalls(budget.maxHttpCalls);
+    this.limits.assertMinSplitInvariant();
 
     const { accessToken, externalSellerId } =
       await this.preflight.resolveAccountAndToken(accountId);
@@ -275,13 +196,13 @@ export class MercadoLivreProblemsSyncService {
         offset += SEARCH_PAGE_LIMIT;
       }
       const idsArr = [...ids];
-      const outcome = await this.processCandidates(
+      const outcome = await this.processor.processCandidates(
         idsArr,
         accessToken,
         maxHttpCalls - callsUsed,
         accountId,
       );
-      return this.assembleResult(outcome, idsArr.length, callsUsed, null, null);
+      return assembleResult(outcome, idsArr.length, callsUsed, null, null);
     }
 
     if (coverageFrom === null) {
@@ -321,7 +242,7 @@ export class MercadoLivreProblemsSyncService {
       { from: coverageFrom, to: now },
       maxClaims,
       maxHttpCalls - callsUsed,
-      this.minSplitMs,
+      this.limits.minSplitMs,
     );
     return this.finishFromWindowCommit(
       commit,
@@ -340,8 +261,8 @@ export class MercadoLivreProblemsSyncService {
     budget: ProblemsSyncBudget = {},
   ): Promise<ProblemsSyncResult> {
     assertPositiveIntegerSync(batchSize, 'batchSize');
-    const maxClaims = this.resolveMaxClaims(budget.maxClaims);
-    const maxHttpCalls = this.resolveMaxHttpCalls(budget.maxHttpCalls);
+    const maxClaims = this.limits.resolveMaxClaims(budget.maxClaims);
+    const maxHttpCalls = this.limits.resolveMaxHttpCalls(budget.maxHttpCalls);
     const effectiveLimit = Math.min(batchSize, maxClaims, maxHttpCalls);
 
     const { accessToken } =
@@ -365,17 +286,17 @@ export class MercadoLivreProblemsSyncService {
     }
 
     const ids = rows.map((row) => row.externalClaimId);
-    const outcome = await this.processCandidates(
+    const outcome = await this.processor.processCandidates(
       ids,
       accessToken,
       maxHttpCalls,
       accountId,
     );
-    return this.assembleResult(outcome, ids.length, 0, null, null);
+    return assembleResult(outcome, ids.length, 0, null, null);
   }
 
   private async finishFromWindowCommit(
-    commit: Awaited<ReturnType<typeof commitSafeSubWindow>>,
+    commit: WindowCommit,
     window: WindowRange,
     accessToken: string,
     accountId: string,
@@ -388,14 +309,14 @@ export class MercadoLivreProblemsSyncService {
       // aqui é >= commit.ids.length (reserva de 1 fetchClaim por candidato).
       const remainingForProcessing =
         maxHttpCalls - extraCallsUsed - commit.callsUsed;
-      const outcome = await this.processCandidates(
+      const outcome = await this.processor.processCandidates(
         commit.ids,
         accessToken,
         remainingForProcessing,
         accountId,
       );
       return {
-        ...this.resultFromOutcome(outcome),
+        ...resultFromOutcome(outcome),
         coverageFrom,
         claimsFound: commit.ids.length,
         httpCallsMade: extraCallsUsed + commit.callsUsed + outcome.callsUsed,
@@ -407,288 +328,11 @@ export class MercadoLivreProblemsSyncService {
       };
     }
 
-    const totalCalls = extraCallsUsed + commit.callsUsed;
-    if (commit.kind === 'search_error') {
-      const { stopReason, retryAfterMs } = stopReasonFromSearchClassification(
-        commit.classification,
-      );
-      return zeroProblemsSyncResult(
-        stopReason,
-        retryAfterMs,
-        totalCalls,
-        totalCalls,
-        coverageFrom,
-        window.from.toISOString(),
-      );
-    }
-    const stopReason: ProblemsSyncStopReason =
-      commit.kind === 'safety_limit_reached'
-        ? 'SAFETY_LIMIT_REACHED'
-        : commit.kind === 'claim_budget_exhausted'
-          ? 'CLAIM_BUDGET_EXHAUSTED'
-          : 'CALL_BUDGET_EXHAUSTED';
-    return zeroProblemsSyncResult(
-      stopReason,
-      null,
-      totalCalls,
-      totalCalls,
+    return resultFromUncommittedWindow(
+      commit,
+      window,
       coverageFrom,
-      window.from.toISOString(),
+      extraCallsUsed + commit.callsUsed,
     );
-  }
-
-  /** Campos comuns entre `finishFromWindowCommit` (janela commitada) e
-   * `assembleResult` (censo direto/refresh) — nunca duplica a leitura dos 9
-   * contadores em 2 lugares. */
-  private resultFromOutcome(
-    outcome: ProcessCandidatesOutcome,
-  ): Omit<
-    ProblemsSyncResult,
-    | 'coverageFrom'
-    | 'claimsFound'
-    | 'httpCallsMade'
-    | 'pagesFetched'
-    | 'nextWindowFrom'
-  > {
-    return {
-      complete: outcome.stopReason === 'COMPLETED',
-      stopReason: outcome.stopReason,
-      retryAfterMs: outcome.retryAfterMs,
-      claimsProcessed: outcome.counters.claimsProcessed,
-      claimsCoreCovered: outcome.counters.claimsCoreCovered,
-      claimsPersisted: outcome.counters.claimsPersisted,
-      claimsPreserved: outcome.counters.claimsPreserved,
-      claimsFailed: outcome.counters.claimsFailed,
-      detailFailures: outcome.counters.detailFailures,
-      reputationFailures: outcome.counters.reputationFailures,
-      reasonLookupFailures: outcome.counters.reasonLookupFailures,
-      reasonCacheRefreshed: outcome.counters.reasonCacheRefreshed,
-    };
-  }
-
-  private assembleResult(
-    outcome: ProcessCandidatesOutcome,
-    claimsFound: number,
-    discoveryCallsUsed: number,
-    coverageFrom: string | null,
-    nextWindowFrom: string | null,
-  ): ProblemsSyncResult {
-    return {
-      ...this.resultFromOutcome(outcome),
-      coverageFrom,
-      claimsFound,
-      httpCallsMade: discoveryCallsUsed + outcome.callsUsed,
-      pagesFetched: discoveryCallsUsed,
-      nextWindowFrom,
-    };
-  }
-
-  /**
-   * Processa cada `externalClaimId` em ordem: `fetchClaim` (core) sempre
-   * tentado; detail/reputation/reason só chamados se, depois de gastar essa
-   * chamada opcional, ainda sobrar 1 `fetchClaim` reservado para CADA
-   * candidato que ainda não começou (nunca rouba a reserva de um candidato
-   * seguinte). Um claim só conta como CORE COBERTO quando `fetchClaim` teve
-   * sucesso **e** `upsertProblem` terminou sem lançar — uma falha isolada de
-   * `fetchClaim` marca `CORE_COVERAGE_INCOMPLETE` no resultado final (nunca
-   * avança janela/cursor), mas o laço continua para os candidatos seguintes,
-   * aproveitando o lote.
-   */
-  private async processCandidates(
-    ids: string[],
-    accessToken: string,
-    remainingHttpCallsAtStart: number,
-    accountId: string,
-  ): Promise<ProcessCandidatesOutcome> {
-    let remainingHttpCalls = remainingHttpCallsAtStart;
-    const counters = emptyProblemsSyncCounters();
-    let anyCoreFailure = false;
-    const callsUsedSoFar = () => remainingHttpCallsAtStart - remainingHttpCalls;
-
-    for (let i = 0; i < ids.length; i += 1) {
-      const externalClaimId = ids[i];
-      const remainingCandidatesAfterThis = ids.length - i - 1;
-
-      const claimOutcome = await this.httpClient.fetchClaim(
-        accessToken,
-        externalClaimId,
-      );
-      remainingHttpCalls -= 1;
-      counters.claimsProcessed += 1;
-      const claimClass = classifyClaimsHttpOutcome(claimOutcome);
-      const claimAbort = abortFrom(claimClass, callsUsedSoFar(), counters);
-      if (claimAbort) return claimAbort;
-      if (claimClass.kind === 'isolated') {
-        counters.claimsFailed += 1;
-        anyCoreFailure = true;
-        continue;
-      }
-      if (claimOutcome.kind !== 'success') {
-        throw new Error('estado inesperado: fetchClaim ok sem success');
-      }
-      const claim = claimOutcome.data.claim;
-
-      let detail: FetchOutcome<{
-        info: RawClaimDetailInfo | null;
-        actions: ProblemActionInput[];
-      }> = { fetched: false };
-      if (remainingHttpCalls - 1 >= remainingCandidatesAfterThis) {
-        const detailOutcome = await this.httpClient.fetchClaimDetail(
-          accessToken,
-          externalClaimId,
-        );
-        remainingHttpCalls -= 1;
-        const detailClass = classifyClaimsHttpOutcome(detailOutcome);
-        const detailAbort = abortFrom(detailClass, callsUsedSoFar(), counters);
-        if (detailAbort) return detailAbort;
-        if (detailClass.kind === 'isolated') {
-          counters.detailFailures += 1;
-        } else {
-          if (detailOutcome.kind !== 'success') {
-            throw new Error(
-              'estado inesperado: fetchClaimDetail ok sem success',
-            );
-          }
-          const rawDetail = detailOutcome.data.claim;
-          // `rawDetail.detail` já é RawClaimDetailInfo|null (string dueDate)
-          // — a conversão para Date é responsabilidade do mapper (CP2-A).
-          detail = {
-            fetched: true,
-            value: {
-              info: rawDetail.detail,
-              actions: flattenDetailActions(rawDetail.players),
-            },
-          };
-        }
-      }
-
-      let reputation: FetchOutcome<RawClaimReputationImpact> = {
-        fetched: false,
-      };
-      if (remainingHttpCalls - 1 >= remainingCandidatesAfterThis) {
-        const reputationOutcome =
-          await this.httpClient.fetchClaimReputationImpact(
-            accessToken,
-            externalClaimId,
-          );
-        remainingHttpCalls -= 1;
-        const reputationClass = classifyClaimsHttpOutcome(reputationOutcome);
-        const reputationAbort = abortFrom(
-          reputationClass,
-          callsUsedSoFar(),
-          counters,
-        );
-        if (reputationAbort) return reputationAbort;
-        if (reputationClass.kind === 'isolated') {
-          counters.reputationFailures += 1;
-        } else {
-          if (reputationOutcome.kind !== 'success') {
-            throw new Error(
-              'estado inesperado: fetchClaimReputationImpact ok sem success',
-            );
-          }
-          reputation = {
-            fetched: true,
-            value: reputationOutcome.data.reputation,
-          };
-        }
-      }
-
-      if (claim.reasonId !== null) {
-        let cached;
-        try {
-          cached = await this.reasonCache.findFresh(
-            Marketplace.MERCADO_LIVRE,
-            claim.siteId,
-            claim.reasonId,
-            this.reasonCacheTtlMs,
-            new Date(),
-          );
-        } catch {
-          counters.claimsFailed += 1;
-          return {
-            stopReason: 'PERSISTENCE_UNAVAILABLE',
-            retryAfterMs: null,
-            callsUsed: callsUsedSoFar(),
-            counters,
-          };
-        }
-        if (
-          cached === null &&
-          remainingHttpCalls - 1 >= remainingCandidatesAfterThis
-        ) {
-          const reasonOutcome = await this.httpClient.fetchClaimReason(
-            accessToken,
-            claim.reasonId,
-          );
-          remainingHttpCalls -= 1;
-          const reasonClass = classifyClaimsHttpOutcome(reasonOutcome);
-          const reasonAbort = abortFrom(
-            reasonClass,
-            callsUsedSoFar(),
-            counters,
-          );
-          if (reasonAbort) return reasonAbort;
-          if (reasonClass.kind === 'isolated') {
-            counters.reasonLookupFailures += 1;
-          } else {
-            if (reasonOutcome.kind !== 'success') {
-              throw new Error(
-                'estado inesperado: fetchClaimReason ok sem success',
-              );
-            }
-            try {
-              await this.reasonCache.upsert({
-                marketplace: Marketplace.MERCADO_LIVRE,
-                siteId: claim.siteId,
-                reasonId: claim.reasonId,
-                ...reasonOutcome.data.reason,
-                fetchedAt: new Date(),
-              });
-              counters.reasonCacheRefreshed += 1;
-            } catch {
-              counters.claimsFailed += 1;
-              return {
-                stopReason: 'PERSISTENCE_UNAVAILABLE',
-                retryAfterMs: null,
-                callsUsed: callsUsedSoFar(),
-                counters,
-              };
-            }
-          }
-        }
-      }
-
-      const input = mapClaimToProblemInput({
-        marketplaceAccountId: accountId,
-        claim,
-        detail,
-        reputation,
-      });
-      try {
-        const result = await this.persistence.upsertProblem(input);
-        counters.claimsCoreCovered += 1;
-        if (result.accepted) {
-          counters.claimsPersisted += 1;
-        } else {
-          counters.claimsPreserved += 1;
-        }
-      } catch {
-        counters.claimsFailed += 1;
-        return {
-          stopReason: 'PERSISTENCE_UNAVAILABLE',
-          retryAfterMs: null,
-          callsUsed: callsUsedSoFar(),
-          counters,
-        };
-      }
-    }
-
-    return {
-      stopReason: anyCoreFailure ? 'CORE_COVERAGE_INCOMPLETE' : 'COMPLETED',
-      retryAfterMs: null,
-      callsUsed: callsUsedSoFar(),
-      counters,
-    };
   }
 }
