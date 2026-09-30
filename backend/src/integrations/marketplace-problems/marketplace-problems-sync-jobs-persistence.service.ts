@@ -92,6 +92,19 @@ export class MarketplaceProblemsSyncJobsPersistenceService {
     return rows[0] ? mapRow(rows[0]) : null;
   }
 
+  /** Jobs das contas informadas (leitura para o painel; nunca cria nada). */
+  async findByAccountIds(
+    accountIds: string[],
+  ): Promise<MarketplaceProblemsSyncJobRow[]> {
+    if (accountIds.length === 0) return [];
+    const rows = await this.dataSource.query<JobRawRow[]>(
+      `SELECT ${SELECT_COLUMNS} FROM ${TABLE}
+        WHERE marketplace_account_id = ANY($1::uuid[])`,
+      [accountIds],
+    );
+    return rows.map(mapRow);
+  }
+
   /**
    * Cria a linha `RUNNING` desta conta com cursor inicial
    * `now - initialWindowDays`. Idempotente: se a linha já existe, devolve-a

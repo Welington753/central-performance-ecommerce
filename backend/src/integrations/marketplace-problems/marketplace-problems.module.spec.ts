@@ -127,8 +127,10 @@ describe('MarketplaceProblemsModule', () => {
     setIntervalSpy.mockRestore();
   });
 
-  it('não é importado pelo AppModule nesta etapa', () => {
+  it('é importado pelo AppModule e o worker segue desabilitado por padrão', () => {
     const source = readFileSync(require.resolve('../../app.module'), 'utf8');
-    expect(source).not.toContain('MarketplaceProblemsModule');
+    expect(source).toContain('MarketplaceProblemsModule');
+    const env = readFileSync(require.resolve('../../../.env.example'), 'utf8');
+    expect(env).toContain('# PROBLEMS_SYNC_WORKER_ENABLED=false');
   });
 });

@@ -82,6 +82,18 @@ export const PERMISSION_LABELS: Record<PermissionKey, PermissionMeta> = {
     label: "Ver Usuários",
     description: "Consultar a lista de usuários do sistema.",
   },
+  "problems.view": {
+    label: "Ver Problemas",
+    description: "Consultar reclamações e problemas dos marketplaces.",
+  },
+  "problems.manage": {
+    label: "Gerenciar Problemas",
+    description: "Corrigir manualmente a responsabilidade de um problema.",
+  },
+  "problems.sync": {
+    label: "Sincronizar Problemas",
+    description: "Iniciar, pausar e retomar a sincronização de problemas por conta.",
+  },
   "users.manage": {
     label: "Gerenciar Usuários",
     description:
@@ -119,6 +131,11 @@ export const PERMISSION_GROUPS: PermissionGroup[] = [
     id: "sincronizacoes",
     title: "Sincronizações",
     keys: ["sync.view", "sync.run", "sync.backfill", "sync.full_history"],
+  },
+  {
+    id: "problemas",
+    title: "Problemas",
+    keys: ["problems.view", "problems.manage", "problems.sync"],
   },
   {
     id: "administracao",

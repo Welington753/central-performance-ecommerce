@@ -243,3 +243,36 @@ describe("Sidebar — navegação lateral", () => {
     ).not.toBeInTheDocument();
   });
 });
+
+describe("Sidebar — Problemas (permissão problems.view, fail-closed)", () => {
+  it("com problems.view: Problemas aparece em ANÁLISES, logo após Clientes, e aponta para /problemas", () => {
+    mockPathname("/problemas");
+    render(<Sidebar />);
+
+    const link = screen.getByRole("link", { name: "Problemas" });
+    expect(link).toHaveAttribute("href", "/problemas");
+    expect(link).toHaveAttribute("aria-current", "page");
+    const links = screen.getAllByRole("link").map((item) => item.textContent);
+    expect(links.indexOf("Problemas")).toBe(links.indexOf("Clientes") + 1);
+  });
+
+  it("sem problems.view (mesmo com manage/sync), o item não aparece", () => {
+    mockUser(["dashboard.view", "problems.manage", "problems.sync"]);
+    mockPathname("/dashboard");
+    render(<Sidebar />);
+
+    expect(screen.queryByRole("link", { name: "Problemas" })).not.toBeInTheDocument();
+  });
+
+  it("durante o carregamento ou sem usuário válido, o item não pisca nem aparece", () => {
+    mockPathname("/dashboard");
+    mockLoadingUser();
+    const { unmount } = render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "Problemas" })).not.toBeInTheDocument();
+    unmount();
+
+    mockNoUser();
+    render(<Sidebar />);
+    expect(screen.queryByRole("link", { name: "Problemas" })).not.toBeInTheDocument();
+  });
+});

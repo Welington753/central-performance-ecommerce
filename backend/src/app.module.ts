@@ -11,6 +11,7 @@ import { envValidationSchema } from './config/env.validation';
 import { buildDataSourceOptions } from './database/typeorm-options.factory';
 import { HealthModule } from './health/health.module';
 import { IntegrationsModule } from './integrations/integrations.module';
+import { MarketplaceProblemsModule } from './integrations/marketplace-problems/marketplace-problems.module';
 import { SyncModule } from './sync/sync.module';
 import { UsersModule } from './users/users.module';
 import { UsersManagementModule } from './users/users-management.module';
@@ -46,6 +47,7 @@ import { UsersManagementModule } from './users/users-management.module';
     AuthModule,
     UsersManagementModule,
     IntegrationsModule,
+    MarketplaceProblemsModule,
     SyncModule,
     HealthModule,
     CustomersModule,

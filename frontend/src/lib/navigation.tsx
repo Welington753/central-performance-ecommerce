@@ -155,6 +155,26 @@ function UsersIcon({ className }: NavIconProps) {
   );
 }
 
+function ProblemsIcon({ className }: NavIconProps) {
+  return (
+    <svg
+      className={className}
+      viewBox="0 0 20 20"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M10 2.5 18 16.5H2L10 2.5Z" />
+      <path d="M10 8v4" />
+      <path d="M10 14.5h.01" />
+    </svg>
+  );
+}
+
 /** Somente rotas que já existem — nenhum item fictício ou "em breve". */
 export const NAV_GROUPS: NavGroup[] = [
   {
@@ -187,6 +207,13 @@ export const NAV_GROUPS: NavGroup[] = [
         label: "Clientes",
         Icon: CustomersIcon,
         permissionKey: "customers.view",
+      },
+      {
+        id: "problemas",
+        href: "/problemas",
+        label: "Problemas",
+        Icon: ProblemsIcon,
+        permissionKey: "problems.view",
       },
     ],
   },

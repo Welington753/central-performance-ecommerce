@@ -61,6 +61,12 @@ const nextConfig: NextConfig = {
         source: "/users/:path*",
         destination: `${backendProxyUrl}/users/:path*`,
       },
+      // API de "Problemas" — a página do frontend é `/problemas` (sem "s"
+      // final em inglês), sem colisão com `/problems`.
+      {
+        source: "/problems/:path*",
+        destination: `${backendProxyUrl}/problems/:path*`,
+      },
     ];
   },
 };

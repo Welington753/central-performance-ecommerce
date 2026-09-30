@@ -21,6 +21,9 @@ export const PERMISSION_KEYS = [
   "sync.full_history",
   "users.view",
   "users.manage",
+  "problems.view",
+  "problems.manage",
+  "problems.sync",
 ] as const;
 
 export type PermissionKey = (typeof PERMISSION_KEYS)[number];
