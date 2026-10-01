@@ -7,8 +7,8 @@ import {
   OVERDUE_ACTION_SQL,
   PENDING_ACTION_SQL,
   PROBLEMS_FROM,
-  type ProblemsWhere,
 } from './marketplace-problems-query.filters';
+import { problemReasonLabel } from './marketplace-problem-reason-labels';
 import type {
   MarketplaceProblemsHistoricalStatus,
   MarketplaceProblemsSyncJobStatus,
@@ -22,7 +22,6 @@ import type {
 } from './marketplace-problems.types';
 
 const TOP_REASONS_LIMIT = 10;
-const REASON_OPTIONS_LIMIT = 200;
 /** Único marketplace com sincronização de problemas implementada. */
 const SUPPORTED_MARKETPLACE = 'MERCADO_LIVRE';
 
@@ -31,8 +30,42 @@ type Row = Record<string, unknown>;
 const iso = (value: unknown): string | null =>
   value instanceof Date ? value.toISOString() : null;
 
-function withCondition(where: ProblemsWhere, condition: string): string {
-  return where.sql ? `${where.sql} AND ${condition}` : `WHERE ${condition}`;
+/** Agrupa (motivo × conta) em motivos; o total do percentual inclui problemas sem motivo. */
+function foldReasons(rows: Row[], limit?: number): ProblemReasonOptionDto[] {
+  const total = rows.reduce((sum, row) => sum + Number(row.count), 0);
+  const byReason = new Map<string, ProblemReasonOptionDto>();
+  for (const row of rows) {
+    if (typeof row.reason_id !== 'string') continue;
+    const count = Number(row.count);
+    const name = typeof row.name === 'string' ? row.name : null;
+    const entry = byReason.get(row.reason_id) ?? {
+      reasonId: row.reason_id,
+      name,
+      reasonLabel: problemReasonLabel(name ?? row.reason_id),
+      count: 0,
+      percentage: null,
+      byAccount: [],
+    };
+    entry.count += count;
+    entry.byAccount.push({
+      accountId: row.account_id as string,
+      accountNickname:
+        typeof row.account_nickname === 'string' ? row.account_nickname : null,
+      count,
+    });
+    byReason.set(row.reason_id, entry);
+  }
+  const sorted = [...byReason.values()].sort(
+    (a, b) => b.count - a.count || (a.reasonId < b.reasonId ? -1 : 1),
+  );
+  for (const entry of sorted) {
+    entry.percentage =
+      total > 0 ? Math.round((entry.count / total) * 10000) / 100 : null;
+    entry.byAccount.sort(
+      (a, b) => b.count - a.count || (a.accountId < b.accountId ? -1 : 1),
+    );
+  }
+  return limit === undefined ? sorted : sorted.slice(0, limit);
 }
 
 /**
@@ -98,28 +131,28 @@ export class MarketplaceProblemsSummaryQueryService {
     };
   }
 
-  /** Motivos presentes no recorte filtrado (mesmos filtros/escopo do resumo e da lista). */
+  /**
+   * Distribuição COMPLETA de motivos do recorte (mesmos filtros/escopo do resumo
+   * e da lista), com percentual e breakdown por conta — UMA consulta agrupada por
+   * motivo e conta. `limit` só é usado pelo resumo (principais motivos).
+   */
   async reasons(
     filters: ProblemsFilters,
     scope: AccountScope,
-    limit: number = REASON_OPTIONS_LIMIT,
+    limit?: number,
   ): Promise<ProblemReasonOptionDto[]> {
     const where = buildProblemsWhere(filters, scope);
     if (where === null) return [];
     const rows = await this.dataSource.query<Row[]>(
-      `SELECT p.reason_id, max(r.name) AS name, count(*)::int AS count
+      `SELECT p.reason_id, max(r.name) AS name,
+              p.marketplace_account_id AS account_id,
+              max(a.nickname) AS account_nickname, count(*)::int AS count
          ${PROBLEMS_FROM}
-        ${withCondition(where, 'p.reason_id IS NOT NULL')}
-        GROUP BY p.reason_id
-        ORDER BY count DESC, p.reason_id
-        LIMIT $${where.params.length + 1}`,
-      [...where.params, limit],
+        ${where.sql}
+        GROUP BY p.reason_id, p.marketplace_account_id`,
+      where.params,
     );
-    return rows.map((row) => ({
-      reasonId: row.reason_id as string,
-      name: typeof row.name === 'string' ? row.name : null,
-      count: Number(row.count),
-    }));
+    return foldReasons(rows, limit);
   }
 
   /**

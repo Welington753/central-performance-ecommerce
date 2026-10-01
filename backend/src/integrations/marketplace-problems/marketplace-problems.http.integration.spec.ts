@@ -523,6 +523,7 @@ describe('MarketplaceProblemsController — HTTP real (Postgres)', () => {
         'type',
         'reasonId',
         'reasonName',
+        'reasonLabel',
         'dateCreated',
         'lastUpdated',
         'resolutionDate',
@@ -537,6 +538,174 @@ describe('MarketplaceProblemsController — HTTP real (Postgres)', () => {
     expect(JSON.stringify(res.body)).not.toContain(
       'DESCRIÇÃO COM DADO PESSOAL',
     );
+  });
+
+  it('motivos: 205+ reasonIds distintos voltam TODOS (sem limite), ordem determinística, % corretos e account scope', async () => {
+    // 205 motivos distintos, 1 problema cada, na conta A.
+    await dataSource.query(
+      `INSERT INTO marketplace_problems
+         (marketplace_account_id, external_claim_id, resource, resource_id, status, type, stage,
+          site_id, reason_id, date_created, last_updated)
+       SELECT $1::uuid, 'ba-' || g, 'order', 'ba-' || g, 'opened', 'mediations', 'claim', 'MLB',
+              'bulk_' || lpad(g::text, 3, '0'), now(), now()
+         FROM generate_series(0, 204) g`,
+      [accA],
+    );
+    await dataSource.query(
+      `INSERT INTO marketplace_problems
+         (marketplace_account_id, external_claim_id, resource, resource_id, status, type, stage,
+          site_id, reason_id, date_created, last_updated)
+       SELECT $1::uuid, 'bb-' || g, 'order', 'bb-' || g, 'opened', 'mediations', 'claim', 'MLB',
+              'bulk_000', now(), now()
+         FROM generate_series(1, 2) g`,
+      [accB],
+    );
+
+    type Reason = {
+      reasonId: string;
+      count: number;
+      percentage: number | null;
+      byAccount: Array<{ accountId: string; count: number }>;
+    };
+    const check = (reasons: Reason[], total: number) => {
+      const bulkIds = reasons.filter((r) => r.reasonId.startsWith('bulk_'));
+      expect(bulkIds).toHaveLength(205);
+      expect(new Set(reasons.map((r) => r.reasonId)).size).toBe(reasons.length);
+      expect(reasons.map((r) => [r.count, r.reasonId])).toEqual(
+        [...reasons]
+          .sort(
+            (a, b) => b.count - a.count || (a.reasonId < b.reasonId ? -1 : 1),
+          )
+          .map((r) => [r.count, r.reasonId]),
+      );
+      for (const r of reasons) {
+        expect(r.percentage).toBe(Math.round((r.count / total) * 10000) / 100);
+        expect(r.byAccount.reduce((sum, b) => sum + b.count, 0)).toBe(r.count);
+      }
+    };
+
+    // Admin (ALL): 4 do seed + 205 + 2 = 211 problemas; 207 motivos distintos.
+    const all = (await get('/problems/reasons', admin).expect(200))
+      .body as Reason[];
+    expect(all).toHaveLength(207);
+    check(all, 211);
+    expect(all.find((r) => r.reasonId === 'bulk_000')).toMatchObject({
+      count: 3,
+      percentage: 1.42,
+    });
+    // Resposta idêntica em chamadas repetidas (determinística).
+    expect((await get('/problems/reasons', admin).expect(200)).body).toEqual(
+      all,
+    );
+
+    // Analista da conta A: só enxerga a própria conta (208 problemas, 207 motivos).
+    const scoped = (await get('/problems/reasons', analystA).expect(200))
+      .body as Reason[];
+    expect(scoped).toHaveLength(207);
+    check(scoped, 208);
+    expect(
+      scoped.flatMap((r) => r.byAccount.map((b) => b.accountId)),
+    ).not.toContain(accB);
+    expect(scoped.find((r) => r.reasonId === 'bulk_000')?.count).toBe(1);
+    const none = await get('/problems/reasons', analystNone).expect(200);
+    expect(none.body).toEqual([]);
+  });
+
+  it('reasonLabel: catálogo central para código conhecido, fallback seguro para desconhecido, null sem motivo; sem top 5', async () => {
+    await dataSource.query(
+      `INSERT INTO marketplace_problem_reasons (marketplace, site_id, reason_id, flow, name, status, fetched_at)
+       VALUES ('MERCADO_LIVRE', 'MLB', 'R3', 'mediations', 'repentant_buyer', 'active', now())`,
+    );
+    // R3 conhecido (catálogo), 'wei<rd>_code!' sem cache (fallback seguro), sem motivo.
+    const known = await problem(accA, {
+      claim: 'c5',
+      reason: 'R3',
+      created: '2026-06-10T15:00:00Z',
+    });
+    const unknown = await problem(accA, {
+      claim: 'c6',
+      reason: 'wei<rd>_code!',
+      created: '2026-06-11T15:00:00Z',
+    });
+    const none = await problem(accA, {
+      claim: 'c7',
+      created: '2026-06-12T15:00:00Z',
+    });
+
+    const list = (await get('/problems?pageSize=100', admin).expect(200))
+      .body as {
+      items: Array<{
+        id: string;
+        reasonId: string | null;
+        reasonLabel: string | null;
+      }>;
+    };
+    const byId = new Map(list.items.map((item) => [item.id, item]));
+    expect(byId.get(known)?.reasonLabel).toBe('Arrependimento do comprador');
+    expect(byId.get(known)?.reasonId).toBe('R3');
+    expect(byId.get(unknown)?.reasonLabel).toBe('Weird code');
+    expect(byId.get(none)?.reasonLabel).toBeNull();
+    // Detalhe usa o mesmo mapeamento e o escopo continua valendo.
+    const detail = (await get(`/problems/${known}`, admin).expect(200))
+      .body as { reasonLabel: string };
+    expect(detail.reasonLabel).toBe('Arrependimento do comprador');
+    await get(`/problems/${known}`, analystNone).expect(404);
+
+    // Distribuição completa (mais de 5 motivos, sem truncar), ordenada por count desc e reasonId.
+    for (let i = 0; i < 6; i += 1) {
+      await problem(accB, {
+        claim: `x${i}`,
+        reason: `extra_${i}`,
+        created: '2026-06-15T15:00:00Z',
+      });
+    }
+    type Reason = {
+      reasonId: string;
+      reasonLabel: string;
+      count: number;
+      percentage: number | null;
+      byAccount: Array<{
+        accountId: string;
+        accountNickname: string | null;
+        count: number;
+      }>;
+    };
+    const reasons = (await get('/problems/reasons', admin).expect(200))
+      .body as Reason[];
+    expect(reasons.length).toBeGreaterThan(5);
+    expect(reasons.map((r) => [r.count, r.reasonId])).toEqual(
+      [...reasons]
+        .sort((a, b) => b.count - a.count || (a.reasonId < b.reasonId ? -1 : 1))
+        .map((r) => [r.count, r.reasonId]),
+    );
+    // 4 do seed + 3 novos + 6 extras = 13 problemas (1 sem motivo): percentual sobre os 13.
+    const r1 = reasons.find((r) => r.reasonId === 'R1')!;
+    expect(r1.count).toBe(3);
+    expect(r1.percentage).toBe(23.08);
+    expect(r1.reasonLabel).toMatch(/^[A-Za-z0-9 _-]+$/);
+    expect(r1.byAccount).toEqual([
+      { accountId: accA, accountNickname: 'Conta A', count: 2 },
+      { accountId: accB, accountNickname: 'Conta B', count: 1 },
+    ]);
+    expect(reasons.find((r) => r.reasonId === 'R3')?.reasonLabel).toBe(
+      'Arrependimento do comprador',
+    );
+    // Account scope: analista A só enxerga a própria conta no breakdown.
+    const scoped = (await get('/problems/reasons', analystA).expect(200))
+      .body as Reason[];
+    expect(
+      scoped.flatMap((r) => r.byAccount.map((b) => b.accountId)),
+    ).not.toContain(accB);
+    expect(scoped.find((r) => r.reasonId.startsWith('extra_'))).toBeUndefined();
+    // Retrocompatível: os filtros from/to (America/Sao_Paulo) continuam valendo.
+    const june = (
+      await get(
+        '/problems/reasons?from=2026-06-15&to=2026-06-15',
+        admin,
+      ).expect(200)
+    ).body as Reason[];
+    expect(june).toHaveLength(6);
+    expect(june.every((r) => r.percentage === 16.67)).toBe(true);
   });
 
   it('detalhe: core, motivo, detail, impacto, actions e pedido; sem detail_description', async () => {

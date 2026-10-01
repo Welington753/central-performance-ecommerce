@@ -1,3 +1,4 @@
+import { problemReasonLabel } from './marketplace-problem-reason-labels';
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -66,6 +67,15 @@ const iso = (value: unknown): string | null =>
 const str = (value: unknown): string | null =>
   typeof value === 'string' ? value : null;
 
+/** Código = nome do motivo no cache (ou o `reason_id`); rótulo SEMPRE do catálogo central. */
+function reasonLabelOf(
+  reasonId: string | null,
+  name: string | null,
+): string | null {
+  const code = name ?? reasonId;
+  return code === null ? null : problemReasonLabel(code);
+}
+
 function mapListItem(row: Row): ProblemListItemDto {
   return {
     id: row.id as string,
@@ -78,6 +88,7 @@ function mapListItem(row: Row): ProblemListItemDto {
     type: row.type as string,
     reasonId: str(row.reason_id),
     reasonName: str(row.reason_name),
+    reasonLabel: reasonLabelOf(str(row.reason_id), str(row.reason_name)),
     dateCreated: iso(row.date_created) as string,
     lastUpdated: iso(row.last_updated) as string,
     resolutionDate: iso(row.resolution_date),

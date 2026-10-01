@@ -5,6 +5,7 @@ import type {
   ProblemReasonOptionDto,
   ProblemSortField,
   ProblemsFilters,
+  ProblemsMonthlyDto,
   ProblemsPageDto,
   ProblemsSummaryDto,
   ProblemsSyncStatusDto,
@@ -60,8 +61,8 @@ async function ensureOk(response: Response, fallback: string): Promise<void> {
   throw new ApiFetchError(fallback);
 }
 
-async function getJson<T>(path: string, fallback: string): Promise<T> {
-  const response = await apiFetch(path);
+async function getJson<T>(path: string, fallback: string, signal?: AbortSignal): Promise<T> {
+  const response = await apiFetch(path, { signal });
   await ensureOk(response, fallback);
   return (await response.json()) as T;
 }
@@ -74,10 +75,14 @@ export function fetchProblemsSummary(filters: ProblemsFilters): Promise<Problems
 }
 
 /** Motivos do recorte atual — o filtro de motivo em si é omitido pelo chamador (senão o seletor esvazia). */
-export function fetchProblemsReasons(filters: ProblemsFilters): Promise<ProblemReasonOptionDto[]> {
+export function fetchProblemsReasons(
+  filters: ProblemsFilters,
+  signal?: AbortSignal,
+): Promise<ProblemReasonOptionDto[]> {
   return getJson(
     `/problems/reasons${query(problemsFiltersToParams(filters))}`,
     "Não foi possível carregar os motivos agora.",
+    signal,
   );
 }
 
@@ -129,5 +134,44 @@ export async function changeProblemsSync(
     { method: "POST", retryOnUnauthorized: false },
   );
   await ensureOk(response, "Não foi possível alterar a sincronização agora.");
+  return (await response.json()) as ProblemsSyncStatusDto;
+}
+
+export interface ProblemsMonthlyFilters {
+  marketplace: ProblemsFilters["marketplace"];
+  accountId: string;
+  /** `YYYY-MM-DD` (America/Sao_Paulo); vazio = sem limite. */
+  dateFrom: string;
+  dateTo: string;
+}
+
+export function fetchProblemsMonthly(
+  filters: ProblemsMonthlyFilters,
+  signal?: AbortSignal,
+): Promise<ProblemsMonthlyDto> {
+  const params = new URLSearchParams();
+  if (filters.marketplace !== "ALL") params.set("marketplace", filters.marketplace);
+  if (filters.accountId) params.set("accountId", filters.accountId);
+  if (filters.dateFrom) params.set("dateFrom", filters.dateFrom);
+  if (filters.dateTo) params.set("dateTo", filters.dateTo);
+  return getJson(
+    `/problems/monthly${query(params)}`,
+    "Não foi possível carregar a análise mensal agora.",
+    signal,
+  );
+}
+
+export type ProblemsHistoricalAction = "pause" | "resume";
+
+/** Só grava o estado durável do backfill — nunca dispara sincronização HTTP nem reinicia o progresso. */
+export async function changeProblemsHistoricalSync(
+  accountId: string,
+  action: ProblemsHistoricalAction,
+): Promise<ProblemsSyncStatusDto> {
+  const response = await apiFetch(
+    `/problems/sync/accounts/${encodeURIComponent(accountId)}/historical/${action}`,
+    { method: "POST", retryOnUnauthorized: false },
+  );
+  await ensureOk(response, "Não foi possível alterar o histórico agora.");
   return (await response.json()) as ProblemsSyncStatusDto;
 }

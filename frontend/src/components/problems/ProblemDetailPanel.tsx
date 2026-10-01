@@ -177,7 +177,8 @@ export function ProblemDetailPanel({ problemId, canManage, onClose, onChanged }:
 
             <section aria-label="Motivo" className="flex flex-col gap-1">
               <h3 className="text-sm font-semibold">Motivo</h3>
-              <p className="text-sm">{problem.reasonName ?? "Motivo não informado"}</p>
+              <p className="text-sm">{problem.reasonLabel ?? "Motivo não informado"}</p>
+              {problem.reasonId ? <p className="text-[11px] text-foreground/60">Código do motivo: {problem.reasonId}</p> : null}
               {problem.reasonDetail ? <p className="text-sm text-foreground/60">{problem.reasonDetail}</p> : null}
               {problem.detailTitle ? <p className="text-sm">{problem.detailTitle}</p> : null}
               {problem.detailProblem ? <p className="text-sm text-foreground/60">{problem.detailProblem}</p> : null}

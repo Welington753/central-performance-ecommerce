@@ -93,6 +93,8 @@ export interface ProblemListItemDto {
   type: string;
   reasonId: string | null;
   reasonName: string | null;
+  /** Rótulo PT-BR do catálogo central (`null` só sem motivo); código desconhecido usa o fallback seguro. */
+  reasonLabel: string | null;
   dateCreated: string;
   lastUpdated: string;
   resolutionDate: string | null;
@@ -170,10 +172,23 @@ export interface ProblemsSummaryDto {
   coverage: ProblemsCoverageAccountDto[];
 }
 
+/** Quantidade de problemas de um motivo numa conta (breakdown). */
+export interface ProblemReasonAccountCountDto {
+  accountId: string;
+  accountNickname: string | null;
+  count: number;
+}
+
 export interface ProblemReasonOptionDto {
   reasonId: string;
+  /** Código original (nome no cache de motivos); `null` se o cache não o tiver. */
   name: string | null;
+  /** Rótulo PT-BR do catálogo central. */
+  reasonLabel: string;
   count: number;
+  /** % (0–100, 2 casas) sobre TODOS os problemas do recorte; `null` sem problemas. */
+  percentage: number | null;
+  byAccount: ProblemReasonAccountCountDto[];
 }
 
 /** Status do job de uma conta (`NOT_STARTED` = nunca iniciado; nada é criado automaticamente). */

@@ -2,15 +2,17 @@ import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import ProblemasPage from "./page";
 import { useCurrentUser } from "@/hooks/useCurrentUser";
-import { PROBLEMS_COVERAGE_TEXT } from "@/components/problems/ProblemsCoverageBanner";
-import { WORKER_DISABLED_TEXT } from "@/components/problems/ProblemsSyncPanel";
-import type { PermissionKey } from "@/types/users";
-import type {
-  ProblemDetailDto,
-  ProblemsPageDto,
-  ProblemsSummaryDto,
-  ProblemsSyncStatusDto,
-} from "@/types/problems";
+import {
+  REASONS,
+  callsTo,
+  jsonResponse,
+  installApi,
+  monthlyItem,
+  MONTHLY_ITEMS,
+  paramsOf,
+  uuidPattern,
+  type SetupOptions,
+} from "./problems-test-utils";
 
 // Caminho relativo real (não o alias `@/*`) — mesma ressalva dos demais testes de página.
 jest.mock("../../../lib/api", () => {
@@ -22,454 +24,335 @@ jest.mock("../../../hooks/useCurrentUser", () => ({
   hasPermission: jest.requireActual("../../../hooks/useCurrentUser").hasPermission,
 }));
 
-const api = jest.requireMock("../../../lib/api") as {
-  apiFetch: jest.Mock;
-  fetchMarketplaceAccounts: jest.Mock;
-};
+const api = jest.requireMock("../../../lib/api") as { apiFetch: jest.Mock; fetchMarketplaceAccounts: jest.Mock };
 
-function jsonResponse(body: unknown, status = 200): Response {
-  return {
-    ok: status >= 200 && status < 300,
-    status,
-    json: async () => body,
-    headers: { get: () => null },
-  } as unknown as Response;
-}
+const setup = (options: SetupOptions = {}) =>
+  installApi({ ...api, useCurrentUser: useCurrentUser as jest.Mock }, options);
 
-const SUMMARY: ProblemsSummaryDto = {
-  total: 4,
-  open: 3,
-  resolved: 1,
-  reputationAffected: 1,
-  pendingAction: 2,
-  overdueAction: 1,
-  unknownResponsibility: 3,
-  byResponsibility: [
-    { responsibility: "UNKNOWN", count: 3 },
-    { responsibility: "SELLER", count: 1 },
-  ],
-  topReasons: [{ reasonId: "R1", name: "Produto não recebido", count: 3 }],
-  coverage: [
-    {
-      accountId: "acc-1",
-      accountNickname: "Conta A",
-      marketplace: "MERCADO_LIVRE",
-      problemsTotal: 4,
-      problemsOpen: 3,
-      jobStatus: "NOT_STARTED",
-      windowCursorAt: null,
-      lastCompleteCensusAt: null,
-    },
-  ],
-};
+/** Congela só o relógio (`Date`): 15/09/2026 — os timers reais seguem funcionando. */
+const REAL_TIMERS = [
+  "setTimeout", "clearTimeout", "setInterval", "clearInterval", "setImmediate", "clearImmediate",
+  "nextTick", "queueMicrotask", "requestAnimationFrame", "cancelAnimationFrame",
+  "requestIdleCallback", "cancelIdleCallback", "performance", "hrtime",
+] as const;
 
-const LIST: ProblemsPageDto = {
-  items: [
-    {
-      id: "prob-1",
-      marketplace: "MERCADO_LIVRE",
-      accountId: "acc-1",
-      accountNickname: "Conta A",
-      orderExternalId: "ORD-A1",
-      status: "opened",
-      stage: "claim",
-      type: "mediations",
-      reasonId: "R1",
-      reasonName: "Produto não recebido",
-      dateCreated: "2026-05-10T15:00:00.000Z",
-      lastUpdated: "2026-05-11T15:00:00.000Z",
-      resolutionDate: null,
-      reputationImpact: "affected",
-      nextActionCode: "send_proof",
-      nextActionDueDate: "2026-05-12T15:00:00.000Z",
-      pendingActionsCount: 1,
-      responsibility: "UNKNOWN",
-      responsibilityConfidence: "NONE",
-    },
-    {
-      id: "prob-2",
-      marketplace: "MERCADO_LIVRE",
-      accountId: "acc-1",
-      accountNickname: "Conta A",
-      orderExternalId: null,
-      status: "closed",
-      stage: "dispute",
-      type: "returns",
-      reasonId: null,
-      reasonName: null,
-      dateCreated: "2026-05-20T15:00:00.000Z",
-      lastUpdated: "2026-05-21T15:00:00.000Z",
-      resolutionDate: "2026-05-21T15:00:00.000Z",
-      reputationImpact: "not_affected",
-      nextActionCode: null,
-      nextActionDueDate: null,
-      pendingActionsCount: 0,
-      responsibility: "SELLER",
-      responsibilityConfidence: "MANUAL",
-    },
-  ],
-  page: 1,
-  pageSize: 25,
-  total: 40,
-  totalPages: 2,
-};
+beforeEach(() => {
+  jest.clearAllMocks();
+  jest.useFakeTimers({ now: new Date("2026-09-15T12:00:00.000Z"), doNotFake: [...REAL_TIMERS] });
+});
+afterEach(() => jest.useRealTimers());
 
-const DETAIL: ProblemDetailDto = {
-  ...LIST.items[0],
-  externalClaimId: "5001234567",
-  reasonFlow: "mediations",
-  reasonDetail: null,
-  detailTitle: "Título do problema",
-  detailProblem: null,
-  detailResponsible: null,
-  detailDueDate: null,
-  reputationHasIncentive: null,
-  reputationDueDate: null,
-  resolutionReason: null,
-  resolutionClosedBy: null,
-  lastCheckedAt: null,
-  actions: [
-    { playerRole: "respondent", actionCode: "send_proof", mandatory: true, dueDate: "2026-05-12T15:00:00.000Z" },
-  ],
-  order: { externalOrderId: "ORD-A1", status: "paid" },
-  responsibilitySource: null,
-  responsibilityOverriddenAt: null,
-  responsibilityOverrideReason: null,
-};
+const cards = () => screen.findByRole("region", { name: "Resumo do período" });
 
-function syncStatus(overrides: Partial<ProblemsSyncStatusDto> = {}): ProblemsSyncStatusDto {
-  return {
-    accountId: "acc-1",
-    accountNickname: "Conta A",
-    jobStatus: "NOT_STARTED",
-    windowCursorAt: null,
-    lastCompleteCensusAt: null,
-    lastActivityAt: null,
-    nextAttemptAt: null,
-    attemptCount: 0,
-    lastErrorCode: null,
-    pauseRequested: false,
-    claimsProcessedCount: 0,
-    workerEnabled: false,
-    ...overrides,
-  };
-}
-
-interface Options {
-  permissions?: PermissionKey[];
-  list?: ProblemsPageDto | Error;
-  sync?: ProblemsSyncStatusDto[];
-}
-
-function setup(options: Options = {}) {
-  const calls: Array<{ path: string; method: string; body?: string }> = [];
-  (useCurrentUser as jest.Mock).mockReturnValue({
-    user: {
-      id: "u1",
-      name: "Ana",
-      email: "ana@example.com",
-      isAdmin: false,
-      role: "ANALYST",
-      permissions: options.permissions ?? ["problems.view"],
-      accountScope: { mode: "ALL" },
-      mustChangePassword: false,
-    },
-    isLoading: false,
-    status: "ready",
-  });
-  api.fetchMarketplaceAccounts.mockResolvedValue([
-    { id: "acc-1", marketplace: "MERCADO_LIVRE", nickname: "Conta A" },
-    { id: "acc-shopee", marketplace: "SHOPEE", nickname: "Loja Shopee" },
-  ]);
-  let syncList = options.sync ?? [syncStatus()];
-  api.apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
-    const method = init?.method ?? "GET";
-    calls.push({ path, method, body: init?.body as string | undefined });
-    if (path.startsWith("/problems/summary")) return jsonResponse(SUMMARY);
-    if (path.startsWith("/problems/reasons")) {
-      return jsonResponse([{ reasonId: "R1", name: "Produto não recebido", count: 3 }]);
-    }
-    if (path.startsWith("/problems/sync/status")) return jsonResponse(syncList);
-    const syncAction = /^\/problems\/sync\/accounts\/([^/]+)\/(start|pause|resume)$/.exec(path);
-    if (syncAction) {
-      const next = syncStatus({
-        jobStatus: syncAction[2] === "pause" ? "PAUSED" : "RUNNING",
-      });
-      syncList = [next];
-      return jsonResponse(next);
-    }
-    if (/^\/problems\/prob-1\/responsibility$/.test(path)) {
-      const body = JSON.parse(init?.body as string) as { responsibility: "SELLER" };
-      return jsonResponse({
-        ...DETAIL,
-        responsibility: body.responsibility,
-        responsibilityConfidence: "MANUAL",
-        responsibilityOverriddenAt: "2026-06-01T12:00:00.000Z",
-        responsibilityOverrideReason: "Cliente devolveu errado",
-      });
-    }
-    if (/^\/problems\/prob-1$/.test(path)) return jsonResponse(DETAIL);
-    if (path.startsWith("/problems")) {
-      if (options.list instanceof Error) return jsonResponse({}, 500);
-      return jsonResponse(options.list ?? LIST);
-    }
-    return jsonResponse({}, 404);
-  });
-  return calls;
-}
-
-const listCalls = (calls: ReturnType<typeof setup>) =>
-  calls.filter((c) => /^\/problems\?/.test(c.path) || c.path === "/problems");
-
-beforeEach(() => jest.clearAllMocks());
-
-describe("/problemas", () => {
-  it("sem problems.view: mostra aviso de permissão e nunca consulta a API", async () => {
+describe("/problemas — estrutura, período e permissões", () => {
+  it("sem problems.view: aviso de permissão e nenhuma chamada à API", async () => {
     const calls = setup({ permissions: [] });
     render(<ProblemasPage />);
     expect(await screen.findByText("Você não tem permissão para ver os problemas.")).toBeInTheDocument();
     expect(calls).toEqual([]);
   });
 
-  it("mostra banner de cobertura honesto, cards do resumo, filtros e tabela com as 8 colunas", async () => {
+  it("tem as 4 abas e remove o banner fixo de 60 dias", async () => {
     setup();
     render(<ProblemasPage />);
-
-    expect(await screen.findByText(PROBLEMS_COVERAGE_TEXT)).toBeInTheDocument();
-    expect(PROBLEMS_COVERAGE_TEXT).toBe(
-      "Cobertura inicial: últimos 60 dias e todos os problemas atualmente abertos. O histórico encerrado anterior a esse período ainda não foi processado.",
-    );
-    const cards = await screen.findByRole("region", { name: "Resumo de problemas" });
-    for (const label of [
-      "Total de problemas",
-      "Abertos",
-      "Resolvidos",
-      "Impacto na reputação",
-      "Ação pendente",
-      "Ação vencida",
-      "Responsabilidade desconhecida",
-    ]) {
-      expect(within(cards).getByText(label)).toBeInTheDocument();
-    }
-    expect(within(cards).getByText("Por responsabilidade")).toBeInTheDocument();
-    expect(within(cards).getByText("Cobertura por conta")).toBeInTheDocument();
-    expect(screen.getByRole("form", { name: "Filtros de problemas" })).toBeInTheDocument();
-
-    const table = await screen.findByRole("table");
-    for (const header of ["Data", "Marketplace / conta", "Pedido", "Status / etapa", "Motivo", "Reputação", "Próxima ação / prazo", "Responsabilidade"]) {
-      expect(within(table).getByRole("columnheader", { name: new RegExp(header) })).toBeInTheDocument();
-    }
-    const rows = within(table).getAllByRole("row");
-    expect(within(rows[1]).getByText("ORD-A1")).toBeInTheDocument();
-    expect(within(rows[1]).getByText("Enviar comprovante")).toBeInTheDocument();
-    expect(within(rows[1]).getByText(/Vencida em/)).toBeInTheDocument();
-    expect(within(rows[1]).getByText("Afeta a reputação")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("Motivo não informado")).toBeInTheDocument();
-    expect(within(rows[2]).getByText("Sem ação pendente")).toBeInTheDocument();
-    // Nenhum ID técnico (uuid/claim) na tabela.
-    expect(table.textContent).not.toContain("prob-1");
-    expect(table.textContent).not.toContain("acc-1");
+    await cards();
+    expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
+      "Visão mensal",
+      "Motivos",
+      "Casos",
+      "Cobertura",
+    ]);
+    expect(screen.queryByText(/últimos 60 dias/i)).not.toBeInTheDocument();
   });
 
-  it("filtros: aplicar envia os parâmetros e limpar volta ao estado vazio; motivos sem o próprio filtro de motivo", async () => {
+  it("padrão: Últimos 12 meses (meses cheios, a partir do dia 1) e filtros de conta/marketplace visíveis", async () => {
+    const calls = setup();
+    render(<ProblemasPage />);
+    await cards();
+    expect(screen.getByLabelText("Período")).toHaveValue("12m");
+    expect(screen.getByLabelText("Marketplace")).toBeVisible();
+    expect(screen.getByLabelText("Conta")).toBeVisible();
+    const params = paramsOf(callsTo(calls, "/problems/monthly")[0]);
+    expect(Object.fromEntries(params)).toEqual({ dateFrom: "2025-10-01" });
+    // Só contas do Mercado Livre aparecem como opção.
+    expect(within(screen.getByLabelText("Conta")).queryByText("Loja Shopee")).not.toBeInTheDocument();
+  });
+
+  it("Todo o histórico: nenhuma data na consulta; Personalizado exige datas coerentes", async () => {
     const calls = setup();
     const user = userEvent.setup();
     render(<ProblemasPage />);
-    await screen.findByRole("table");
+    await cards();
 
-    await user.selectOptions(screen.getByLabelText("Status"), "opened");
-    await user.selectOptions(screen.getByLabelText("Impacto na reputação"), "affected");
-    await user.selectOptions(screen.getByLabelText("Vencimento da ação"), "overdue");
-    await user.selectOptions(screen.getByLabelText("Motivo"), "R1");
-    await user.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await user.selectOptions(screen.getByLabelText("Período"), "all");
+    await waitFor(() => expect(paramsOf(callsTo(calls, "/problems/monthly").at(-1)!).toString()).toBe(""));
 
-    await waitFor(() => {
-      const last = listCalls(calls).at(-1)!;
-      const params = new URL(last.path, "http://x").searchParams;
-      expect(params.get("status")).toBe("opened");
-      expect(params.get("reputationImpact")).toBe("affected");
-      expect(params.get("actionDue")).toBe("overdue");
-      expect(params.get("reasonId")).toBe("R1");
-      expect(params.get("page")).toBe("1");
-    });
-    const reasonCalls = calls.filter((c) => c.path.startsWith("/problems/reasons"));
-    expect(new URL(reasonCalls.at(-1)!.path, "http://x").searchParams.has("reasonId")).toBe(false);
-    // Só o Mercado Livre aparece como opção de conta.
-    const accountSelect = screen.getByLabelText("Conta");
-    expect(within(accountSelect).queryByText("Loja Shopee")).not.toBeInTheDocument();
-
-    await user.click(screen.getByRole("button", { name: "Limpar filtros" }));
-    await waitFor(() => {
-      const params = new URL(listCalls(calls).at(-1)!.path, "http://x").searchParams;
-      expect(params.has("status")).toBe(false);
-      expect(params.has("reasonId")).toBe(false);
-    });
-  });
-
-  it("período invertido é bloqueado no formulário", async () => {
-    setup();
-    const user = userEvent.setup();
-    render(<ProblemasPage />);
-    await screen.findByRole("table");
-    await user.type(screen.getByLabelText("Criado a partir de"), "2026-06-10");
-    await user.type(screen.getByLabelText("Criado até"), "2026-06-01");
-    await user.click(screen.getByRole("button", { name: "Aplicar filtros" }));
+    await user.selectOptions(screen.getByLabelText("Período"), "custom");
+    await user.type(screen.getByLabelText("De"), "2026-06-10");
+    await user.type(screen.getByLabelText("Até"), "2026-06-01");
     expect(await screen.findByText("A data inicial não pode ser posterior à data final.")).toBeInTheDocument();
   });
 
-  it("paginação e ordenação disparam nova consulta", async () => {
+  it("filtros de conta e marketplace viram parâmetros da análise mensal", async () => {
     const calls = setup();
     const user = userEvent.setup();
     render(<ProblemasPage />);
-    await screen.findByRole("table");
-    expect(screen.getByText(/40 problemas · página 1 de 2/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Anterior" })).toBeDisabled();
-
-    await user.click(screen.getByRole("button", { name: "Próxima" }));
+    await cards();
+    await user.selectOptions(screen.getByLabelText("Marketplace"), "MERCADO_LIVRE");
+    await user.selectOptions(screen.getByLabelText("Conta"), "ML2");
     await waitFor(() => {
-      expect(new URL(listCalls(calls).at(-1)!.path, "http://x").searchParams.get("page")).toBe("2");
-    });
-
-    await user.click(screen.getByRole("button", { name: /^Data/ }));
-    await waitFor(() => {
-      const params = new URL(listCalls(calls).at(-1)!.path, "http://x").searchParams;
-      expect(params.get("sortBy")).toBe("dateCreated");
-      expect(params.get("sortDir")).toBe("asc");
-      expect(params.get("page")).toBe("1");
+      const params = paramsOf(callsTo(calls, "/problems/monthly").at(-1)!);
+      expect(params.get("marketplace")).toBe("MERCADO_LIVRE");
+      expect(params.get("accountId")).toMatch(uuidPattern);
     });
   });
+});
 
-  it("estado vazio, erro com tentar novamente e carregando", async () => {
-    setup({ list: { ...LIST, items: [], total: 0, totalPages: 0 } });
-    const { unmount } = render(<ProblemasPage />);
-    expect(screen.getByText("Carregando problemas...")).toBeInTheDocument();
-    expect(await screen.findByText("Nenhum problema encontrado para os filtros selecionados.")).toBeInTheDocument();
-    unmount();
+describe("/problemas — Visão mensal", () => {
+  it("agrega por soma: problemas por 100 pedidos = soma/soma (nunca média das taxas)", async () => {
+    setup();
+    render(<ProblemasPage />);
+    const region = await cards();
+    const card = (label: string) => within(region).getByText(label).parentElement!;
+    expect(card("Total de problemas")).toHaveTextContent("45");
+    expect(card("Total de pedidos")).toHaveTextContent("300");
+    // 45 / 300 × 100 = 15 (média simples das taxas mensais daria 12,5).
+    expect(card("Problemas por 100 pedidos")).toHaveTextContent("15");
+    expect(card("Problemas por 100 pedidos")).not.toHaveTextContent("12,5");
+    expect(card("Taxa de resolução")).toHaveTextContent("51,11%");
+    expect(card("Impactaram a reputação")).toHaveTextContent("8");
+    expect(card("Problemas em aberto")).toHaveTextContent("22");
+    // Tempo médio ponderado pelos resolvidos: (24×6 + 48×10 + 12×3 + 36×4) / 23 ≈ 35 h.
+    expect(card("Tempo médio de resolução")).toHaveTextContent("35 h");
+  });
 
-    const calls = setup({ list: new Error("falha") });
+  it("cobertura parcial: aviso compacto, 'Dados parciais' e taxa não definitiva", async () => {
+    setup();
+    render(<ProblemasPage />);
+    const region = await cards();
+    expect(within(region).getByText("Dados parciais")).toBeInTheDocument();
+    expect(within(region).getAllByText("Provisória — dados parciais")).toHaveLength(2);
+    const warning = screen.getAllByRole("status").find((el) => /Dados parciais ou indeterminados/.test(el.textContent ?? ""));
+    expect(warning).toBeDefined();
+    expect(warning).toHaveTextContent("mai/2026 (ML1)");
+    expect(warning).toHaveTextContent("mai/2026 (ML2)");
+  });
+
+  it("tudo COMPLETE: sem aviso e sem selo de dados parciais", async () => {
+    setup({ monthly: [monthlyItem({}), monthlyItem({ yearMonth: "2026-04", accountId: "x", accountNickname: "ML2" })] });
+    render(<ProblemasPage />);
+    const region = await cards();
+    expect(within(region).queryByText("Dados parciais")).not.toBeInTheDocument();
+    expect(screen.queryByText(/Dados parciais ou indeterminados/)).not.toBeInTheDocument();
+  });
+
+  it("sem pedidos no período: taxa N/D (nunca zero nem divisão por zero)", async () => {
+    setup({ monthly: [monthlyItem({ totalOrders: 0, problemsPer100Orders: null })] });
+    render(<ProblemasPage />);
+    const region = await cards();
+    expect(within(region).getByText("Problemas por 100 pedidos").parentElement).toHaveTextContent("N/D");
+  });
+
+  it("ML1 e ML2 aparecem separadas (legenda, comparativo) e o seletor filtra os gráficos", async () => {
+    setup();
     const user = userEvent.setup();
     render(<ProblemasPage />);
-    expect(await screen.findByText("Não foi possível carregar os problemas agora.")).toBeInTheDocument();
-    const before = listCalls(calls).length;
+    await cards();
+    const legend = screen.getAllByRole("list", { name: "Legenda" })[0];
+    expect(within(legend).getByText("ML1")).toBeInTheDocument();
+    expect(within(legend).getByText("ML2")).toBeInTheDocument();
+
+    const table = within(screen.getByRole("region", { name: "Comparativo por conta" }));
+    const ml1 = table.getByRole("row", { name: /ML1/ });
+    const ml2 = table.getByRole("row", { name: /ML2/ });
+    expect(ml1).toHaveTextContent("35"); // 10+20+5 problemas
+    expect(ml2).toHaveTextContent("10"); // 4+6 problemas
+
+    await user.selectOptions(screen.getByLabelText("Contas nos gráficos"), "ML1");
+    expect(within(screen.getAllByRole("list", { name: "Legenda" })[0]).queryByText("ML2")).not.toBeInTheDocument();
+  });
+
+  it("mês ausente não vira zero falso; mês sem pedidos não desenha ponto e mostra 'sem dados'", async () => {
+    setup();
+    render(<ProblemasPage />);
+    await cards();
+    const bars = within(screen.getByRole("list", { name: "Problemas por mês" }));
+    const april = bars.getByRole("listitem", { name: /abr\/2026/ });
+    expect(april).toHaveAccessibleName(/ML2: sem dados/);
+    expect(april).not.toHaveAccessibleName(/ML2: 0 problemas/);
+
+    const rates = within(screen.getByRole("list", { name: "Taxa de problemas por mês" }));
+    expect(rates.getByRole("listitem", { name: /mai\/2026/ })).toHaveAccessibleName(/ML1: N\/D \(sem pedidos\)/);
+    expect(rates.getByRole("listitem", { name: /mai\/2026/ })).toHaveAccessibleName(/ML2: 10 por 100 pedidos \(provisória\)/);
+  });
+
+  it("mês PARTIAL/UNKNOWN é identificado no rótulo acessível e no tooltip", async () => {
+    setup();
+    render(<ProblemasPage />);
+    await cards();
+    const may = within(screen.getByRole("list", { name: "Problemas por mês" })).getByRole("listitem", { name: /mai\/2026/ });
+    expect(may).toHaveAccessibleName(/Cobertura: Indeterminado/);
+    expect(within(may).getByRole("tooltip")).toHaveTextContent("Indeterminado");
+    const march = within(screen.getByRole("list", { name: "Problemas por mês" })).getByRole("listitem", { name: /mar\/2026/ });
+    expect(march).toHaveAccessibleName(/Cobertura: Completo/);
+  });
+
+  it("impacto na reputação: total e percentual sobre os problemas do mês", async () => {
+    setup();
+    render(<ProblemasPage />);
+    await cards();
+    const list = within(screen.getByRole("list", { name: "Impacto na reputação por mês" }));
+    // Março: (2 + 0) / (10 + 4) = 14,29%.
+    expect(list.getByText(/2 · 14,29% dos problemas/)).toBeInTheDocument();
+  });
+
+  it("estados: carregando (skeleton), erro com tentar novamente, vazio", async () => {
+    setup({ monthly: new Error("x") });
+    const user = userEvent.setup();
+    const first = render(<ProblemasPage />);
+    expect(screen.getByRole("status", { name: "Carregando análise mensal" })).toBeInTheDocument();
+    expect(await screen.findByText("Não foi possível carregar a análise mensal agora.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Resumo do período" })).not.toBeInTheDocument();
+    first.unmount();
+
+    const calls = setup({ monthly: new Error("x") });
+    render(<ProblemasPage />);
+    await screen.findByText("Não foi possível carregar a análise mensal agora.");
+    const before = callsTo(calls, "/problems/monthly").length;
     await user.click(screen.getByRole("button", { name: "Tentar novamente" }));
-    await waitFor(() => expect(listCalls(calls).length).toBeGreaterThan(before));
+    await waitFor(() => expect(callsTo(calls, "/problems/monthly").length).toBeGreaterThan(before));
   });
 
-  describe("detalhe e edição manual", () => {
-    it("abre o detalhe com motivo, impacto, pedido e ações; sem problems.manage NÃO há formulário", async () => {
-      setup();
-      const user = userEvent.setup();
-      render(<ProblemasPage />);
-      await screen.findByRole("table");
-      await user.click(screen.getAllByRole("button", { name: /Ver detalhes/ })[0]);
-
-      const dialog = await screen.findByRole("dialog", { name: "Detalhes do problema" });
-      expect(await within(dialog).findByText("5001234567")).toBeInTheDocument();
-      expect(within(dialog).getByText("Título do problema")).toBeInTheDocument();
-      expect(within(dialog).getByText(/Pedido ORD-A1/)).toBeInTheDocument();
-      expect(within(dialog).getByText(/Enviar comprovante \(obrigatória\)/)).toBeInTheDocument();
-      expect(within(dialog).queryByRole("form", { name: "Corrigir responsabilidade" })).not.toBeInTheDocument();
-      await user.click(within(dialog).getByRole("button", { name: "Fechar" }));
-      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
-    });
-
-    it("com problems.manage: exige motivo, envia PATCH e recarrega lista e resumo", async () => {
-      const calls = setup({ permissions: ["problems.view", "problems.manage"] });
-      const user = userEvent.setup();
-      render(<ProblemasPage />);
-      await screen.findByRole("table");
-      await user.click(screen.getAllByRole("button", { name: /Ver detalhes/ })[0]);
-      const form = await screen.findByRole("form", { name: "Corrigir responsabilidade" });
-
-      await user.click(within(form).getByRole("button", { name: "Salvar correção" }));
-      expect(await within(form).findByText(/Informe o motivo da alteração/)).toBeInTheDocument();
-      expect(calls.some((c) => c.method === "PATCH")).toBe(false);
-
-      const listsBefore = listCalls(calls).length;
-      await user.selectOptions(within(form).getByLabelText("Responsável"), "SELLER");
-      await user.type(within(form).getByLabelText("Motivo da alteração"), "Cliente devolveu errado");
-      await user.click(within(form).getByRole("button", { name: "Salvar correção" }));
-
-      await waitFor(() => expect(calls.some((c) => c.method === "PATCH")).toBe(true));
-      const patch = calls.find((c) => c.method === "PATCH")!;
-      expect(JSON.parse(patch.body!)).toEqual({ responsibility: "SELLER", reason: "Cliente devolveu errado" });
-      expect(await screen.findByText(/definida manualmente/)).toBeInTheDocument();
-      await waitFor(() => expect(listCalls(calls).length).toBeGreaterThan(listsBefore));
-    });
-
-    it("detalhe com erro mostra mensagem e permite tentar novamente", async () => {
-      setup();
-      api.apiFetch.mockImplementationOnce(async () => jsonResponse(SUMMARY)); // summary
-      const user = userEvent.setup();
-      render(<ProblemasPage />);
-      await screen.findByRole("table");
-      const original = api.apiFetch.getMockImplementation()!;
-      api.apiFetch.mockImplementation(async (path: string, init?: RequestInit) =>
-        path === "/problems/prob-1" ? jsonResponse({}, 500) : original(path, init),
-      );
-      await user.click(screen.getAllByRole("button", { name: /Ver detalhes/ })[0]);
-      const dialog = await screen.findByRole("dialog");
-      expect(await within(dialog).findByText("Não foi possível carregar o detalhe agora.")).toBeInTheDocument();
-      api.apiFetch.mockImplementation(original);
-      await user.click(within(dialog).getByRole("button", { name: "Tentar novamente" }));
-      expect(await within(dialog).findByText("5001234567")).toBeInTheDocument();
-    });
+  it("sem dados mensais: estado vazio claro", async () => {
+    setup({ monthly: [] });
+    render(<ProblemasPage />);
+    expect(await screen.findByText("Nenhum dado mensal para o período e as contas selecionados.")).toBeInTheDocument();
   });
 
-  describe("painel de sincronização", () => {
-    it("sem problems.sync: painel não existe", async () => {
-      setup();
-      render(<ProblemasPage />);
-      await screen.findByRole("table");
-      expect(screen.queryByRole("region", { name: "Sincronização de problemas" })).not.toBeInTheDocument();
+  it("nenhum UUID aparece na interface (texto, rótulos acessíveis e títulos)", async () => {
+    setup();
+    render(<ProblemasPage />);
+    await cards();
+    const attributes = [...document.querySelectorAll("[aria-label],[title]")].map(
+      (el) => `${el.getAttribute("aria-label") ?? ""} ${el.getAttribute("title") ?? ""}`,
+    );
+    expect(document.body.textContent).not.toMatch(uuidPattern);
+    expect(attributes.join(" ")).not.toMatch(uuidPattern);
+  });
+});
+
+describe("/problemas — Motivos", () => {
+  it("distribuição COMPLETA (7 motivos, sem top 5): rótulo PT-BR, quantidade, % do período e ML1 × ML2", async () => {
+    const calls = setup();
+    const user = userEvent.setup();
+    render(<ProblemasPage />);
+    await cards();
+    await user.click(screen.getByRole("tab", { name: "Motivos" }));
+
+    const section = await screen.findByRole("region", { name: "Distribuição de motivos" });
+    expect(within(section).getAllByRole("button")).toHaveLength(REASONS.length);
+    expect(within(section).getByRole("button", { name: "Arrependimento do comprador" })).toBeInTheDocument();
+    expect(within(section).getByText("20 · 40%")).toBeInTheDocument();
+    expect(within(section).getByText("2 · 4%")).toBeInTheDocument(); // o 7º motivo também aparece
+    const perAccount = within(within(section).getByRole("list", { name: "Arrependimento do comprador por conta" }));
+    expect(perAccount.getByText(/ML1: 12/)).toBeInTheDocument();
+    expect(perAccount.getByText(/ML2: 8/)).toBeInTheDocument();
+    expect(within(section).getByRole("button", { name: "Mystery code" })).toBeInTheDocument();
+    // O código original é só um detalhe pequeno.
+    expect(within(section).getAllByText("repentant_buyer")[0]).toHaveClass("text-[11px]");
+    // Usa o endpoint de motivos com o período (não o top 5 mensal).
+    const params = paramsOf(callsTo(calls, "/problems/reasons").at(-1)!);
+    expect(params.get("from")).toBe("2025-10-01");
+  });
+
+  it("cobertura parcial: aviso na aba; falha da consulta: erro com tentar novamente e nenhum zero inventado", async () => {
+    setup({ reasons: new Error("x") });
+    const user = userEvent.setup();
+    const first = render(<ProblemasPage />);
+    await cards();
+    await user.click(screen.getByRole("tab", { name: "Motivos" }));
+    expect(await screen.findByText("Não foi possível carregar os motivos agora.")).toBeInTheDocument();
+    expect(screen.queryByRole("region", { name: "Distribuição de motivos" })).not.toBeInTheDocument();
+    expect(screen.queryByText(/ · 0%/)).not.toBeInTheDocument();
+    first.unmount();
+
+    setup();
+    render(<ProblemasPage />);
+    await cards();
+    await user.click(screen.getByRole("tab", { name: "Motivos" }));
+    expect(await screen.findByText(/Cobertura parcial: a distribuição considera só/)).toBeInTheDocument();
+  });
+
+  it("clicar num motivo abre Casos filtrando pelo reasonId (nunca pelo rótulo)", async () => {
+    const calls = setup();
+    const user = userEvent.setup();
+    render(<ProblemasPage />);
+    await cards();
+    await user.click(screen.getByRole("tab", { name: "Motivos" }));
+    await user.click(await screen.findByRole("button", { name: "Produto faltando" }));
+
+    expect(screen.getByRole("tab", { name: "Casos", selected: true })).toBeInTheDocument();
+    await waitFor(() => expect(paramsOf(callsTo(calls, "/problems").at(-1)!).get("reasonId")).toBe("missing_item"));
+    expect(screen.getByText("Remover filtro de motivo")).toBeInTheDocument();
+    expect(paramsOf(callsTo(calls, "/problems").at(-1)!).toString()).not.toContain("Produto");
+  });
+});
+
+describe("/problemas — filtros, erros antigos e respostas fora de ordem", () => {
+  it("trocar o filtro limpa o erro anterior na hora e volta ao skeleton", async () => {
+    setup({ monthly: new Error("x") });
+    const user = userEvent.setup();
+    render(<ProblemasPage />);
+    expect(await screen.findByText("Não foi possível carregar a análise mensal agora.")).toBeInTheDocument();
+
+    // Próxima consulta fica pendente: o erro velho NÃO pode aparecer junto do filtro novo.
+    const original = api.apiFetch.getMockImplementation()!;
+    let release: () => void = () => undefined;
+    api.apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith("/problems/monthly")) {
+        await new Promise<void>((resolve) => (release = resolve));
+        return jsonResponse({ timezone: "America/Sao_Paulo", items: MONTHLY_ITEMS });
+      }
+      return original(path, init);
+    });
+    await user.selectOptions(screen.getByLabelText("Período"), "6m");
+    expect(screen.queryByText("Não foi possível carregar a análise mensal agora.")).not.toBeInTheDocument();
+    expect(screen.getByRole("status", { name: "Carregando análise mensal" })).toBeInTheDocument();
+    release();
+    expect(await cards()).toBeInTheDocument();
+  });
+
+  it("resposta atrasada de um filtro antigo nunca sobrescreve o mais recente (e a antiga é abortada)", async () => {
+    setup();
+    const user = userEvent.setup();
+    render(<ProblemasPage />);
+    await cards();
+
+    const original = api.apiFetch.getMockImplementation()!;
+    const pending: Array<{ from: string; release: () => void; signal?: AbortSignal | null }> = [];
+    api.apiFetch.mockImplementation(async (path: string, init?: RequestInit) => {
+      if (path.startsWith("/problems/monthly")) {
+        const from = paramsOf({ path, method: "GET" }).get("dateFrom") ?? "all";
+        await new Promise<void>((resolve) => pending.push({ from, release: resolve, signal: init?.signal }));
+        const total = from === "all" ? 7 : 1;
+        return jsonResponse({
+          timezone: "America/Sao_Paulo",
+          items: [monthlyItem({ totalProblems: total, openProblems: total, resolvedProblems: 0 })],
+        });
+      }
+      return original(path, init);
     });
 
-    it("com problems.sync e worker desabilitado: explica que o job está preparado mas não processará; start/pause/resume", async () => {
-      const calls = setup({ permissions: ["problems.view", "problems.sync"] });
-      const user = userEvent.setup();
-      render(<ProblemasPage />);
-      const panel = await screen.findByRole("region", { name: "Sincronização de problemas" });
-      expect(await within(panel).findByText(WORKER_DISABLED_TEXT)).toBeInTheDocument();
-      expect(within(panel).getByText("Conta A")).toBeInTheDocument();
-      expect(within(panel).getByText("Não iniciada")).toBeInTheDocument();
+    await user.selectOptions(screen.getByLabelText("Período"), "6m"); // consulta antiga (pendente)
+    await user.selectOptions(screen.getByLabelText("Período"), "all"); // consulta recente
+    await waitFor(() => expect(pending.map((p) => p.from)).toEqual(["2026-04-01", "all"]));
+    expect(pending[0].signal?.aborted).toBe(true);
 
-      await user.click(within(panel).getByRole("button", { name: "Iniciar sincronização de Conta A" }));
-      expect(await within(panel).findByText(/^Ativa/)).toBeInTheDocument();
-      expect(calls.some((c) => c.path === "/problems/sync/accounts/acc-1/start" && c.method === "POST")).toBe(true);
-
-      await user.click(within(panel).getByRole("button", { name: "Pausar sincronização de Conta A" }));
-      expect(await within(panel).findByText(/^Pausada/)).toBeInTheDocument();
-      await user.click(within(panel).getByRole("button", { name: "Retomar sincronização de Conta A" }));
-      expect(await within(panel).findByText(/^Ativa/)).toBeInTheDocument();
-      expect(calls.filter((c) => c.path.includes("/sync/accounts/")).map((c) => c.path.split("/").pop())).toEqual([
-        "start",
-        "pause",
-        "resume",
-      ]);
-    });
-
-    it("worker habilitado: sem o aviso; falha mostra causa em português e oferece retomar", async () => {
-      setup({
-        permissions: ["problems.view", "problems.sync"],
-        sync: [syncStatus({ workerEnabled: true, jobStatus: "FAILED_AUTH", lastErrorCode: "TOKEN_EXPIRED" })],
-      });
-      render(<ProblemasPage />);
-      const panel = await screen.findByRole("region", { name: "Sincronização de problemas" });
-      expect(await within(panel).findByText(/^Autorização necessária/)).toBeInTheDocument();
-      expect(within(panel).getByText("Token expirado — reconecte a conta")).toBeInTheDocument();
-      expect(within(panel).getByRole("button", { name: /Retomar/ })).toBeInTheDocument();
-      expect(within(panel).queryByText(WORKER_DISABLED_TEXT)).not.toBeInTheDocument();
-    });
-
-    it("403 específico da API: nunca manda reconectar nem fala em token expirado", async () => {
-      setup({
-        permissions: ["problems.view", "problems.sync"],
-        sync: [syncStatus({ workerEnabled: true, jobStatus: "FAILED_AUTH", lastErrorCode: "SEARCH_FORBIDDEN" })],
-      });
-      render(<ProblemasPage />);
-      const panel = await screen.findByRole("region", { name: "Sincronização de problemas" });
-      expect(await within(panel).findByText("O Mercado Livre negou acesso à busca de reclamações desta conta")).toBeInTheDocument();
-      expect(within(panel).queryByText(/reconecte|expirad/i)).not.toBeInTheDocument();
-    });
+    pending[1].release(); // a recente responde primeiro (7)…
+    const region = await cards();
+    await waitFor(() => expect(within(region).getByText("Total de problemas").parentElement).toHaveTextContent("7"));
+    pending[0].release(); // …e a antiga chega atrasada (1): é descartada.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(within(await cards()).getByText("Total de problemas").parentElement).toHaveTextContent("7");
   });
 });

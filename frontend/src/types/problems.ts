@@ -25,6 +25,27 @@ export type ProblemsSyncJobStatus =
   | "FAILED"
   | "FAILED_AUTH";
 
+/** `NOT_STARTED` = job nunca iniciado; "completo" só com `COMPLETED`. */
+export type ProblemsHistoricalStatus =
+  | "RUNNING"
+  | "PAUSED"
+  | "COMPLETED"
+  | "NO_TARGET"
+  | "FAILED"
+  | "NOT_STARTED";
+
+/** Cobertura do histórico de uma conta — enviada tanto no resumo quanto no status. */
+export interface ProblemsHistoricalCoverageDto {
+  incrementalCoveredThrough: string | null;
+  historicalCoveredFrom: string | null;
+  historicalTargetFrom: string | null;
+  historicalCompletedAt: string | null;
+  historicalStatus: ProblemsHistoricalStatus;
+  historicalLastErrorCode: string | null;
+  /** Claims inacessíveis pendentes (fora dos KPIs). Nunca vêm os identificadores. */
+  quarantinedClaimsCount: number;
+}
+
 export interface ProblemListItemDto {
   id: string;
   marketplace: string;
@@ -36,6 +57,8 @@ export interface ProblemListItemDto {
   type: string;
   reasonId: string | null;
   reasonName: string | null;
+  /** Rótulo PT-BR da fonte central (backend); `null` só quando o problema não tem motivo. */
+  reasonLabel: string | null;
   dateCreated: string;
   lastUpdated: string;
   resolutionDate: string | null;
@@ -82,13 +105,25 @@ export interface ProblemsPageDto {
   totalPages: number;
 }
 
-export interface ProblemReasonOptionDto {
-  reasonId: string;
-  name: string | null;
+export interface ProblemReasonAccountCountDto {
+  accountId: string;
+  accountNickname: string | null;
   count: number;
 }
 
-export interface ProblemsCoverageAccountDto {
+/** Motivo do período: distribuição COMPLETA (sem top N), ordenada por quantidade. */
+export interface ProblemReasonOptionDto {
+  reasonId: string;
+  /** Código original — só diagnóstico. */
+  name: string | null;
+  reasonLabel: string;
+  count: number;
+  /** % sobre todos os problemas do recorte (0–100, 2 casas); `null` sem problemas. */
+  percentage: number | null;
+  byAccount: ProblemReasonAccountCountDto[];
+}
+
+export interface ProblemsCoverageAccountDto extends ProblemsHistoricalCoverageDto {
   accountId: string;
   accountNickname: string | null;
   marketplace: string;
@@ -97,6 +132,8 @@ export interface ProblemsCoverageAccountDto {
   jobStatus: ProblemsSyncJobStatus | "NOT_STARTED";
   windowCursorAt: string | null;
   lastCompleteCensusAt: string | null;
+  lastActivityAt: string | null;
+  lastErrorCode: string | null;
 }
 
 export interface ProblemsSummaryDto {
@@ -112,7 +149,7 @@ export interface ProblemsSummaryDto {
   coverage: ProblemsCoverageAccountDto[];
 }
 
-export interface ProblemsSyncStatusDto {
+export interface ProblemsSyncStatusDto extends ProblemsHistoricalCoverageDto {
   accountId: string;
   accountNickname: string | null;
   jobStatus: ProblemsSyncJobStatus | "NOT_STARTED";
@@ -126,6 +163,44 @@ export interface ProblemsSyncStatusDto {
   claimsProcessedCount: number;
   /** `false` = job preparado, mas o servidor não o processará até ativar o worker. */
   workerEnabled: boolean;
+}
+
+/** Cobertura de um mês: `COMPLETE` só com o mês inteiro varrido e sem pendência que o toque. */
+export type ProblemsMonthlyCoverage = "COMPLETE" | "PARTIAL" | "UNKNOWN";
+
+export interface ProblemsMonthlyReasonDto {
+  /** Código original do motivo — só diagnóstico, nunca texto principal. */
+  code: string;
+  /** Rótulo PT-BR da fonte central (backend). */
+  label: string;
+  count: number;
+}
+
+/** Um mês (America/Sao_Paulo) de UMA conta. */
+export interface ProblemsMonthlyItemDto {
+  yearMonth: string;
+  accountId: string;
+  accountNickname: string | null;
+  marketplace: string;
+  totalProblems: number;
+  openProblems: number;
+  resolvedProblems: number;
+  reputationImpactCount: number;
+  totalOrders: number;
+  problemsPer100Orders: number | null;
+  resolutionRate: number | null;
+  averageResolutionHours: number | null;
+  topReasons: ProblemsMonthlyReasonDto[];
+  coverage: ProblemsMonthlyCoverage;
+  rateDefinitive: boolean;
+  quarantinedClaimsCount: number;
+  quarantinedClaimsInMonthCount: number;
+  quarantinedUnknownDateCount: number;
+}
+
+export interface ProblemsMonthlyDto {
+  timezone: "America/Sao_Paulo";
+  items: ProblemsMonthlyItemDto[];
 }
 
 /** Estado dos filtros da tela — strings vazias / "ALL" significam "sem filtro". */

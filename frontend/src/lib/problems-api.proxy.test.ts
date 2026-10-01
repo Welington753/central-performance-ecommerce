@@ -111,6 +111,35 @@ describe("problems-api — chamadas same-origin chegam ao backend pelo proxy", (
     expect(calls.slice(6).map(([, init]) => init.method)).toEqual(["POST", "POST", "POST"]);
   });
 
+  it("análise mensal e controles históricos: caminhos, métodos e parâmetros corretos e cobertos pelo proxy", async () => {
+    const fetchMock = jest.fn(async () => okResponse());
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const { api, rewrites } = await loadModules();
+
+    await api.fetchProblemsMonthly({ marketplace: "MERCADO_LIVRE", accountId: ACCOUNT_ID, dateFrom: "2025-10-01", dateTo: "" });
+    await api.fetchProblemsMonthly({ marketplace: "ALL", accountId: "", dateFrom: "", dateTo: "" });
+    await api.changeProblemsHistoricalSync(ACCOUNT_ID, "pause");
+    await api.changeProblemsHistoricalSync(ACCOUNT_ID, "resume");
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    const urls = calls.map(([url]) => url);
+    expect(urls.map((url) => url.split("?")[0])).toEqual([
+      "/problems/monthly",
+      "/problems/monthly",
+      `/problems/sync/accounts/${ACCOUNT_ID}/historical/pause`,
+      `/problems/sync/accounts/${ACCOUNT_ID}/historical/resume`,
+    ]);
+    expect(Object.fromEntries(new URL(urls[0], "http://x").searchParams)).toEqual({
+      marketplace: "MERCADO_LIVRE",
+      accountId: ACCOUNT_ID,
+      dateFrom: "2025-10-01",
+    });
+    expect(urls[1]).toBe("/problems/monthly");
+    expect(urls.filter((url) => !isProxied(url, rewrites))).toEqual([]);
+    for (const [, init] of calls) expect(init.credentials).toBe("include");
+    expect(calls.slice(2).map(([, init]) => init.method)).toEqual(["POST", "POST"]);
+  });
+
   it("a página /problemas NUNCA é encaminhada ao backend (continua rota do frontend)", async () => {
     const { rewrites } = await loadModules();
     expect(isProxied("/problemas", rewrites)).toBe(false);
