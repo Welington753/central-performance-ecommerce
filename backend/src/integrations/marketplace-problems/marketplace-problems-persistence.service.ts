@@ -205,12 +205,19 @@ export class MarketplaceProblemsPersistenceService {
   async findProblemsNeedingRefresh(
     accountId: string,
     limit: number,
-  ): Promise<Array<{ externalClaimId: string }>> {
+  ): Promise<Array<{ externalClaimId: string; dateCreated: Date }>> {
+    // Claim com pendência de quarentena AINDA NÃO vencida espera o backoff
+    // (senão ficaria sempre na frente da fila, já que seu `last_checked_at` não anda).
     return this.dataSource.query(
-      `SELECT external_claim_id AS "externalClaimId"
-         FROM marketplace_problems
-        WHERE marketplace_account_id = $1 AND resolution_date IS NULL
-        ORDER BY last_checked_at ASC NULLS FIRST, id ASC
+      `SELECT p.external_claim_id AS "externalClaimId", p.date_created AS "dateCreated"
+         FROM marketplace_problems p
+        WHERE p.marketplace_account_id = $1 AND p.resolution_date IS NULL
+          AND NOT EXISTS (
+            SELECT 1 FROM marketplace_problem_claim_quarantine q
+             WHERE q.marketplace_account_id = p.marketplace_account_id
+               AND q.external_claim_id = p.external_claim_id
+               AND q.resolved_at IS NULL AND q.next_attempt_at > now())
+        ORDER BY p.last_checked_at ASC NULLS FIRST, p.id ASC
         LIMIT $2`,
       [accountId, limit],
     );

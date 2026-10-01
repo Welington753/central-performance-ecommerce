@@ -88,6 +88,25 @@ export class ProblemsFilterQueryDto {
   orderId?: string;
 }
 
+/** Filtros de `GET /problems/monthly` (datas em America/Sao_Paulo; fuso fixo, não configurável). */
+export class ProblemsMonthlyQueryDto {
+  @IsOptional()
+  @IsEnum(Marketplace)
+  marketplace?: Marketplace;
+
+  @IsOptional()
+  @IsUUID()
+  accountId?: string;
+
+  @IsOptional()
+  @Matches(DATE_ONLY)
+  dateFrom?: string;
+
+  @IsOptional()
+  @Matches(DATE_ONLY)
+  dateTo?: string;
+}
+
 export class ListProblemsQueryDto extends ProblemsFilterQueryDto {
   @IsOptional()
   @Type(() => Number)

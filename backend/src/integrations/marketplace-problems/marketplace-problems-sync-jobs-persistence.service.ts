@@ -1,10 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
+import {
+  JOB_SELECT_COLUMNS as SELECT_COLUMNS,
+  mapJobRow as mapRow,
+  type JobRawRow,
+} from './marketplace-problems-sync-jobs.mapper';
 import type {
   MarketplaceProblemsSyncJobCommitUpdate,
   MarketplaceProblemsSyncJobRow,
-  MarketplaceProblemsSyncJobStatus,
 } from './marketplace-problems-sync-jobs.types';
 
 /** Janela inicial (dias antes de `now`) do cursor de criação de um job novo. */
@@ -12,61 +16,6 @@ export const INITIAL_WINDOW_DAYS = 60;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const TABLE = 'marketplace_problems_sync_jobs';
-
-interface JobRawRow {
-  id: string;
-  marketplace_account_id: string;
-  status: MarketplaceProblemsSyncJobStatus;
-  window_cursor_at: Date;
-  claims_processed_count: string;
-  claims_persisted_count: string;
-  claims_failed_count: string;
-  calls_made_count: string;
-  attempt_count: number;
-  next_attempt_at: Date;
-  last_error_code: string | null;
-  pause_requested: boolean;
-  lease_owner: string | null;
-  lease_expires_at: Date | null;
-  version: number;
-  last_activity_at: Date | null;
-  last_census_at: Date | null;
-  created_at: Date;
-  updated_at: Date;
-}
-
-function mapRow(row: JobRawRow): MarketplaceProblemsSyncJobRow {
-  return {
-    id: row.id,
-    marketplaceAccountId: row.marketplace_account_id,
-    status: row.status,
-    windowCursorAt: row.window_cursor_at,
-    // `bigint` chega como string do driver — contadores nunca chegam perto de 2^53.
-    claimsProcessedCount: Number(row.claims_processed_count),
-    claimsPersistedCount: Number(row.claims_persisted_count),
-    claimsFailedCount: Number(row.claims_failed_count),
-    callsMadeCount: Number(row.calls_made_count),
-    attemptCount: row.attempt_count,
-    nextAttemptAt: row.next_attempt_at,
-    lastErrorCode: row.last_error_code,
-    pauseRequested: row.pause_requested,
-    leaseOwner: row.lease_owner,
-    leaseExpiresAt: row.lease_expires_at,
-    version: row.version,
-    lastActivityAt: row.last_activity_at,
-    lastCompleteCensusAt: row.last_census_at,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-const SELECT_COLUMNS = `
-  id, marketplace_account_id, status, window_cursor_at,
-  claims_processed_count, claims_persisted_count, claims_failed_count,
-  calls_made_count, attempt_count, next_attempt_at, last_error_code,
-  pause_requested, lease_owner, lease_expires_at, version, last_activity_at,
-  last_census_at, created_at, updated_at
-`;
 
 const LEASE_ACTIVE = `(lease_owner IS NOT NULL AND lease_expires_at >= now())`;
 
@@ -118,8 +67,9 @@ export class MarketplaceProblemsSyncJobsPersistenceService {
   ): Promise<MarketplaceProblemsSyncJobRow> {
     const initialCursor = new Date(now.getTime() - initialWindowDays * DAY_MS);
     const rows = await this.dataSource.query<JobRawRow[]>(
-      `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at, next_attempt_at)
-        VALUES ($1, $2, $3)
+      `INSERT INTO ${TABLE}
+          (marketplace_account_id, window_cursor_at, historical_covered_from, next_attempt_at)
+        VALUES ($1, $2, $2, $3)
         ON CONFLICT (marketplace_account_id) DO NOTHING
         RETURNING ${SELECT_COLUMNS}`,
       [accountId, initialCursor, now],
@@ -243,6 +193,13 @@ export class MarketplaceProblemsSyncJobsPersistenceService {
    * SUBSTITUÍDOS (valor definitivo do chamador). Sempre libera o lease. Se
    * `pause_requested` foi marcado durante o tick, converte `RUNNING`/
    * `WAITING_RETRY` em `PAUSED` e limpa a flag na mesma escrita.
+   *
+   * O progresso do histórico (`historical_*`, só quando o tick o tocou) vai
+   * na MESMA escrita, portanto sob o MESMO CAS: lease perdido = nada gravado.
+   * `COMPLETED` prevalece; uma pausa do histórico pedida durante o tick
+   * (`PAUSED`) nunca é sobrescrita por um status não-terminal. `RUNNING`
+   * reabre um histórico `COMPLETED` (pedido mais antigo apareceu): limpa a
+   * data de conclusão e preserva o cursor.
    */
   async commit(
     id: string,
@@ -265,6 +222,24 @@ export class MarketplaceProblemsSyncJobsPersistenceService {
               last_activity_at = $12,
               last_error_code = $13,
               last_census_at = COALESCE($14, last_census_at),
+              historical_covered_from = COALESCE($16::timestamptz, historical_covered_from),
+              historical_target_from = COALESCE($17::timestamptz, historical_target_from),
+              historical_status = CASE
+                WHEN NOT $15::boolean THEN historical_status
+                WHEN $18::varchar = 'COMPLETED' THEN 'COMPLETED'
+                WHEN historical_status = 'PAUSED' THEN 'PAUSED'
+                ELSE COALESCE($18::varchar, historical_status) END,
+              historical_completed_at = CASE
+                WHEN NOT $15::boolean THEN historical_completed_at
+                WHEN $19::timestamptz IS NOT NULL THEN $19::timestamptz
+                WHEN $18::varchar = 'RUNNING' THEN NULL
+                ELSE historical_completed_at END,
+              historical_last_error_code = CASE
+                WHEN $15::boolean THEN $20::varchar ELSE historical_last_error_code END,
+              historical_attempt_count = CASE
+                WHEN $15::boolean THEN $21::int ELSE historical_attempt_count END,
+              historical_next_attempt_at = CASE
+                WHEN $15::boolean THEN $22::timestamptz ELSE historical_next_attempt_at END,
               lease_owner = NULL,
               lease_expires_at = NULL,
               version = version + 1,
@@ -286,8 +261,51 @@ export class MarketplaceProblemsSyncJobsPersistenceService {
         update.lastActivityAt,
         update.lastErrorCode,
         update.lastCompleteCensusAt,
+        update.historical !== null,
+        update.historical?.coveredFrom ?? null,
+        update.historical?.targetFrom ?? null,
+        update.historical?.status ?? null,
+        update.historical?.completedAt ?? null,
+        update.historical?.errorCode ?? null,
+        update.historical?.attemptCount ?? 0,
+        update.historical?.nextAttemptAt ?? null,
       ],
     );
     return rows.length === 1;
+  }
+
+  /**
+   * Pausa SÓ o backfill histórico (o incremental segue). Sem bump de `version`:
+   * um tick em voo continua válido (CAS) e o `commit` preserva o `PAUSED`.
+   */
+  async pauseHistorical(
+    accountId: string,
+  ): Promise<MarketplaceProblemsSyncJobRow | null> {
+    const [rows] = await this.dataSource.query<[JobRawRow[], number]>(
+      `UPDATE ${TABLE}
+          SET historical_status = 'PAUSED', updated_at = now()
+        WHERE marketplace_account_id = $1
+          AND historical_status IN ('RUNNING', 'NO_TARGET')
+        RETURNING ${SELECT_COLUMNS}`,
+      [accountId],
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
+  }
+
+  /** Retoma o histórico `PAUSED`/`FAILED` (limpa o erro); nunca mexe no cursor nem em `COMPLETED`. */
+  async resumeHistorical(
+    accountId: string,
+  ): Promise<MarketplaceProblemsSyncJobRow | null> {
+    const [rows] = await this.dataSource.query<[JobRawRow[], number]>(
+      `UPDATE ${TABLE}
+          SET historical_status = 'RUNNING', historical_last_error_code = NULL,
+              historical_attempt_count = 0, historical_next_attempt_at = NULL,
+              updated_at = now()
+        WHERE marketplace_account_id = $1
+          AND historical_status IN ('PAUSED', 'FAILED')
+        RETURNING ${SELECT_COLUMNS}`,
+      [accountId],
+    );
+    return rows[0] ? mapRow(rows[0]) : null;
   }
 }

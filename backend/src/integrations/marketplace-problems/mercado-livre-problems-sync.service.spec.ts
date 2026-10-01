@@ -86,6 +86,7 @@ function build(
     httpClient?: Record<string, jest.Mock>;
     reasonCache?: Record<string, jest.Mock>;
     persistence?: Record<string, jest.Mock>;
+    quarantine?: Record<string, jest.Mock>;
     configValues?: Record<string, unknown>;
   } = {},
 ) {
@@ -124,6 +125,13 @@ function build(
     findProblemsNeedingRefresh: jest.fn().mockResolvedValue([]),
     ...overrides.persistence,
   };
+  const quarantine = {
+    record: jest.fn().mockResolvedValue(undefined),
+    resolve: jest.fn().mockResolvedValue(false),
+    deferPending: jest.fn().mockResolvedValue(undefined),
+    findDue: jest.fn().mockResolvedValue([]),
+    ...overrides.quarantine,
+  };
   const configValues: Record<string, unknown> = { ...overrides.configValues };
   const configService = {
     get: (key: string, fallback?: unknown) => configValues[key] ?? fallback,
@@ -134,10 +142,18 @@ function build(
     httpClient as never,
     reasonCache as never,
     persistence as never,
+    quarantine as never,
     configService as never,
   );
 
-  return { service, preflight, httpClient, reasonCache, persistence };
+  return {
+    service,
+    preflight,
+    httpClient,
+    reasonCache,
+    persistence,
+    quarantine,
+  };
 }
 
 function claimSearchSuccess(ids: string[], total = ids.length) {
@@ -327,8 +343,8 @@ describe('MercadoLivreProblemsSyncService.syncCreationWindow — fluxo feliz e c
     expect(reasonCache.upsert).not.toHaveBeenCalled();
   });
 
-  it('fetchClaim -> not_found: NÃO persiste, complete:false, stopReason CORE_COVERAGE_INCOMPLETE, nextWindowFrom NÃO avança', async () => {
-    const { service, persistence } = build({
+  it('fetchClaim -> not_found (404): vai para a quarentena CORE_NOT_FOUND com a data da BUSCA; NÃO persiste problema e a janela AVANÇA', async () => {
+    const { service, persistence, quarantine } = build({
       httpClient: {
         searchClaims: jest.fn().mockResolvedValue(claimSearchSuccess(['c1'])),
         fetchClaim: jest.fn().mockResolvedValue(notFound()),
@@ -340,14 +356,37 @@ describe('MercadoLivreProblemsSyncService.syncCreationWindow — fluxo feliz e c
     expect(persistence.upsertProblem).not.toHaveBeenCalled();
     expect(result.claimsProcessed).toBe(1);
     expect(result.claimsCoreCovered).toBe(0);
-    expect(result.claimsFailed).toBe(1);
-    expect(result.complete).toBe(false);
-    expect(result.stopReason).toBe('CORE_COVERAGE_INCOMPLETE');
+    expect(result.claimsQuarantined).toBe(1);
+    expect(result.claimsFailed).toBe(0);
+    expect(result.complete).toBe(true);
+    expect(result.stopReason).toBe('COMPLETED');
+    expect(result.nextWindowFrom).not.toBe(window.from.toISOString());
+    expect(quarantine.record).toHaveBeenCalledWith(
+      'acc-1',
+      'c1',
+      'CORE_NOT_FOUND',
+      expect.any(Date),
+      new Date('2026-01-10T12:00:00.000Z'),
+    );
+  });
+
+  it('404 em fetch_core com a quarentena indisponível: PERSISTENCE_UNAVAILABLE, nunca finge cobertura nem avança', async () => {
+    const { service } = build({
+      httpClient: {
+        searchClaims: jest.fn().mockResolvedValue(claimSearchSuccess(['c1'])),
+        fetchClaim: jest.fn().mockResolvedValue(notFound()),
+      },
+      quarantine: { record: jest.fn().mockRejectedValue(new Error('db')) },
+    });
+
+    const result = await service.syncCreationWindow('acc-1', window);
+
+    expect(result.stopReason).toBe('PERSISTENCE_UNAVAILABLE');
     expect(result.nextWindowFrom).toBe(window.from.toISOString());
   });
 
-  it('fetchClaim -> invalid_response: mesmo tratamento fail-closed de not_found (nunca cobertura silenciosa)', async () => {
-    const { service, persistence } = build({
+  it('fetchClaim -> invalid_response: NUNCA vira quarentena (fail-closed): cobertura incompleta, janela não avança e a pendência existente ganha espera durável', async () => {
+    const { service, persistence, quarantine } = build({
       httpClient: {
         searchClaims: jest.fn().mockResolvedValue(claimSearchSuccess(['c1'])),
         fetchClaim: jest.fn().mockResolvedValue(invalidResponse()),
@@ -357,6 +396,12 @@ describe('MercadoLivreProblemsSyncService.syncCreationWindow — fluxo feliz e c
     const result = await service.syncCreationWindow('acc-1', window);
 
     expect(persistence.upsertProblem).not.toHaveBeenCalled();
+    expect(quarantine.record).not.toHaveBeenCalled();
+    expect(quarantine.deferPending).toHaveBeenCalledWith(
+      'acc-1',
+      'c1',
+      expect.any(Date),
+    );
     expect(result.complete).toBe(false);
     expect(result.stopReason).toBe('CORE_COVERAGE_INCOMPLETE');
     expect(result.nextWindowFrom).toBe(window.from.toISOString());
@@ -735,7 +780,9 @@ describe('MercadoLivreProblemsSyncService.refreshNonTerminalBatch', () => {
           .fn()
           .mockResolvedValue([{ externalClaimId: 'c1' }]),
       },
-      httpClient: { fetchClaim: jest.fn().mockResolvedValue(notFound()) },
+      httpClient: {
+        fetchClaim: jest.fn().mockResolvedValue(invalidResponse()),
+      },
     });
     const result = await service.refreshNonTerminalBatch('acc-1', 10);
     expect(persistence.upsertProblem).not.toHaveBeenCalled();
@@ -1252,8 +1299,8 @@ describe('MercadoLivreProblemsSyncService — 401/403 por operação (incidente:
     expect(httpClient.fetchClaim).toHaveBeenCalledTimes(1);
   });
 
-  it('403 em fetch_core NÃO é falha de autenticação: cobertura incompleta com CORE_FORBIDDEN, janela não avança, demais claims persistem', async () => {
-    const { service, persistence } = build({
+  it('403 em fetch_core vai para a QUARENTENA: não é falha de autenticação, a janela AVANÇA e os demais claims persistem', async () => {
+    const { service, persistence, quarantine } = build({
       httpClient: {
         searchClaims: searchOnlyClosed(['c1', 'c2', 'c3']),
         fetchClaim: jest
@@ -1268,20 +1315,52 @@ describe('MercadoLivreProblemsSyncService — 401/403 por operação (incidente:
 
     const result = await service.syncCreationWindow('acc-1', window);
 
-    expect(result.stopReason).toBe('CORE_COVERAGE_INCOMPLETE');
-    expect(result.failureCode).toBe('CORE_FORBIDDEN');
-    expect(result.complete).toBe(false);
-    expect(result.nextWindowFrom).toBe(window.from.toISOString());
+    expect(result.stopReason).toBe('COMPLETED');
+    expect(result.failureCode).toBeNull();
+    expect(result.complete).toBe(true);
+    expect(result.claimsQuarantined).toBe(1);
+    expect(result.claimsFailed).toBe(0);
     expect(result.claimsCoreCovered).toBe(2);
-    expect(result.claimsFailed).toBe(1);
+    expect(result.nextWindowFrom).not.toBe(window.from.toISOString());
     expect(upsertedIds(persistence.upsertProblem)).toEqual(['c1', 'c3']);
+    expect(quarantine.record).toHaveBeenCalledTimes(1);
+    expect(quarantine.record).toHaveBeenCalledWith(
+      'acc-1',
+      'c2',
+      'CORE_FORBIDDEN',
+      expect.any(Date),
+      new Date('2026-01-10T12:00:00.000Z'),
+    );
+    // Só os claims persistidos resolvem quarentena pendente.
+    expect(
+      (quarantine.resolve.mock.calls as Array<[string, string]>).map(
+        (c) => c[1],
+      ),
+    ).toEqual(['c1', 'c3']);
   });
 
-  it('404 isolado em fetch_core mantém CORE_COVERAGE_INCOMPLETE sem código de 403', async () => {
+  it('403 em fetch_core com a quarentena indisponível: PERSISTENCE_UNAVAILABLE, nunca finge cobertura nem avança', async () => {
     const { service } = build({
       httpClient: {
         searchClaims: searchOnlyClosed(['c1']),
-        fetchClaim: jest.fn().mockResolvedValue(notFound()),
+        fetchClaim: jest.fn().mockResolvedValue(forbidden()),
+      },
+      quarantine: { record: jest.fn().mockRejectedValue(new Error('db')) },
+    });
+
+    const result = await service.syncCreationWindow('acc-1', window);
+
+    expect(result.stopReason).toBe('PERSISTENCE_UNAVAILABLE');
+    expect(result.complete).toBe(false);
+    expect(result.nextWindowFrom).toBe(window.from.toISOString());
+    expect(result.claimsQuarantined).toBe(0);
+  });
+
+  it('invalid_response em fetch_core: CORE_COVERAGE_INCOMPLETE sem código de 403', async () => {
+    const { service } = build({
+      httpClient: {
+        searchClaims: searchOnlyClosed(['c1']),
+        fetchClaim: jest.fn().mockResolvedValue(invalidResponse()),
       },
     });
     const result = await service.syncCreationWindow('acc-1', window);

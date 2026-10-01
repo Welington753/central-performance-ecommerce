@@ -72,6 +72,7 @@ describe('MarketplaceProblemsSyncJobsPersistenceService (Postgres real)', () => 
       lastActivityAt: now,
       lastErrorCode: null,
       lastCompleteCensusAt: null,
+      historical: null,
       ...overrides,
     };
   }
@@ -401,6 +402,353 @@ describe('MarketplaceProblemsSyncJobsPersistenceService (Postgres real)', () => 
       expect(resumed!.lastErrorCode).toBeNull();
       // RUNNING não é retomável (sem efeito).
       expect(await service.resume(accountId, new Date())).toBeNull();
+    });
+  });
+
+  describe('backfill histórico (historical_*)', () => {
+    const T = (iso: string) => new Date(iso);
+    const progress = (
+      overrides: Partial<
+        NonNullable<MarketplaceProblemsSyncJobCommitUpdate['historical']>
+      > = {},
+    ) => ({
+      coveredFrom: T('2026-05-01T00:00:00.000Z'),
+      targetFrom: T('2026-01-01T00:00:00.000Z'),
+      status: 'RUNNING' as const,
+      completedAt: null,
+      errorCode: null,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      ...overrides,
+    });
+
+    it('createIfAbsent: o histórico nasce no início da cobertura atual (cursor inicial), RUNNING, sem alvo nem conclusão', async () => {
+      const accountId = await newAccount();
+      const now = T('2026-06-15T12:00:00.000Z');
+
+      const job = await service.createIfAbsent(accountId, now);
+
+      expect(job.historicalCoveredFrom).toEqual(job.windowCursorAt);
+      expect(job.historicalCoveredFrom.getTime()).toBe(
+        now.getTime() - INITIAL_WINDOW_DAYS * DAY_MS,
+      );
+      expect(job.historicalStatus).toBe('RUNNING');
+      expect(job.historicalTargetFrom).toBeNull();
+      expect(job.historicalCompletedAt).toBeNull();
+      expect(job.historicalLastErrorCode).toBeNull();
+    });
+
+    it('commit grava o progresso histórico SOB o mesmo CAS, sem tocar no cursor incremental', async () => {
+      const accountId = await newAccount();
+      await service.createIfAbsent(accountId, new Date());
+      const [claimed] = await service.claim('worker-a', 1, 60000);
+      const cursor = T('2026-06-10T00:00:00.000Z');
+
+      const ok = await service.commit(
+        claimed.id,
+        claimed.version,
+        'worker-a',
+        commitUpdate({ windowCursorAt: cursor, historical: progress() }),
+      );
+
+      expect(ok).toBe(true);
+      const after = (await service.findByAccountId(accountId))!;
+      expect(after.windowCursorAt).toEqual(cursor);
+      expect(after.historicalCoveredFrom).toEqual(
+        T('2026-05-01T00:00:00.000Z'),
+      );
+      expect(after.historicalTargetFrom).toEqual(T('2026-01-01T00:00:00.000Z'));
+      expect(after.historicalStatus).toBe('RUNNING');
+    });
+
+    it('PERDA de lease/CAS: nada do histórico é gravado (cursor e status intactos)', async () => {
+      const accountId = await newAccount();
+      const created = await service.createIfAbsent(accountId, new Date());
+      const [first] = await service.claim('worker-a', 1, 60000);
+      await dataSource.query(
+        `UPDATE marketplace_problems_sync_jobs SET lease_expires_at = now() - interval '1 second' WHERE id = $1`,
+        [first.id],
+      );
+      await service.claim('worker-b', 1, 60000);
+
+      const stale = await service.commit(
+        first.id,
+        first.version,
+        'worker-a',
+        commitUpdate({
+          historical: progress({
+            status: 'COMPLETED',
+            completedAt: new Date(),
+            errorCode: 'X',
+          }),
+        }),
+      );
+
+      expect(stale).toBe(false);
+      const still = (await service.findByAccountId(accountId))!;
+      expect(still.historicalCoveredFrom).toEqual(
+        created.historicalCoveredFrom,
+      );
+      expect(still.historicalTargetFrom).toBeNull();
+      expect(still.historicalStatus).toBe('RUNNING');
+      expect(still.historicalCompletedAt).toBeNull();
+      expect(still.historicalLastErrorCode).toBeNull();
+    });
+
+    it('historical=null preserva tudo; campos null mantêm o valor; errorCode é explícito (null limpa)', async () => {
+      const accountId = await newAccount();
+      await service.createIfAbsent(accountId, new Date());
+      const commitOnce = async (
+        historical: MarketplaceProblemsSyncJobCommitUpdate['historical'],
+      ) => {
+        await dataSource.query(
+          `UPDATE marketplace_problems_sync_jobs SET next_attempt_at = now() - interval '1 second'`,
+        );
+        const [claimed] = await service.claim('worker-a', 1, 60000);
+        expect(
+          await service.commit(
+            claimed.id,
+            claimed.version,
+            'worker-a',
+            commitUpdate({ historical }),
+          ),
+        ).toBe(true);
+        return (await service.findByAccountId(accountId))!;
+      };
+
+      const withError = await commitOnce(
+        progress({ errorCode: 'RATE_LIMITED' }),
+      );
+      expect(withError.historicalLastErrorCode).toBe('RATE_LIMITED');
+
+      const untouched = await commitOnce(null);
+      expect(untouched.historicalCoveredFrom).toEqual(
+        withError.historicalCoveredFrom,
+      );
+      expect(untouched.historicalTargetFrom).toEqual(
+        withError.historicalTargetFrom,
+      );
+      expect(untouched.historicalLastErrorCode).toBe('RATE_LIMITED');
+
+      const keptCursor = await commitOnce({
+        coveredFrom: null,
+        targetFrom: null,
+        status: null,
+        completedAt: null,
+        errorCode: null,
+        attemptCount: 0,
+        nextAttemptAt: null,
+      });
+      expect(keptCursor.historicalCoveredFrom).toEqual(
+        withError.historicalCoveredFrom,
+      );
+      expect(keptCursor.historicalStatus).toBe('RUNNING');
+      expect(keptCursor.historicalLastErrorCode).toBeNull();
+    });
+
+    it('conclusão grava a data de conclusão e a menor data coberta; COMPLETED prevalece sobre PAUSED', async () => {
+      const accountId = await newAccount();
+      await service.createIfAbsent(accountId, new Date());
+      const [claimed] = await service.claim('worker-a', 1, 60000);
+      await service.pauseHistorical(accountId);
+      const doneAt = T('2026-10-01T12:00:00.000Z');
+
+      await service.commit(
+        claimed.id,
+        claimed.version,
+        'worker-a',
+        commitUpdate({
+          historical: progress({
+            coveredFrom: T('2026-01-01T00:00:00.000Z'),
+            status: 'COMPLETED',
+            completedAt: doneAt,
+          }),
+        }),
+      );
+
+      const after = (await service.findByAccountId(accountId))!;
+      expect(after.historicalStatus).toBe('COMPLETED');
+      expect(after.historicalCompletedAt).toEqual(doneAt);
+      expect(after.historicalCoveredFrom).toEqual(
+        T('2026-01-01T00:00:00.000Z'),
+      );
+    });
+
+    it('pausa do histórico pedida durante o tick (lease ativo) NÃO é sobrescrita pelo commit, mas o progresso da janela é salvo', async () => {
+      const accountId = await newAccount();
+      await service.createIfAbsent(accountId, new Date());
+      const [claimed] = await service.claim('worker-a', 1, 60000);
+
+      const paused = await service.pauseHistorical(accountId);
+      expect(paused!.historicalStatus).toBe('PAUSED');
+      // Sem bump de version: o commit do tick em voo continua válido.
+      expect(paused!.version).toBe(claimed.version);
+
+      expect(
+        await service.commit(
+          claimed.id,
+          claimed.version,
+          'worker-a',
+          commitUpdate({ historical: progress({ status: 'RUNNING' }) }),
+        ),
+      ).toBe(true);
+      const after = (await service.findByAccountId(accountId))!;
+      expect(after.historicalStatus).toBe('PAUSED');
+      expect(after.historicalCoveredFrom).toEqual(
+        T('2026-05-01T00:00:00.000Z'),
+      );
+    });
+
+    it('pauseHistorical/resumeHistorical: só transições válidas, sem tocar no cursor nem no job incremental', async () => {
+      const accountId = await newAccount();
+      const created = await service.createIfAbsent(accountId, new Date());
+
+      expect(await service.resumeHistorical(accountId)).toBeNull();
+      const paused = await service.pauseHistorical(accountId);
+      expect(paused!.historicalStatus).toBe('PAUSED');
+      expect(paused!.status).toBe('RUNNING');
+      expect(await service.pauseHistorical(accountId)).toBeNull();
+
+      await dataSource.query(
+        `UPDATE marketplace_problems_sync_jobs
+            SET historical_status = 'FAILED', historical_last_error_code = 'SAFETY_LIMIT_REACHED'`,
+      );
+      const resumed = await service.resumeHistorical(accountId);
+      expect(resumed!.historicalStatus).toBe('RUNNING');
+      expect(resumed!.historicalLastErrorCode).toBeNull();
+      expect(resumed!.historicalCoveredFrom).toEqual(
+        created.historicalCoveredFrom,
+      );
+      expect(resumed!.windowCursorAt).toEqual(created.windowCursorAt);
+
+      await dataSource.query(
+        `UPDATE marketplace_problems_sync_jobs SET historical_status = 'COMPLETED'`,
+      );
+      // Concluído não é pausável nem retomável.
+      expect(await service.pauseHistorical(accountId)).toBeNull();
+      expect(await service.resumeHistorical(accountId)).toBeNull();
+    });
+
+    it('espera durável do histórico: o commit grava tentativas/próxima tentativa e um commit de sucesso as limpa; resumeHistorical também', async () => {
+      const accountId = await newAccount();
+      const created = await service.createIfAbsent(accountId, new Date());
+      expect(created.historicalAttemptCount).toBe(0);
+      expect(created.historicalNextAttemptAt).toBeNull();
+      const commitOnce = async (
+        historical: MarketplaceProblemsSyncJobCommitUpdate['historical'],
+      ) => {
+        await dataSource.query(
+          `UPDATE marketplace_problems_sync_jobs SET next_attempt_at = now() - interval '1 second'`,
+        );
+        const [claimed] = await service.claim('worker-a', 1, 60000);
+        await service.commit(
+          claimed.id,
+          claimed.version,
+          'worker-a',
+          commitUpdate({ historical }),
+        );
+        return (await service.findByAccountId(accountId))!;
+      };
+      const wait = T('2026-10-01T12:30:00.000Z');
+
+      const waiting = await commitOnce(
+        progress({
+          coveredFrom: null,
+          errorCode: 'CORE_COVERAGE_INCOMPLETE',
+          attemptCount: 3,
+          nextAttemptAt: wait,
+        }),
+      );
+      expect(waiting.historicalAttemptCount).toBe(3);
+      expect(waiting.historicalNextAttemptAt).toEqual(wait);
+      expect(waiting.historicalCoveredFrom).toEqual(
+        created.historicalCoveredFrom,
+      );
+
+      // Tick que não tocou no histórico (ex.: espera ativa) preserva a espera.
+      const untouched = await commitOnce(null);
+      expect(untouched.historicalAttemptCount).toBe(3);
+      expect(untouched.historicalNextAttemptAt).toEqual(wait);
+
+      const cleared = await commitOnce(progress({ coveredFrom: null }));
+      expect(cleared.historicalAttemptCount).toBe(0);
+      expect(cleared.historicalNextAttemptAt).toBeNull();
+
+      await commitOnce(
+        progress({
+          coveredFrom: null,
+          status: 'FAILED',
+          attemptCount: 2,
+          nextAttemptAt: wait,
+        }),
+      );
+      const resumed = await service.resumeHistorical(accountId);
+      expect(resumed!.historicalStatus).toBe('RUNNING');
+      expect(resumed!.historicalAttemptCount).toBe(0);
+      expect(resumed!.historicalNextAttemptAt).toBeNull();
+    });
+
+    it('REABERTURA: commit RUNNING sobre um histórico COMPLETED limpa a data de conclusão, atualiza o alvo e preserva o cursor', async () => {
+      const accountId = await newAccount();
+      await service.createIfAbsent(accountId, new Date());
+      await dataSource.query(
+        `UPDATE marketplace_problems_sync_jobs
+            SET historical_status = 'COMPLETED',
+                historical_completed_at = '2026-09-01T00:00:00Z',
+                historical_covered_from = '2026-07-15T00:00:00Z',
+                historical_target_from = '2026-07-15T00:00:00Z'`,
+      );
+      const [claimed] = await service.claim('worker-a', 1, 60000);
+
+      await service.commit(
+        claimed.id,
+        claimed.version,
+        'worker-a',
+        commitUpdate({
+          historical: progress({
+            coveredFrom: null,
+            targetFrom: T('2026-06-01T00:00:00.000Z'),
+            status: 'RUNNING',
+          }),
+        }),
+      );
+
+      const after = (await service.findByAccountId(accountId))!;
+      expect(after.historicalStatus).toBe('RUNNING');
+      expect(after.historicalCompletedAt).toBeNull();
+      expect(after.historicalTargetFrom).toEqual(T('2026-06-01T00:00:00.000Z'));
+      expect(after.historicalCoveredFrom).toEqual(
+        T('2026-07-15T00:00:00.000Z'),
+      );
+    });
+
+    it('o resume do job incremental não reinicia o histórico', async () => {
+      const accountId = await newAccount();
+      const created = await service.createIfAbsent(accountId, new Date());
+      await dataSource.query(
+        `UPDATE marketplace_problems_sync_jobs
+            SET status = 'FAILED', historical_status = 'COMPLETED',
+                historical_covered_from = '2026-01-01T00:00:00.000Z'`,
+      );
+
+      const resumed = await service.resume(accountId, new Date());
+
+      expect(resumed!.status).toBe('RUNNING');
+      expect(resumed!.historicalStatus).toBe('COMPLETED');
+      expect(resumed!.historicalCoveredFrom).toEqual(
+        T('2026-01-01T00:00:00.000Z'),
+      );
+      expect(resumed!.windowCursorAt).toEqual(created.windowCursorAt);
+    });
+
+    it('o banco rejeita status histórico fora do vocabulário', async () => {
+      const accountId = await newAccount();
+      await service.createIfAbsent(accountId, new Date());
+      await expect(
+        dataSource.query(
+          `UPDATE marketplace_problems_sync_jobs SET historical_status = 'DONE'`,
+        ),
+      ).rejects.toThrow();
     });
   });
 });

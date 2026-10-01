@@ -25,14 +25,17 @@ import { UpdateProblemResponsibilityDto } from './dto/problems-body.dto';
 import {
   ListProblemsQueryDto,
   ProblemsFilterQueryDto,
+  ProblemsMonthlyQueryDto,
 } from './dto/problems-query.dto';
 import { MarketplaceProblemsListQueryService } from './marketplace-problems-list-query.service';
+import { MarketplaceProblemsMonthlyQueryService } from './marketplace-problems-monthly-query.service';
 import { MarketplaceProblemsResponsibilityService } from './marketplace-problems-responsibility.service';
 import { MarketplaceProblemsSummaryQueryService } from './marketplace-problems-summary-query.service';
 import { MarketplaceProblemsSyncManagementService } from './marketplace-problems-sync-management.service';
 import type {
   ProblemDetailDto,
   ProblemReasonOptionDto,
+  ProblemsMonthlyDto,
   ProblemsPageDto,
   ProblemsSummaryDto,
   ProblemsSyncStatusDto,
@@ -45,7 +48,7 @@ import type {
  * aqui executa tick nem chama o Mercado Livre: os controles do job só gravam
  * estado durável.
  *
- * ORDEM: as rotas estáticas (`summary`, `reasons`, `sync/...`) são declaradas
+ * ORDEM: as rotas estáticas (`summary`, `reasons`, `monthly`, `sync/...`) são declaradas
  * ANTES de `:id`; além disso `:id` exige UUID (`ParseUUIDPipe`), então uma
  * rota estática nunca pode ser capturada como id.
  */
@@ -57,6 +60,7 @@ export class MarketplaceProblemsController {
   constructor(
     private readonly listQuery: MarketplaceProblemsListQueryService,
     private readonly summaryQuery: MarketplaceProblemsSummaryQueryService,
+    private readonly monthlyQuery: MarketplaceProblemsMonthlyQueryService,
     private readonly responsibility: MarketplaceProblemsResponsibilityService,
     private readonly syncManagement: MarketplaceProblemsSyncManagementService,
   ) {}
@@ -77,6 +81,16 @@ export class MarketplaceProblemsController {
     @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<ProblemReasonOptionDto[]> {
     return this.summaryQuery.reasons(query, context.accountScope);
+  }
+
+  /** Análise mensal por conta (America/Sao_Paulo) — taxa por 100 pedidos, resolução e cobertura. */
+  @Get('monthly')
+  @RequirePermissions(PERMISSIONS.PROBLEMS_VIEW)
+  monthly(
+    @Query() query: ProblemsMonthlyQueryDto,
+    @AuthorizationContext() context: AuthorizationContextType,
+  ): Promise<ProblemsMonthlyDto> {
+    return this.monthlyQuery.monthly(query, context.accountScope);
   }
 
   @Get('sync/status')
@@ -118,6 +132,31 @@ export class MarketplaceProblemsController {
     @AuthorizationContext() context: AuthorizationContextType,
   ): Promise<ProblemsSyncStatusDto> {
     return this.syncManagement.resume(context.accountScope, accountId);
+  }
+
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  @Post('sync/accounts/:accountId/historical/pause')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.PROBLEMS_SYNC)
+  historicalPause(
+    @Param('accountId', ParseUUIDPipe) accountId: string,
+    @AuthorizationContext() context: AuthorizationContextType,
+  ): Promise<ProblemsSyncStatusDto> {
+    return this.syncManagement.pauseHistorical(context.accountScope, accountId);
+  }
+
+  @Throttle({ default: { limit: 20, ttl: 60000 } })
+  @Post('sync/accounts/:accountId/historical/resume')
+  @HttpCode(HttpStatus.OK)
+  @RequirePermissions(PERMISSIONS.PROBLEMS_SYNC)
+  historicalResume(
+    @Param('accountId', ParseUUIDPipe) accountId: string,
+    @AuthorizationContext() context: AuthorizationContextType,
+  ): Promise<ProblemsSyncStatusDto> {
+    return this.syncManagement.resumeHistorical(
+      context.accountScope,
+      accountId,
+    );
   }
 
   @Get()

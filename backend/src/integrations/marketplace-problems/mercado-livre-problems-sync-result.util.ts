@@ -39,6 +39,7 @@ export function resultFromOutcome(
     claimsPersisted: outcome.counters.claimsPersisted,
     claimsPreserved: outcome.counters.claimsPreserved,
     claimsFailed: outcome.counters.claimsFailed,
+    claimsQuarantined: outcome.counters.claimsQuarantined,
     detailFailures: outcome.counters.detailFailures,
     reputationFailures: outcome.counters.reputationFailures,
     reasonLookupFailures: outcome.counters.reasonLookupFailures,

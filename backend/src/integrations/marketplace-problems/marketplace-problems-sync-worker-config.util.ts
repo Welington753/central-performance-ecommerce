@@ -23,6 +23,10 @@ export interface ProblemsSyncWorkerConfig {
   tickMaxClaims: number;
   tickMaxHttpCalls: number;
   refreshBatchSize: number;
+  /** Claims em quarentena reprocessados por tick (lote pequeno, dentro do orçamento restante). */
+  quarantineBatchSize: number;
+  /** Largura máxima da janela do backfill histórico (a janela ainda se divide sozinha se o volume não couber). */
+  backfillWindowMs: number;
 }
 
 /** Configuração inválida — a mensagem cita só a CHAVE, nunca o valor. */
@@ -111,6 +115,13 @@ export function readProblemsSyncWorkerConfig(
       max: HARD_MAX_HTTP_CALLS,
     }),
     refreshBatchSize: readInt(configService, `${p}REFRESH_BATCH_SIZE`, 20),
+    quarantineBatchSize: readInt(configService, `${p}QUARANTINE_BATCH_SIZE`, 5),
+    backfillWindowMs: readInt(
+      configService,
+      `${p}BACKFILL_WINDOW_MS`,
+      14 * 24 * 60 * 60 * 1000,
+      { min: 60 * 60 * 1000 },
+    ),
   };
   if (config.leaseMs <= config.tickMs) {
     throw new ProblemsSyncWorkerConfigError(`${p}LEASE_MS`);

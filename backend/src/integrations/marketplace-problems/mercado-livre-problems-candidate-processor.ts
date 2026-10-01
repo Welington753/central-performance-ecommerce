@@ -2,6 +2,7 @@ import { Marketplace } from '../contracts/marketplace.enum';
 import type { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-livre-claims-http.client';
 import type { RawClaimReputationImpact } from '../mercado-livre-claims/mercado-livre-claim-reputation-response';
 import type { RawClaimDetailInfo } from '../mercado-livre-claims/mercado-livre-claim-detail-response';
+import type { MarketplaceProblemClaimQuarantineRepository } from './marketplace-problem-claim-quarantine.repository';
 import type { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import type { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import {
@@ -28,6 +29,7 @@ export class MercadoLivreProblemsCandidateProcessor {
     private readonly httpClient: MercadoLivreClaimsHttpClient,
     private readonly reasonCache: MarketplaceProblemReasonsCacheRepository,
     private readonly persistence: MarketplaceProblemsPersistenceService,
+    private readonly quarantine: MarketplaceProblemClaimQuarantineRepository,
     private readonly limits: ProblemsSyncLimits,
   ) {}
 
@@ -40,19 +42,24 @@ export class MercadoLivreProblemsCandidateProcessor {
    * sucesso **e** `upsertProblem` terminou sem lançar — uma falha isolada de
    * `fetchClaim` marca `CORE_COVERAGE_INCOMPLETE` no resultado final (nunca
    * avança janela/cursor), mas o laço continua para os candidatos seguintes,
-   * aproveitando o lote. 403 de `fetchClaim` segue esse caminho isolado
-   * (diagnóstico `CORE_FORBIDDEN`); 403 de enriquecimento vira `{fetched:false}`.
+   * aproveitando o lote. Exceção: o 403 (`CORE_FORBIDDEN`) e o 404
+   * (`CORE_NOT_FOUND`) de `fetchClaim` vão para a QUARENTENA durável (com a
+   * data de criação vinda da busca, quando conhecida) e o candidato conta como
+   * coberto — um claim inacessível nunca trava a janela. Quarentena que não puder ser gravada é
+   * `PERSISTENCE_UNAVAILABLE` (cobertura nunca é fingida). 403 de
+   * enriquecimento vira `{fetched:false}`. Todo upsert bem-sucedido resolve a
+   * quarentena pendente do claim, venha de onde vier.
    */
   async processCandidates(
     ids: string[],
     accessToken: string,
     remainingHttpCallsAtStart: number,
     accountId: string,
+    claimDates: ReadonlyMap<string, Date> = new Map(),
   ): Promise<ProcessCandidatesOutcome> {
     let remainingHttpCalls = remainingHttpCallsAtStart;
     const counters = emptyProblemsSyncCounters();
     let anyCoreFailure = false;
-    let anyCoreForbidden = false;
     const callsUsedSoFar = () => remainingHttpCallsAtStart - remainingHttpCalls;
 
     for (let i = 0; i < ids.length; i += 1) {
@@ -69,9 +76,39 @@ export class MercadoLivreProblemsCandidateProcessor {
       const claimAbort = abortFrom(claimClass, callsUsedSoFar(), counters);
       if (claimAbort) return claimAbort;
       if (claimClass.kind === 'isolated') {
+        const quarantineCode = claimClass.forbidden
+          ? 'CORE_FORBIDDEN'
+          : claimClass.notFound
+            ? 'CORE_NOT_FOUND'
+            : null;
+        try {
+          if (quarantineCode !== null) {
+            await this.quarantine.record(
+              accountId,
+              externalClaimId,
+              quarantineCode,
+              new Date(),
+              claimDates.get(externalClaimId) ?? null,
+            );
+          } else {
+            // `invalid_response`/`invalid_request`: NÃO vira quarentena; se o claim já
+            // tem pendência, ganha espera durável (nunca retry a cada tick).
+            await this.quarantine.deferPending(
+              accountId,
+              externalClaimId,
+              new Date(),
+            );
+          }
+        } catch {
+          counters.claimsFailed += 1;
+          return this.persistenceUnavailable(callsUsedSoFar(), counters);
+        }
+        if (quarantineCode !== null) {
+          counters.claimsQuarantined += 1;
+          continue;
+        }
         counters.claimsFailed += 1;
         anyCoreFailure = true;
-        anyCoreForbidden ||= claimClass.forbidden;
         continue;
       }
       if (claimOutcome.kind !== 'success') {
@@ -160,13 +197,7 @@ export class MercadoLivreProblemsCandidateProcessor {
           );
         } catch {
           counters.claimsFailed += 1;
-          return {
-            stopReason: 'PERSISTENCE_UNAVAILABLE',
-            failureCode: null,
-            retryAfterMs: null,
-            callsUsed: callsUsedSoFar(),
-            counters,
-          };
+          return this.persistenceUnavailable(callsUsedSoFar(), counters);
         }
         if (
           cached === null &&
@@ -206,13 +237,7 @@ export class MercadoLivreProblemsCandidateProcessor {
               counters.reasonCacheRefreshed += 1;
             } catch {
               counters.claimsFailed += 1;
-              return {
-                stopReason: 'PERSISTENCE_UNAVAILABLE',
-                failureCode: null,
-                retryAfterMs: null,
-                callsUsed: callsUsedSoFar(),
-                counters,
-              };
+              return this.persistenceUnavailable(callsUsedSoFar(), counters);
             }
           }
         }
@@ -226,6 +251,7 @@ export class MercadoLivreProblemsCandidateProcessor {
       });
       try {
         const result = await this.persistence.upsertProblem(input);
+        await this.quarantine.resolve(accountId, externalClaimId, new Date());
         counters.claimsCoreCovered += 1;
         if (result.accepted) {
           counters.claimsPersisted += 1;
@@ -234,21 +260,28 @@ export class MercadoLivreProblemsCandidateProcessor {
         }
       } catch {
         counters.claimsFailed += 1;
-        return {
-          stopReason: 'PERSISTENCE_UNAVAILABLE',
-          failureCode: null,
-          retryAfterMs: null,
-          callsUsed: callsUsedSoFar(),
-          counters,
-        };
+        return this.persistenceUnavailable(callsUsedSoFar(), counters);
       }
     }
 
     return {
       stopReason: anyCoreFailure ? 'CORE_COVERAGE_INCOMPLETE' : 'COMPLETED',
-      failureCode: anyCoreForbidden ? 'CORE_FORBIDDEN' : null,
+      failureCode: null,
       retryAfterMs: null,
       callsUsed: callsUsedSoFar(),
+      counters,
+    };
+  }
+
+  private persistenceUnavailable(
+    callsUsed: number,
+    counters: ProcessCandidatesOutcome['counters'],
+  ): ProcessCandidatesOutcome {
+    return {
+      stopReason: 'PERSISTENCE_UNAVAILABLE',
+      failureCode: null,
+      retryAfterMs: null,
+      callsUsed,
       counters,
     };
   }

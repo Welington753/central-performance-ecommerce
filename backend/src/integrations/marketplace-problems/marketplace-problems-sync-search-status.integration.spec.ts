@@ -8,9 +8,8 @@ import { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-li
 import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import { MarketplaceProblemsSyncJobsPersistenceService } from './marketplace-problems-sync-jobs-persistence.service';
-import { MarketplaceProblemsSyncTickService } from './marketplace-problems-sync-tick.service';
+import { buildProblemsSyncServices } from './marketplace-problems-sync-test-wiring';
 import { MarketplaceProblemsSyncWorkerService } from './marketplace-problems-sync-worker.service';
-import { MercadoLivreProblemsSyncService } from './mercado-livre-problems-sync.service';
 
 const TOKEN = 'fake-token-xyz';
 const SELLER = '424242';
@@ -187,20 +186,21 @@ describe('Janela de criação com opened + closed no tick (Postgres real + HTTP 
         externalSellerId: SELLER,
       }),
     };
-    const sync = new MercadoLivreProblemsSyncService(
-      preflight as never,
+    const { tick } = buildProblemsSyncServices({
+      dataSource,
+      preflight,
       httpClient,
       reasonCache,
       problems,
-      fakeConfig(),
-    );
+      configService: fakeConfig(),
+    });
     return new MarketplaceProblemsSyncWorkerService(
       fakeConfig({
         PROBLEMS_SYNC_WORKER_TICK_MAX_CLAIMS: 50,
         PROBLEMS_SYNC_WORKER_TICK_MAX_HTTP_CALLS: 300,
       }),
       jobs,
-      new MarketplaceProblemsSyncTickService(sync),
+      tick,
     );
   }
 

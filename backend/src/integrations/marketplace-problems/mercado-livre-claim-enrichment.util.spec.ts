@@ -34,7 +34,7 @@ describe('classifyClaimsHttpOutcome', () => {
     (operation) => {
       expect(
         classifyClaimsHttpOutcome(outcome('forbidden'), operation),
-      ).toEqual({ kind: 'isolated', forbidden: true });
+      ).toEqual({ kind: 'isolated', forbidden: true, notFound: false });
     },
   );
 
@@ -53,12 +53,21 @@ describe('classifyClaimsHttpOutcome', () => {
     });
   });
 
-  it.each(['not_found', 'invalid_response', 'invalid_request'] as const)(
-    'classifica %s como isolated',
+  it('not_found é isolado e identificado (404 por-claim)', () => {
+    expect(classifyClaimsHttpOutcome(outcome('not_found'), 'core')).toEqual({
+      kind: 'isolated',
+      forbidden: false,
+      notFound: true,
+    });
+  });
+
+  it.each(['invalid_response', 'invalid_request'] as const)(
+    'classifica %s como isolated sem forbidden/notFound (nunca vira quarentena)',
     (kind) => {
       expect(classifyClaimsHttpOutcome(outcome(kind), 'detail')).toEqual({
         kind: 'isolated',
         forbidden: false,
+        notFound: false,
       });
     },
   );

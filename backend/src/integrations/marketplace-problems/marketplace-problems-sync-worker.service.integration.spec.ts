@@ -27,6 +27,7 @@ function report(
     failureCode: null,
     creationCursorAdvancedTo: null,
     censusCompletedInFull: false,
+    historical: null,
     claimsProcessed: 2,
     claimsPersisted: 2,
     claimsFailed: 0,

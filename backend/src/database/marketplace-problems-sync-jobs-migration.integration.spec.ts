@@ -101,12 +101,12 @@ describe('MarketplaceProblemsSyncJobs migration (Postgres real)', () => {
   it('uma linha por conta: UNIQUE em marketplace_account_id', async () => {
     const accountId = await insertAccount();
     await dataSource.query(
-      `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at) VALUES ($1, now())`,
+      `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at, historical_covered_from) VALUES ($1, now(), now())`,
       [accountId],
     );
     await expect(
       dataSource.query(
-        `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at) VALUES ($1, now())`,
+        `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at, historical_covered_from) VALUES ($1, now(), now())`,
         [accountId],
       ),
     ).rejects.toThrow();
@@ -122,14 +122,14 @@ describe('MarketplaceProblemsSyncJobs migration (Postgres real)', () => {
     ]) {
       const accountId = await insertAccount();
       await dataSource.query(
-        `INSERT INTO ${TABLE} (marketplace_account_id, status, window_cursor_at) VALUES ($1, $2, now())`,
+        `INSERT INTO ${TABLE} (marketplace_account_id, status, window_cursor_at, historical_covered_from) VALUES ($1, $2, now(), now())`,
         [accountId, status],
       );
     }
     const accountId = await insertAccount();
     await expect(
       dataSource.query(
-        `INSERT INTO ${TABLE} (marketplace_account_id, status, window_cursor_at) VALUES ($1, 'COMPLETED', now())`,
+        `INSERT INTO ${TABLE} (marketplace_account_id, status, window_cursor_at, historical_covered_from) VALUES ($1, 'COMPLETED', now(), now())`,
         [accountId],
       ),
     ).rejects.toThrow();
@@ -138,7 +138,7 @@ describe('MarketplaceProblemsSyncJobs migration (Postgres real)', () => {
   it('FK ON DELETE CASCADE remove o job junto com a conta', async () => {
     const accountId = await insertAccount();
     await dataSource.query(
-      `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at) VALUES ($1, now())`,
+      `INSERT INTO ${TABLE} (marketplace_account_id, window_cursor_at, historical_covered_from) VALUES ($1, now(), now())`,
       [accountId],
     );
     await dataSource.query(`DELETE FROM marketplace_accounts WHERE id = $1`, [
@@ -153,8 +153,11 @@ describe('MarketplaceProblemsSyncJobs migration (Postgres real)', () => {
 
   it('down remove a tabela sem afetar marketplace_problems; up reaplica', async () => {
     expect(await tableExists()).toBe(true);
-    // Esta é a migration mais recente — `undoLastMigration` a desfaz.
-    await dataSource.undoLastMigration();
+    // `undoLastMigration()` só desfaz a mais RECENTE; migrations posteriores
+    // (ex.: quarentena/backfill, CP4) empilham por cima — desfaz até a tabela sumir.
+    for (let attempt = 0; attempt < 20 && (await tableExists()); attempt++) {
+      await dataSource.undoLastMigration();
+    }
     expect(await tableExists()).toBe(false);
     const problems = await dataSource.query<Array<{ exists: boolean }>>(
       `SELECT EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'marketplace_problems') AS exists`,

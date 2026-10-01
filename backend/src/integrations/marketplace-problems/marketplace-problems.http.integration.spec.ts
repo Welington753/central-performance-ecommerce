@@ -282,12 +282,21 @@ describe('MarketplaceProblemsController — HTTP real (Postgres)', () => {
       () => request(http()).get('/problems'),
       () => request(http()).get('/problems/summary'),
       () => request(http()).get('/problems/reasons'),
+      () => request(http()).get('/problems/monthly'),
       () => request(http()).get('/problems/sync/status'),
       () => request(http()).get(`/problems/${id}`),
       () => request(http()).patch(`/problems/${id}/responsibility`).send({}),
       () => request(http()).post(`/problems/sync/accounts/${accA}/start`),
       () => request(http()).post(`/problems/sync/accounts/${accA}/pause`),
       () => request(http()).post(`/problems/sync/accounts/${accA}/resume`),
+      () =>
+        request(http()).post(
+          `/problems/sync/accounts/${accA}/historical/pause`,
+        ),
+      () =>
+        request(http()).post(
+          `/problems/sync/accounts/${accA}/historical/resume`,
+        ),
     ];
     for (const call of calls) {
       expect((await call()).status).toBe(401);
@@ -299,6 +308,7 @@ describe('MarketplaceProblemsController — HTTP real (Postgres)', () => {
       '/problems',
       '/problems/summary',
       '/problems/reasons',
+      '/problems/monthly',
       '/problems/sync/status',
       `/problems/${p1}`,
     ]) {
@@ -785,6 +795,104 @@ describe('MarketplaceProblemsController — HTTP real (Postgres)', () => {
       ).toBeLessThanOrEqual(Date.now() + 1000);
       // Já ativo: resume só devolve o status.
       await post(`${accA}/resume`, manager).expect(200);
+    });
+
+    it('status e resumo expõem a cobertura por conta (incremental, histórico e quarentena pendente)', async () => {
+      await post(`${accA}/start`, manager).expect(200);
+      await dataSource.query(
+        `INSERT INTO marketplace_problem_claim_quarantine
+           (marketplace_account_id, external_claim_id, failure_code, first_seen_at, last_seen_at, next_attempt_at)
+         VALUES ($1, 'q-1', 'CORE_FORBIDDEN', now(), now(), now()),
+                ($1, 'q-2', 'CORE_FORBIDDEN', now(), now(), now())`,
+        [accA],
+      );
+      await dataSource.query(
+        `UPDATE marketplace_problem_claim_quarantine SET resolved_at = now() WHERE external_claim_id = 'q-2'`,
+      );
+
+      const [status] = (
+        await get('/problems/sync/status', analystA).expect(200)
+      ).body as Row[];
+      expect(status).toMatchObject({
+        accountId: accA,
+        historicalStatus: 'RUNNING',
+        historicalTargetFrom: null,
+        historicalCompletedAt: null,
+        historicalLastErrorCode: null,
+        quarantinedClaimsCount: 1,
+        lastErrorCode: null,
+      });
+      expect(status.incrementalCoveredThrough).toBe(status.windowCursorAt);
+      expect(status.historicalCoveredFrom).toBe(status.windowCursorAt);
+
+      const summary = (await get('/problems/summary', analystA).expect(200))
+        .body as { total: number; coverage: Row[] };
+      expect(summary.coverage[0]).toMatchObject({
+        accountId: accA,
+        historicalStatus: 'RUNNING',
+        quarantinedClaimsCount: 1,
+        lastErrorCode: null,
+      });
+      expect(summary.coverage[0].lastActivityAt).toBeNull();
+      // Quarentena nunca entra nos KPIs.
+      expect(summary.total).toBe(3);
+
+      // Conta sem job: NOT_STARTED e sem cobertura inventada.
+      const admins = (await get('/problems/sync/status', admin).expect(200))
+        .body as Row[];
+      expect(admins.find((a) => a.accountId === accB)).toMatchObject({
+        historicalStatus: 'NOT_STARTED',
+        historicalCoveredFrom: null,
+        quarantinedClaimsCount: 0,
+      });
+    });
+
+    it('histórico: pausar e retomar só o backfill (o job incremental segue RUNNING); idempotente', async () => {
+      await post(`${accA}/start`, manager).expect(200);
+      const paused = await post(`${accA}/historical/pause`, manager).expect(
+        200,
+      );
+      expect(paused.body).toMatchObject({
+        jobStatus: 'RUNNING',
+        historicalStatus: 'PAUSED',
+      });
+      // Repetir é idempotente.
+      expect(
+        (await post(`${accA}/historical/pause`, manager).expect(200)).body,
+      ).toMatchObject({ historicalStatus: 'PAUSED' });
+
+      await dataSource.query(
+        `UPDATE marketplace_problems_sync_jobs
+            SET historical_status = 'FAILED', historical_last_error_code = 'SAFETY_LIMIT_REACHED'
+          WHERE marketplace_account_id = $1`,
+        [accA],
+      );
+      const resumed = await post(`${accA}/historical/resume`, manager).expect(
+        200,
+      );
+      expect(resumed.body).toMatchObject({
+        jobStatus: 'RUNNING',
+        historicalStatus: 'RUNNING',
+        historicalLastErrorCode: null,
+      });
+    });
+
+    it('histórico: sem job iniciado 404; fora do escopo 404 genérico; conta não-ML 400; sem problems.sync 403', async () => {
+      await post(`${accA}/historical/pause`, manager).expect(404);
+      await post(`${accA}/historical/resume`, manager).expect(404);
+      const missing = await post(`${randomUUID()}/historical/pause`, manager);
+      const outside = await post(`${accB}/historical/pause`, manager);
+      expect(missing.status).toBe(404);
+      expect(outside.body).toEqual(missing.body);
+      const shopeeManager = await createUser(
+        'ANALYST',
+        'ALL',
+        [],
+        ['problems.sync'],
+      );
+      await post(`${accShopee}/historical/pause`, shopeeManager).expect(400);
+      await post(`${accA}/historical/pause`, analystA).expect(403);
+      await post(`${accA}/historical/resume`, analystA).expect(403);
     });
 
     it('pause/resume sem job iniciado: 404; conta não-ML: 400', async () => {

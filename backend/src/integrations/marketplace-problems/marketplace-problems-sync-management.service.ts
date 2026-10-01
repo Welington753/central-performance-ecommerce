@@ -9,6 +9,7 @@ import { Marketplace } from '../contracts/marketplace.enum';
 import type { MarketplaceAccount } from '../marketplace-accounts/marketplace-account.entity';
 import { MarketplaceAccountsService } from '../marketplace-accounts/marketplace-accounts.service';
 import { ScopedMarketplaceAccountService } from '../marketplace-accounts/scoped-marketplace-account.service';
+import { MarketplaceProblemClaimQuarantineRepository } from './marketplace-problem-claim-quarantine.repository';
 import { MarketplaceProblemsSyncJobsPersistenceService } from './marketplace-problems-sync-jobs-persistence.service';
 import type { MarketplaceProblemsSyncJobRow } from './marketplace-problems-sync-jobs.types';
 import { isProblemsSyncWorkerEnabled } from './marketplace-problems-sync-worker-config.util';
@@ -34,6 +35,7 @@ const iso = (value: Date | null): string | null =>
 export class MarketplaceProblemsSyncManagementService {
   constructor(
     private readonly jobs: MarketplaceProblemsSyncJobsPersistenceService,
+    private readonly quarantine: MarketplaceProblemClaimQuarantineRepository,
     private readonly scopedAccounts: ScopedMarketplaceAccountService,
     private readonly accounts: MarketplaceAccountsService,
     private readonly configService: ConfigService,
@@ -42,12 +44,20 @@ export class MarketplaceProblemsSyncManagementService {
   private toStatus(
     account: Pick<MarketplaceAccount, 'id' | 'nickname'>,
     job: MarketplaceProblemsSyncJobRow | null,
+    quarantinedClaimsCount: number,
   ): ProblemsSyncStatusDto {
     return {
       accountId: account.id,
       accountNickname: account.nickname ?? null,
       jobStatus: job?.status ?? 'NOT_STARTED',
       windowCursorAt: iso(job?.windowCursorAt ?? null),
+      incrementalCoveredThrough: iso(job?.windowCursorAt ?? null),
+      historicalCoveredFrom: iso(job?.historicalCoveredFrom ?? null),
+      historicalTargetFrom: iso(job?.historicalTargetFrom ?? null),
+      historicalCompletedAt: iso(job?.historicalCompletedAt ?? null),
+      historicalStatus: job?.historicalStatus ?? 'NOT_STARTED',
+      historicalLastErrorCode: job?.historicalLastErrorCode ?? null,
+      quarantinedClaimsCount,
       lastCompleteCensusAt: iso(job?.lastCompleteCensusAt ?? null),
       lastActivityAt: iso(job?.lastActivityAt ?? null),
       nextAttemptAt: iso(job?.nextAttemptAt ?? null),
@@ -70,8 +80,15 @@ export class MarketplaceProblemsSyncManagementService {
     const byAccount = new Map(
       jobs.map((job) => [job.marketplaceAccountId, job]),
     );
+    const pending = await this.quarantine.countPendingByAccount(
+      accounts.map((account) => account.id),
+    );
     return accounts.map((account) =>
-      this.toStatus(account, byAccount.get(account.id) ?? null),
+      this.toStatus(
+        account,
+        byAccount.get(account.id) ?? null,
+        pending.get(account.id) ?? 0,
+      ),
     );
   }
 
@@ -96,7 +113,7 @@ export class MarketplaceProblemsSyncManagementService {
   ): Promise<ProblemsSyncStatusDto> {
     const account = await this.resolveAccount(scope, accountId);
     const job = await this.jobs.createIfAbsent(accountId, new Date());
-    return this.toStatus(account, job);
+    return this.toStatusWithQuarantine(account, job);
   }
 
   async pause(
@@ -107,7 +124,7 @@ export class MarketplaceProblemsSyncManagementService {
     const existing = await this.jobs.findByAccountId(accountId);
     if (!existing) throw new NotFoundException(PROBLEMS_SYNC_JOB_NOT_STARTED);
     const paused = await this.jobs.requestPause(accountId);
-    return this.toStatus(account, paused ?? existing);
+    return this.toStatusWithQuarantine(account, paused ?? existing);
   }
 
   /** Limpa tentativas/erro e agenda execução; job já ativo apenas devolve o status. */
@@ -117,9 +134,41 @@ export class MarketplaceProblemsSyncManagementService {
   ): Promise<ProblemsSyncStatusDto> {
     const account = await this.resolveAccount(scope, accountId);
     const resumed = await this.jobs.resume(accountId, new Date());
-    if (resumed) return this.toStatus(account, resumed);
+    if (resumed) return this.toStatusWithQuarantine(account, resumed);
     const existing = await this.jobs.findByAccountId(accountId);
     if (!existing) throw new NotFoundException(PROBLEMS_SYNC_JOB_NOT_STARTED);
-    return this.toStatus(account, existing);
+    return this.toStatusWithQuarantine(account, existing);
+  }
+
+  /** Pausa SÓ o backfill histórico (o incremental segue); idempotente. */
+  async pauseHistorical(
+    scope: AccountScope,
+    accountId: string,
+  ): Promise<ProblemsSyncStatusDto> {
+    const account = await this.resolveAccount(scope, accountId);
+    const existing = await this.jobs.findByAccountId(accountId);
+    if (!existing) throw new NotFoundException(PROBLEMS_SYNC_JOB_NOT_STARTED);
+    const paused = await this.jobs.pauseHistorical(accountId);
+    return this.toStatusWithQuarantine(account, paused ?? existing);
+  }
+
+  /** Retoma o backfill histórico `PAUSED`/`FAILED` do cursor salvo; idempotente. */
+  async resumeHistorical(
+    scope: AccountScope,
+    accountId: string,
+  ): Promise<ProblemsSyncStatusDto> {
+    const account = await this.resolveAccount(scope, accountId);
+    const existing = await this.jobs.findByAccountId(accountId);
+    if (!existing) throw new NotFoundException(PROBLEMS_SYNC_JOB_NOT_STARTED);
+    const resumed = await this.jobs.resumeHistorical(accountId);
+    return this.toStatusWithQuarantine(account, resumed ?? existing);
+  }
+
+  private async toStatusWithQuarantine(
+    account: Pick<MarketplaceAccount, 'id' | 'nickname'>,
+    job: MarketplaceProblemsSyncJobRow,
+  ): Promise<ProblemsSyncStatusDto> {
+    const pending = await this.quarantine.countPendingByAccount([account.id]);
+    return this.toStatus(account, job, pending.get(account.id) ?? 0);
   }
 }

@@ -9,6 +9,9 @@ import {
  * `after`/`before` do Mercado Livre, não confirmada por chamada real. */
 export const WINDOW_SPLIT_OVERLAP_MS = 1000;
 
+/** Cursor mais que isto atrás de `now` depois de um tick bem-sucedido = backlog do incremental. */
+export const INCREMENTAL_BACKLOG_TOLERANCE_MS = 2 * WINDOW_SPLIT_OVERLAP_MS;
+
 const PAGE_LIMIT = 100;
 const MAX_OFFSET_PLUS_LIMIT = 10000;
 
@@ -20,6 +23,8 @@ export interface WindowRange {
 export interface SearchPageResult {
   ids: string[];
   total: number;
+  /** `date_created` de cada claim, do resultado VALIDADO da busca (id -> data). */
+  dates?: ReadonlyMap<string, Date>;
 }
 
 export type FetchWindowPage = (
@@ -29,7 +34,14 @@ export type FetchWindowPage = (
 ) => Promise<ClaimsHttpOutcome<SearchPageResult>>;
 
 export type CommitSafeSubWindowResult =
-  | { kind: 'committed'; range: WindowRange; ids: string[]; callsUsed: number }
+  | {
+      kind: 'committed';
+      range: WindowRange;
+      ids: string[];
+      /** Data de criação conhecida dos `ids` (vem da busca; nunca de `fetch_core`). */
+      dates: Map<string, Date>;
+      callsUsed: number;
+    }
   | { kind: 'safety_limit_reached'; range: WindowRange; callsUsed: number }
   | { kind: 'claim_budget_exhausted'; callsUsed: number }
   | { kind: 'call_budget_exhausted'; callsUsed: number }
@@ -48,6 +60,11 @@ export type CommitSafeSubWindowResult =
  * determinístico), com `WINDOW_SPLIT_OVERLAP_MS` de sobreposição para nunca
  * perder um claim exatamente no ponto de divisão.
  *
+ * `direction: 'backward'` (backfill histórico) inverte a divisão: mantém
+ * `window.to` e tenta primeiro a metade DIREITA (a mais recente, contígua ao
+ * que já foi coberto), com a mesma sobreposição — a sub-janela commitada
+ * `[range.from, window.to]` nunca deixa buraco entre ela e o que veio antes.
+ *
  * Com VÁRIAS buscas (ex.: um status por busca), cada sub-janela candidata é
  * sondada em todas, na ordem dada, e a decisão de caber é conjunta (soma dos
  * totais e das páginas; teto de offset por busca): ou a sub-janela inteira é
@@ -60,6 +77,7 @@ export async function commitSafeSubWindow(
   remainingClaimBudget: number,
   remainingHttpCallBudget: number,
   minSplitMs: number,
+  direction: 'forward' | 'backward' = 'forward',
 ): Promise<CommitSafeSubWindowResult> {
   const fetchers = typeof fetchPages === 'function' ? [fetchPages] : fetchPages;
   let candidate = window;
@@ -102,15 +120,20 @@ export async function commitSafeSubWindow(
 
     if (fitsCap && fitsClaimBudget && fitsCallReservation) {
       const ids = new Set<string>();
+      const dates = new Map<string, Date>();
+      const collect = (page: SearchPageResult): void => {
+        for (const id of page.ids) ids.add(id);
+        page.dates?.forEach((date, id) => dates.set(id, date));
+      };
       for (const [index, fetchPage] of fetchers.entries()) {
-        for (const id of probes[index].ids) ids.add(id);
+        collect(probes[index]);
         let offset = PAGE_LIMIT;
         while (offset < probes[index].total) {
           const page = await fetchPage(candidate, offset, PAGE_LIMIT);
           remainingCalls -= 1;
           callsUsed += 1;
           if (page.kind !== 'success') return searchError(page);
-          for (const id of page.data.ids) ids.add(id);
+          collect(page.data);
           offset += PAGE_LIMIT;
         }
       }
@@ -120,7 +143,13 @@ export async function commitSafeSubWindow(
       if (remainingCalls < ids.size) {
         return { kind: 'call_budget_exhausted', callsUsed };
       }
-      return { kind: 'committed', range: candidate, ids: [...ids], callsUsed };
+      return {
+        kind: 'committed',
+        range: candidate,
+        ids: [...ids],
+        dates,
+        callsUsed,
+      };
     }
 
     const windowSizeMs = candidate.to.getTime() - candidate.from.getTime();
@@ -135,10 +164,16 @@ export async function commitSafeSubWindow(
     }
 
     const midMs = candidate.from.getTime() + windowSizeMs / 2;
-    candidate = {
-      from: candidate.from,
-      to: new Date(midMs + WINDOW_SPLIT_OVERLAP_MS),
-    };
+    candidate =
+      direction === 'forward'
+        ? {
+            from: candidate.from,
+            to: new Date(midMs + WINDOW_SPLIT_OVERLAP_MS),
+          }
+        : {
+            from: new Date(midMs - WINDOW_SPLIT_OVERLAP_MS),
+            to: candidate.to,
+          };
   }
 }
 

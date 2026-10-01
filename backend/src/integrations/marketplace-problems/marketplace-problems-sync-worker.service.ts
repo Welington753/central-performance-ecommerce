@@ -192,6 +192,7 @@ export class MarketplaceProblemsSyncWorkerService
       lastActivityAt: now,
       lastErrorCode: job.lastErrorCode,
       lastCompleteCensusAt: null,
+      historical: null,
     };
   }
 }

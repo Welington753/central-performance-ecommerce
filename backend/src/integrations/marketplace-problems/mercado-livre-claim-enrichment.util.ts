@@ -31,7 +31,7 @@ const UNAUTHORIZED_CODE: Record<ClaimOperation, ProblemsSyncFailureCode> = {
  */
 export type ClaimOutcomeClassification =
   | { kind: 'ok' }
-  | { kind: 'isolated'; forbidden: boolean }
+  | { kind: 'isolated'; forbidden: boolean; notFound: boolean }
   | { kind: 'abort_auth'; failureCode: ProblemsSyncFailureCode }
   | { kind: 'abort_provider' }
   | { kind: 'abort_rate_limit'; retryAfterMs: number | null };
@@ -46,15 +46,16 @@ export function classifyClaimsHttpOutcome(
     case 'unauthorized':
       return { kind: 'abort_auth', failureCode: UNAUTHORIZED_CODE[operation] };
     case 'forbidden':
-      return { kind: 'isolated', forbidden: true };
+      return { kind: 'isolated', forbidden: true, notFound: false };
     case 'provider_unavailable':
       return { kind: 'abort_provider' };
     case 'rate_limited':
       return { kind: 'abort_rate_limit', retryAfterMs: outcome.retryAfterMs };
     case 'not_found':
+      return { kind: 'isolated', forbidden: false, notFound: true };
     case 'invalid_response':
     case 'invalid_request':
-      return { kind: 'isolated', forbidden: false };
+      return { kind: 'isolated', forbidden: false, notFound: false };
   }
 }
 
@@ -133,6 +134,8 @@ export interface ProblemsSyncCounters {
   claimsPersisted: number;
   claimsPreserved: number;
   claimsFailed: number;
+  /** 403 em fetch_core registrado na quarentena: conta como coberto, nunca como falha. */
+  claimsQuarantined: number;
   detailFailures: number;
   reputationFailures: number;
   reasonLookupFailures: number;
@@ -146,6 +149,7 @@ export function emptyProblemsSyncCounters(): ProblemsSyncCounters {
     claimsPersisted: 0,
     claimsPreserved: 0,
     claimsFailed: 0,
+    claimsQuarantined: 0,
     detailFailures: 0,
     reputationFailures: 0,
     reasonLookupFailures: 0,
@@ -260,6 +264,12 @@ export function toSearchPageOutcome(
     data: {
       ids: outcome.data.data.map((c) => c.externalClaimId),
       total: outcome.data.paging.total,
+      dates: new Map(
+        outcome.data.data.map((c) => [
+          c.externalClaimId,
+          new Date(c.dateCreated),
+        ]),
+      ),
     },
   };
 }
@@ -296,6 +306,7 @@ export function zeroProblemsSyncResult(
   claimsPersisted: number;
   claimsPreserved: number;
   claimsFailed: number;
+  claimsQuarantined: number;
   detailFailures: number;
   reputationFailures: number;
   reasonLookupFailures: number;
@@ -316,6 +327,7 @@ export function zeroProblemsSyncResult(
     claimsPersisted: 0,
     claimsPreserved: 0,
     claimsFailed: 0,
+    claimsQuarantined: 0,
     detailFailures: 0,
     reputationFailures: 0,
     reasonLookupFailures: 0,

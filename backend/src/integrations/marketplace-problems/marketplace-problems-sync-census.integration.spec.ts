@@ -7,9 +7,8 @@ import { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-li
 import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import { MarketplaceProblemsSyncJobsPersistenceService } from './marketplace-problems-sync-jobs-persistence.service';
-import { MarketplaceProblemsSyncTickService } from './marketplace-problems-sync-tick.service';
+import { buildProblemsSyncServices } from './marketplace-problems-sync-test-wiring';
 import { MarketplaceProblemsSyncWorkerService } from './marketplace-problems-sync-worker.service';
-import { MercadoLivreProblemsSyncService } from './mercado-livre-problems-sync.service';
 
 function jsonResponse(status: number, body: unknown): Response {
   return {
@@ -145,17 +144,18 @@ describe('Censo de claims abertos no tick (Postgres real + HTTP mockado)', () =>
         externalSellerId: 'seller-1',
       }),
     };
-    const sync = new MercadoLivreProblemsSyncService(
-      preflight as never,
+    const { tick } = buildProblemsSyncServices({
+      dataSource,
+      preflight,
       httpClient,
       reasonCache,
       problems,
-      fakeConfig(),
-    );
+      configService: fakeConfig(),
+    });
     return new MarketplaceProblemsSyncWorkerService(
       fakeConfig(workerConfig),
       jobs,
-      new MarketplaceProblemsSyncTickService(sync),
+      tick,
     );
   }
 

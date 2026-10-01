@@ -512,3 +512,100 @@ describe('computeAdvancedWindowFrom', () => {
     expect(new Date(next).getTime()).toBeGreaterThan(originalFrom.getTime());
   });
 });
+
+describe('commitSafeSubWindow com direction="backward" (backfill histórico)', () => {
+  it('divide mantendo `window.to` e tenta primeiro a metade DIREITA, com sobreposição', async () => {
+    const t0 = new Date('2026-01-01T00:00:00.000Z').getTime();
+    // 10_100 claims num intervalo de ~2h45: estoura o teto de offset de 10_000.
+    const fetchPage = makeUniformFetchPage(t0, 10_100, 1000);
+    const window = {
+      from: new Date(t0),
+      to: new Date(t0 + 10_100 * 1000),
+    };
+
+    const result = await commitSafeSubWindow(
+      fetchPage,
+      window,
+      100_000,
+      100_000,
+      1,
+      'backward',
+    );
+
+    expect(result.kind).toBe('committed');
+    if (result.kind !== 'committed') return;
+    expect(result.range.to.getTime()).toBe(window.to.getTime());
+    const mid = t0 + (10_100 * 1000) / 2;
+    expect(result.range.from.getTime()).toBe(mid - WINDOW_SPLIT_OVERLAP_MS);
+    expect(result.ids.length).toBeLessThan(10_000);
+  });
+
+  it('o padrão (forward) continua mantendo `from` e tentando a metade ESQUERDA', async () => {
+    const t0 = new Date('2026-01-01T00:00:00.000Z').getTime();
+    const fetchPage = makeUniformFetchPage(t0, 10_100, 1000);
+    const window = { from: new Date(t0), to: new Date(t0 + 10_100 * 1000) };
+
+    const result = await commitSafeSubWindow(
+      fetchPage,
+      window,
+      100_000,
+      100_000,
+      1,
+    );
+
+    expect(result.kind).toBe('committed');
+    if (result.kind !== 'committed') return;
+    expect(result.range.from.getTime()).toBe(window.from.getTime());
+    expect(result.range.to.getTime()).toBeLessThan(window.to.getTime());
+  });
+
+  it('divisão sem perder fronteiras: várias execuções para trás cobrem TODOS os claims, inclusive os exatamente nas fronteiras', async () => {
+    const t0 = new Date('2026-01-01T00:00:00.000Z').getTime();
+    const total = 500;
+    // 1 claim por segundo: há sempre um claim exatamente em cada fronteira.
+    const fetchPage = makeUniformFetchPage(t0, total, 1000);
+    const target = new Date(t0);
+    let to = new Date(t0 + total * 1000);
+    const seen = new Set<string>();
+    let coveredFrom = to;
+    let rounds = 0;
+
+    while (coveredFrom.getTime() > target.getTime() && rounds < 50) {
+      rounds += 1;
+      const result = await commitSafeSubWindow(
+        fetchPage,
+        { from: target, to },
+        // Orçamento de claims pequeno força divisões a cada rodada.
+        60,
+        10_000,
+        1,
+        'backward',
+      );
+      expect(result.kind).toBe('committed');
+      if (result.kind !== 'committed') return;
+      // Contígua ao que já estava coberto (nunca deixa buraco pela direita).
+      expect(result.range.to.getTime()).toBe(to.getTime());
+      for (const id of result.ids) seen.add(id);
+      coveredFrom = result.range.from;
+      to = new Date(coveredFrom.getTime() + WINDOW_SPLIT_OVERLAP_MS);
+    }
+
+    expect(rounds).toBeGreaterThan(1);
+    expect(coveredFrom.getTime()).toBeLessThanOrEqual(target.getTime());
+    expect(seen.size).toBe(total);
+  });
+
+  it('janela no minSplitMs que ainda não cabe: nunca commita parcial (safety/orçamento)', async () => {
+    const t0 = new Date('2026-01-01T00:00:00.000Z').getTime();
+    const fetchPage = makeUniformFetchPage(t0, 300, 10);
+    const result = await commitSafeSubWindow(
+      fetchPage,
+      { from: new Date(t0), to: new Date(t0 + 3000) },
+      10,
+      10_000,
+      60_000,
+      'backward',
+    );
+    expect(result.kind).toBe('claim_budget_exhausted');
+  });
+});

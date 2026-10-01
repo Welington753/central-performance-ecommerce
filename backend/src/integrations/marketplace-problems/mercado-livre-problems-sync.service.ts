@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-livre-claims-http.client';
+import { MarketplaceProblemClaimQuarantineRepository } from './marketplace-problem-claim-quarantine.repository';
 import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import {
@@ -15,6 +16,7 @@ import {
   type FetchWindowPage,
   type WindowRange,
 } from './mercado-livre-claims-window.util';
+import { buildCreationWindowFetchers } from './mercado-livre-problems-window-fetchers.util';
 import { MercadoLivreProblemsSyncPreflight } from './mercado-livre-problems-sync-preflight.util';
 import { MercadoLivreProblemsCandidateProcessor } from './mercado-livre-problems-candidate-processor';
 import {
@@ -42,8 +44,7 @@ export type {
   ProblemsSyncStopReason,
 } from './mercado-livre-problems-sync.types';
 
-/** Status de TODA sub-janela de criação (sem `status` = 400 em produção); `opened` primeiro: claim que fecha entre as buscas reaparece em `closed`. */
-export const CREATION_WINDOW_STATUSES = ['opened', 'closed'] as const;
+export { CREATION_WINDOW_STATUSES } from './mercado-livre-problems-window-fetchers.util';
 
 /**
  * Orquestração de sincronização do Mercado Livre Claims (CP2-B) — descobre
@@ -63,6 +64,7 @@ export class MercadoLivreProblemsSyncService {
     private readonly httpClient: MercadoLivreClaimsHttpClient,
     reasonCache: MarketplaceProblemReasonsCacheRepository,
     private readonly persistence: MarketplaceProblemsPersistenceService,
+    quarantine: MarketplaceProblemClaimQuarantineRepository,
     configService: ConfigService,
   ) {
     this.limits = new ProblemsSyncLimits(configService);
@@ -70,6 +72,7 @@ export class MercadoLivreProblemsSyncService {
       httpClient,
       reasonCache,
       persistence,
+      quarantine,
       this.limits,
     );
   }
@@ -91,20 +94,10 @@ export class MercadoLivreProblemsSyncService {
     const { accessToken, externalSellerId } =
       await this.preflight.resolveAccountAndToken(accountId);
 
-    const fetchPages = CREATION_WINDOW_STATUSES.map(
-      (status): FetchWindowPage =>
-        async (range, offset, limit) =>
-          toSearchPageOutcome(
-            await this.httpClient.searchClaims({
-              accessToken,
-              sellerUserId: externalSellerId,
-              status,
-              dateRange: { after: range.from, before: range.to },
-              offset,
-              limit,
-              operation: `search_creation_${status}`,
-            }),
-          ),
+    const fetchPages = buildCreationWindowFetchers(
+      this.httpClient,
+      accessToken,
+      externalSellerId,
     );
 
     const commit = await commitSafeSubWindow(
@@ -167,6 +160,7 @@ export class MercadoLivreProblemsSyncService {
 
     if (fitsCap && fitsClaimBudget && fitsReservation) {
       const ids = new Set<string>(probe.data.ids);
+      const dates = new Map<string, Date>(probe.data.dates ?? []);
       let offset = SEARCH_PAGE_LIMIT;
       while (offset < total) {
         const pageRaw = await this.httpClient.searchClaims({
@@ -183,6 +177,7 @@ export class MercadoLivreProblemsSyncService {
           return resultFromCensusSearchFailure(pageRaw, callsUsed);
         }
         for (const id of page.data.ids) ids.add(id);
+        page.data.dates?.forEach((date, id) => dates.set(id, date));
         offset += SEARCH_PAGE_LIMIT;
       }
       const idsArr = [...ids];
@@ -191,6 +186,7 @@ export class MercadoLivreProblemsSyncService {
         accessToken,
         maxHttpCalls - callsUsed,
         accountId,
+        dates,
       );
       return assembleResult(outcome, idsArr.length, callsUsed, null, null);
     }
@@ -259,7 +255,7 @@ export class MercadoLivreProblemsSyncService {
     const { accessToken } =
       await this.preflight.resolveAccountAndToken(accountId);
 
-    let rows: Array<{ externalClaimId: string }>;
+    let rows: Array<{ externalClaimId: string; dateCreated?: Date }>;
     try {
       rows = await this.persistence.findProblemsNeedingRefresh(
         accountId,
@@ -277,11 +273,20 @@ export class MercadoLivreProblemsSyncService {
     }
 
     const ids = rows.map((row) => row.externalClaimId);
+    // A data do problema já persistido acompanha uma eventual quarentena.
+    const dates = new Map<string, Date>(
+      rows.flatMap((row): Array<[string, Date]> =>
+        row.dateCreated instanceof Date
+          ? [[row.externalClaimId, row.dateCreated]]
+          : [],
+      ),
+    );
     const outcome = await this.processor.processCandidates(
       ids,
       accessToken,
       maxHttpCalls,
       accountId,
+      dates,
     );
     return assembleResult(outcome, ids.length, 0, null, null);
   }
@@ -305,6 +310,7 @@ export class MercadoLivreProblemsSyncService {
         accessToken,
         remainingForProcessing,
         accountId,
+        commit.dates,
       );
       return {
         ...resultFromOutcome(outcome),

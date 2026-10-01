@@ -35,7 +35,7 @@ export interface ProblemsWhere {
   params: unknown[];
 }
 
-function assertRealDate(value: string): void {
+export function assertRealDate(value: string): void {
   const [year, month, day] = value.split('-').map(Number);
   const date = new Date(Date.UTC(year, month - 1, day));
   if (

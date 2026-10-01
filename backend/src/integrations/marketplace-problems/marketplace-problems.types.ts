@@ -1,4 +1,23 @@
-import type { MarketplaceProblemsSyncJobStatus } from './marketplace-problems-sync-jobs.types';
+import type {
+  MarketplaceProblemsHistoricalStatus,
+  MarketplaceProblemsSyncJobStatus,
+} from './marketplace-problems-sync-jobs.types';
+
+/** Cobertura do backfill histórico de uma conta (compartilhada por status e resumo). */
+export interface ProblemsHistoricalCoverageDto {
+  /** Até onde o incremental varreu (= início da próxima janela de criação). */
+  incrementalCoveredThrough: string | null;
+  /** Menor data JÁ coberta pelo histórico (anda para trás). */
+  historicalCoveredFrom: string | null;
+  /** Pedido persistido mais antigo da conta; `null` = sem alvo (nenhuma data inventada). */
+  historicalTargetFrom: string | null;
+  historicalCompletedAt: string | null;
+  /** `NOT_STARTED` = job nunca iniciado. "Completo" só com `COMPLETED`. */
+  historicalStatus: MarketplaceProblemsHistoricalStatus | 'NOT_STARTED';
+  historicalLastErrorCode: string | null;
+  /** Claims em quarentena PENDENTES (403 em fetch_core) — fora dos KPIs. */
+  quarantinedClaimsCount: number;
+}
 
 /** Responsabilidade de um problema. `UNKNOWN` é o default (nenhuma classificação automática existe). */
 export const PROBLEM_RESPONSIBILITIES = [
@@ -121,7 +140,7 @@ export interface ProblemsPageDto {
   totalPages: number;
 }
 
-export interface ProblemsCoverageAccountDto {
+export interface ProblemsCoverageAccountDto extends ProblemsHistoricalCoverageDto {
   accountId: string;
   accountNickname: string | null;
   marketplace: string;
@@ -131,6 +150,8 @@ export interface ProblemsCoverageAccountDto {
   /** Início da próxima janela de criação (tudo antes dele já foi varrido). */
   windowCursorAt: string | null;
   lastCompleteCensusAt: string | null;
+  lastActivityAt: string | null;
+  lastErrorCode: string | null;
 }
 
 export interface ProblemsSummaryDto {
@@ -156,7 +177,7 @@ export interface ProblemReasonOptionDto {
 }
 
 /** Status do job de uma conta (`NOT_STARTED` = nunca iniciado; nada é criado automaticamente). */
-export interface ProblemsSyncStatusDto {
+export interface ProblemsSyncStatusDto extends ProblemsHistoricalCoverageDto {
   accountId: string;
   accountNickname: string | null;
   jobStatus: MarketplaceProblemsSyncJobStatus | 'NOT_STARTED';
@@ -170,4 +191,54 @@ export interface ProblemsSyncStatusDto {
   claimsProcessedCount: number;
   /** `false` = o job está preparado, mas o servidor não o processará até a ativação do worker. */
   workerEnabled: boolean;
+}
+
+/**
+ * Cobertura de um mês: `COMPLETE` só com o mês inteiro dentro do intervalo
+ * varrido e sem pendência que o toque; `PARTIAL` fora/atravessando o intervalo
+ * ou com quarentena datada no mês; `UNKNOWN` sem job ou com quarentena legada
+ * sem data (ver `monthlyCoverage`).
+ */
+export type ProblemsMonthlyCoverage = 'COMPLETE' | 'PARTIAL' | 'UNKNOWN';
+
+export interface ProblemsMonthlyReasonDto {
+  /** Código original (nome do motivo no cache; `reason_id` se o cache não o tiver) — para diagnóstico. */
+  code: string;
+  /** Rótulo PT-BR do catálogo central; código desconhecido vira texto legível seguro. */
+  label: string;
+  count: number;
+}
+
+/** Um mês (America/Sao_Paulo) de UMA conta. */
+export interface ProblemsMonthlyItemDto {
+  yearMonth: string;
+  accountId: string;
+  accountNickname: string | null;
+  marketplace: string;
+  totalProblems: number;
+  openProblems: number;
+  resolvedProblems: number;
+  reputationImpactCount: number;
+  totalOrders: number;
+  /** `null` quando o mês não tem pedidos (nunca divide por zero). */
+  problemsPer100Orders: number | null;
+  /** Percentual 0–100 (resolvidos / total); `null` sem problemas. */
+  resolutionRate: number | null;
+  /** `null` sem nenhum problema resolvido com datas de criação e resolução. */
+  averageResolutionHours: number | null;
+  topReasons: ProblemsMonthlyReasonDto[];
+  coverage: ProblemsMonthlyCoverage;
+  /** `true` só com cobertura `COMPLETE` e pedidos no mês; caso contrário a taxa é provisória. */
+  rateDefinitive: boolean;
+  /** Quarentenas pendentes da conta (todas as datas). */
+  quarantinedClaimsCount: number;
+  /** Pendentes cuja data de criação (da busca) cai neste mês — só estas tornam o mês PARTIAL. */
+  quarantinedClaimsInMonthCount: number;
+  /** Pendentes legadas sem data conhecida — deixam a cobertura de todos os meses completos INDETERMINADA (UNKNOWN). */
+  quarantinedUnknownDateCount: number;
+}
+
+export interface ProblemsMonthlyDto {
+  timezone: 'America/Sao_Paulo';
+  items: ProblemsMonthlyItemDto[];
 }

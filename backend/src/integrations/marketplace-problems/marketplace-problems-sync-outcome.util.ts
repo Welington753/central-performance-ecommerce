@@ -7,7 +7,7 @@ import type {
   ProblemsSyncTickThrownCode,
 } from './marketplace-problems-sync-tick.service';
 import type { ProblemsSyncWorkerConfig } from './marketplace-problems-sync-worker-config.util';
-import { WINDOW_SPLIT_OVERLAP_MS } from './mercado-livre-claims-window.util';
+import { INCREMENTAL_BACKLOG_TOLERANCE_MS } from './mercado-livre-claims-window.util';
 import type { ProblemsSyncStopReason } from './mercado-livre-problems-sync.types';
 
 /**
@@ -54,9 +54,6 @@ const STOP_REASON_KIND: Record<ProblemsSyncStopReason, OutcomeKind> = {
   SAFETY_LIMIT_REACHED: 'TERMINAL',
 };
 
-/** Cursor a mais que isto atrás de `now` depois de um tick bem-sucedido = backlog: próximo tick já. */
-const BACKLOG_TOLERANCE_MS = 2 * WINDOW_SPLIT_OVERLAP_MS;
-
 function classify(report: ProblemsSyncTickReport): {
   kind: OutcomeKind;
   errorCode: string | null;
@@ -102,13 +99,16 @@ export function buildCommitUpdate(
     // `last_census_at` = último censo COMPLETO e bem-sucedido; qualquer outra
     // coisa (yield, safety limit, erro, falha) mantém o valor anterior (`null`).
     lastCompleteCensusAt: report.censusCompletedInFull ? now : null,
+    // Progresso do backfill histórico (mesmo commit/CAS); `null` = não tocado.
+    historical: report.historical,
   };
   const at = (ms: number) => new Date(now.getTime() + ms);
 
   switch (kind) {
     case 'SUCCESS': {
       const backlog =
-        now.getTime() - windowCursorAt.getTime() > BACKLOG_TOLERANCE_MS &&
+        now.getTime() - windowCursorAt.getTime() >
+          INCREMENTAL_BACKLOG_TOLERANCE_MS &&
         report.creationCursorAdvancedTo !== null;
       return {
         ...base,

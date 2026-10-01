@@ -20,8 +20,9 @@ export type ProblemsSyncStopReason =
  * claim ID, payload ou mensagem crua) — gravado em `last_error_code` no lugar
  * do `stopReason` genérico. `*_UNAUTHORIZED` (401, qualquer operação) e
  * `SEARCH_FORBIDDEN` são falhas globais; `CORE_FORBIDDEN` é 403 isolado de UM
- * claim (cobertura incompleta, nunca FAILED_AUTH). 403 em detail/reputation/
- * reason é enriquecimento isolado e não gera código.
+ * claim: vai para a quarentena durável (conta como coberto, nunca
+ * FAILED_AUTH). 403 em detail/reputation/reason é enriquecimento isolado e
+ * não gera código.
  */
 export type ProblemsSyncFailureCode =
   | 'SEARCH_UNAUTHORIZED'
@@ -45,6 +46,7 @@ export interface ProblemsSyncResult {
   claimsPersisted: number;
   claimsPreserved: number;
   claimsFailed: number;
+  claimsQuarantined: number;
   detailFailures: number;
   reputationFailures: number;
   reasonLookupFailures: number;

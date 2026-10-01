@@ -9,9 +9,9 @@ import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
 import { MarketplaceProblemsSyncJobsPersistenceService } from './marketplace-problems-sync-jobs-persistence.service';
 import { MarketplaceProblemsSyncManagementService } from './marketplace-problems-sync-management.service';
-import { MarketplaceProblemsSyncTickService } from './marketplace-problems-sync-tick.service';
+import { buildProblemsSyncServices } from './marketplace-problems-sync-test-wiring';
+import { MarketplaceProblemClaimQuarantineRepository } from './marketplace-problem-claim-quarantine.repository';
 import { MarketplaceProblemsSyncWorkerService } from './marketplace-problems-sync-worker.service';
-import { MercadoLivreProblemsSyncService } from './mercado-livre-problems-sync.service';
 
 const TOKEN = 'fake-token-auth-isolation';
 const REASON_ID = 'PDD9999';
@@ -231,13 +231,14 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
         }),
       ),
     };
-    const sync = new MercadoLivreProblemsSyncService(
-      preflight as never,
+    const { tick } = buildProblemsSyncServices({
+      dataSource,
+      preflight,
       httpClient,
       reasonCache,
       problems,
-      fakeConfig(),
-    );
+      configService: fakeConfig(),
+    });
     return new MarketplaceProblemsSyncWorkerService(
       fakeConfig({
         PROBLEMS_SYNC_WORKER_TICK_MAX_CLAIMS: 50,
@@ -245,7 +246,7 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
         PROBLEMS_SYNC_WORKER_MAX_CONCURRENT_JOBS: 2,
       }),
       jobs,
-      new MarketplaceProblemsSyncTickService(sync),
+      tick,
     );
   }
 
@@ -285,6 +286,22 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
          FROM marketplace_problems
         WHERE marketplace_account_id = $1
         ORDER BY external_claim_id`,
+      [accountId],
+    );
+  }
+
+  async function quarantineRows(accountId: string) {
+    return dataSource.query<
+      Array<{
+        external_claim_id: string;
+        failure_code: string;
+        attempt_count: number;
+        resolved_at: Date | null;
+      }>
+    >(
+      `SELECT external_claim_id, failure_code, attempt_count, resolved_at
+         FROM marketplace_problem_claim_quarantine
+        WHERE marketplace_account_id = $1 ORDER BY external_claim_id`,
       [accountId],
     );
   }
@@ -352,7 +369,7 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
     },
   );
 
-  it('403 em fetch_core: sem FAILED_AUTH nem TOKEN_EXPIRED, cursor parado, retomável sem duplicar e sem perder a correção manual', async () => {
+  it('403 em fetch_core: quarentena durável, sem FAILED_AUTH, janela AVANÇA, retomável sem duplicar e sem perder a correção manual', async () => {
     const job = await newJob(ml1.id);
     const a = addClaim(ml1);
     const b = addClaim(ml1);
@@ -362,14 +379,25 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
 
     await worker.runTickOnce();
 
-    const failed = (await jobs.findByAccountId(ml1.id))!;
-    expect(failed.status).toBe('WAITING_RETRY');
-    expect(failed.lastErrorCode).toBe('CORE_FORBIDDEN');
-    expect(failed.attemptCount).toBe(1);
-    expect(failed.windowCursorAt.getTime()).toBe(job.windowCursorAt.getTime());
+    const first = (await jobs.findByAccountId(ml1.id))!;
+    expect(first.status).toBe('RUNNING');
+    expect(first.lastErrorCode).toBeNull();
+    expect(first.attemptCount).toBe(0);
+    // O claim bloqueado NÃO trava a janela: o cursor avança.
+    expect(first.windowCursorAt.getTime()).toBeGreaterThan(
+      job.windowCursorAt.getTime(),
+    );
     expect(await accountStatus(ml1.id)).toBe('CONNECTED');
     expect((await rows(ml1.id)).map((r) => r.external_claim_id)).toEqual([
       a.id,
+    ]);
+    expect(await quarantineRows(ml1.id)).toEqual([
+      expect.objectContaining({
+        external_claim_id: b.id,
+        failure_code: 'CORE_FORBIDDEN',
+        attempt_count: 1,
+        resolved_at: null,
+      }),
     ]);
 
     // Correção manual de responsabilidade no claim já persistido.
@@ -382,23 +410,28 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
       [ml1.id, a.id],
     );
 
-    // Provedor volta a liberar o claim: retomada normal, sem reconexão.
+    // Provedor volta a liberar o claim: o retry da quarentena o persiste e a resolve.
     currentRule = () => null;
+    await dataSource.query(
+      `UPDATE marketplace_problem_claim_quarantine
+          SET next_attempt_at = now() - interval '1 second'
+        WHERE marketplace_account_id = $1`,
+      [ml1.id],
+    );
     await makeDue(job.id);
     await worker.runTickOnce();
 
     const recovered = (await jobs.findByAccountId(ml1.id))!;
     expect(recovered.status).toBe('RUNNING');
     expect(recovered.lastErrorCode).toBeNull();
-    expect(recovered.attemptCount).toBe(0);
-    expect(recovered.windowCursorAt.getTime()).toBeGreaterThan(
-      job.windowCursorAt.getTime(),
-    );
     const final = await rows(ml1.id);
     expect(final.map((r) => r.external_claim_id)).toEqual([a.id, b.id].sort());
     const rowA = final.find((r) => r.external_claim_id === a.id)!;
     expect(rowA.responsibility).toBe('SELLER');
     expect(rowA.responsibility_confidence).toBe('MANUAL');
+    const quarantined = await quarantineRows(ml1.id);
+    expect(quarantined).toHaveLength(1);
+    expect(quarantined[0].resolved_at).not.toBeNull();
   });
 
   it.each([
@@ -467,7 +500,7 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
 
   it('status exposto pela API e log de diagnóstico continuam sanitizados', async () => {
     await newJob(ml1.id);
-    const a = addClaim(ml1);
+    addClaim(ml1);
     currentRule = (op) => (op === 'core' ? 403 : null);
     const worker = buildWorker();
 
@@ -476,6 +509,7 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
     const account = { id: ml1.id, nickname: 'Conta 1' };
     const management = new MarketplaceProblemsSyncManagementService(
       jobs,
+      new MarketplaceProblemClaimQuarantineRepository(dataSource),
       {} as never,
       {
         findAllForScope: () =>
@@ -484,19 +518,28 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
       fakeConfig(),
     );
     const [status] = await management.status({ mode: 'ALL' } as never);
-    expect(status.lastErrorCode).toBe('CORE_FORBIDDEN');
+    // 403 isolado vira quarentena: o job não registra erro, a pendência é contada.
+    expect(status.lastErrorCode).toBeNull();
+    expect(status.quarantinedClaimsCount).toBe(1);
     expect(Object.keys(status).sort()).toEqual(
       [
         'accountId',
         'accountNickname',
         'attemptCount',
         'claimsProcessedCount',
+        'historicalCompletedAt',
+        'historicalCoveredFrom',
+        'historicalLastErrorCode',
+        'historicalStatus',
+        'historicalTargetFrom',
+        'incrementalCoveredThrough',
         'jobStatus',
         'lastActivityAt',
         'lastCompleteCensusAt',
         'lastErrorCode',
         'nextAttemptAt',
         'pauseRequested',
+        'quarantinedClaimsCount',
         'windowCursorAt',
         'workerEnabled',
       ].sort(),
@@ -508,8 +551,11 @@ describe('401/403 por operação no worker de Problemas (Postgres real + HTTP fa
       httpStatus: 403,
       validatorStage: null,
     });
-    const exposed = JSON.stringify([status, warn.mock.calls]);
-    for (const secret of [TOKEN, ml1.seller, a.id, 'api.mercadolibre.com']) {
+    const quarantineDump = await dataSource.query<unknown[]>(
+      `SELECT * FROM marketplace_problem_claim_quarantine`,
+    );
+    const exposed = JSON.stringify([status, warn.mock.calls, quarantineDump]);
+    for (const secret of [TOKEN, ml1.seller, 'api.mercadolibre.com']) {
       expect(exposed).not.toContain(secret);
     }
   });

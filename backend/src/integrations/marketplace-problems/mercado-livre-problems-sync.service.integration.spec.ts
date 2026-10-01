@@ -1,3 +1,4 @@
+import { buildProblemsSyncServices } from './marketplace-problems-sync-test-wiring';
 import { randomUUID } from 'crypto';
 import { ConfigService } from '@nestjs/config';
 import { DataSource } from 'typeorm';
@@ -6,7 +7,6 @@ import { buildDataSourceOptions } from '../../database/typeorm-options.factory';
 import { MercadoLivreClaimsHttpClient } from '../mercado-livre-claims/mercado-livre-claims-http.client';
 import { MarketplaceProblemReasonsCacheRepository } from './marketplace-problem-reasons-cache.repository';
 import { MarketplaceProblemsPersistenceService } from './marketplace-problems-persistence.service';
-import { MercadoLivreProblemsSyncService } from './mercado-livre-problems-sync.service';
 
 function fakeConfigService(): ConfigService {
   return {
@@ -141,13 +141,14 @@ describe('MercadoLivreProblemsSyncService (Postgres real + HTTP mockado)', () =>
         externalSellerId: 'seller-1',
       }),
     };
-    return new MercadoLivreProblemsSyncService(
-      preflight as never,
+    return buildProblemsSyncServices({
+      dataSource,
+      preflight,
       httpClient,
       reasonCache,
-      persistence,
-      fakeConfigService(),
-    );
+      problems: persistence,
+      configService: fakeConfigService(),
+    }).sync;
   }
 
   it('syncCreationWindow de 1 claim novo grava marketplace_problems + marketplace_problem_actions + marketplace_problem_reasons reais', async () => {
@@ -276,13 +277,14 @@ describe('MercadoLivreProblemsSyncService (Postgres real + HTTP mockado)', () =>
       fakeConfigService(),
       fetchImpl,
     );
-    const service = new MercadoLivreProblemsSyncService(
-      preflight as never,
+    const { sync: service } = buildProblemsSyncServices({
+      dataSource,
+      preflight,
       httpClient,
       reasonCache,
-      persistence,
-      fakeConfigService(),
-    );
+      problems: persistence,
+      configService: fakeConfigService(),
+    });
 
     const result = await service.refreshNonTerminalBatch(accountId, 10);
     expect(result.complete).toBe(true);

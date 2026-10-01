@@ -1,6 +1,12 @@
 import { Injectable } from '@nestjs/common';
-import type { MarketplaceProblemsSyncJobRow } from './marketplace-problems-sync-jobs.types';
+import { MarketplaceProblemsHistoricalBackfillService } from './marketplace-problems-historical-backfill.service';
+import type {
+  MarketplaceProblemsHistoricalCommit,
+  MarketplaceProblemsSyncJobRow,
+} from './marketplace-problems-sync-jobs.types';
 import type { ProblemsSyncWorkerConfig } from './marketplace-problems-sync-worker-config.util';
+import { INCREMENTAL_BACKLOG_TOLERANCE_MS } from './mercado-livre-claims-window.util';
+import { MercadoLivreProblemsHistoricalSyncService } from './mercado-livre-problems-historical-sync.service';
 import { MercadoLivreProblemsSyncService } from './mercado-livre-problems-sync.service';
 import { ProblemsSyncError } from './mercado-livre-problems-sync-preflight.util';
 import type {
@@ -18,9 +24,23 @@ const BUDGET_YIELDS: ReadonlySet<ProblemsSyncStopReason> = new Set([
 /** Status consultados pelo censo (um status por chamada de `censusOpenClaims`). */
 const CENSUS_STATUSES: readonly string[] = ['opened'];
 
+/** Etapa "de fundo" isolada: devolve o relatório ao estado limpo do incremental. */
+function resetStop(report: ProblemsSyncTickReport): void {
+  report.stopReason = 'COMPLETED';
+  report.retryAfterMs = null;
+  report.failureCode = null;
+}
+
 export type ProblemsSyncTickConfig = Pick<
   ProblemsSyncWorkerConfig,
-  'tickMaxClaims' | 'tickMaxHttpCalls' | 'refreshBatchSize' | 'censusIntervalMs'
+  | 'tickMaxClaims'
+  | 'tickMaxHttpCalls'
+  | 'refreshBatchSize'
+  | 'censusIntervalMs'
+  | 'quarantineBatchSize'
+  | 'backfillWindowMs'
+  | 'retryBaseMs'
+  | 'retryMaxMs'
 >;
 
 /** Código de falha lançada: vocabulário do pré-voo do CP2-B + `SYNC_FAILED` (nunca a mensagem do erro). */
@@ -43,6 +63,8 @@ export interface ProblemsSyncTickReport {
    * persistência nunca o marcam.
    */
   censusCompletedInFull: boolean;
+  /** Progresso do backfill histórico a gravar no commit (CAS); `null` = o tick não o tocou. */
+  historical: MarketplaceProblemsHistoricalCommit | null;
   claimsProcessed: number;
   claimsPersisted: number;
   claimsFailed: number;
@@ -58,10 +80,19 @@ export interface ProblemsSyncTickReport {
  * `COMPLETED` encerra o tick (a classificação em retry/yield/falha é do
  * `buildCommitUpdate`), EXCETO o yield de orçamento da criação (pula o censo) e do
  * censo, que seguem para o refresh com o orçamento restante. Nunca abre transação de banco nem lê/grava o job.
+ *
+ * Depois do incremental (CP4), com o orçamento que SOBRAR e só se as etapas
+ * anteriores completaram (sem yield) e o cursor incremental está em dia:
+ * 4. retry de um lote pequeno de claims em quarentena; 5. UMA janela do
+ * backfill histórico. O incremental nunca espera por essas etapas.
  */
 @Injectable()
 export class MarketplaceProblemsSyncTickService {
-  constructor(private readonly syncService: MercadoLivreProblemsSyncService) {}
+  constructor(
+    private readonly syncService: MercadoLivreProblemsSyncService,
+    private readonly historicalSync: MercadoLivreProblemsHistoricalSyncService,
+    private readonly backfill: MarketplaceProblemsHistoricalBackfillService,
+  ) {}
 
   async runTick(
     job: MarketplaceProblemsSyncJobRow,
@@ -76,6 +107,7 @@ export class MarketplaceProblemsSyncTickService {
       failureCode: null,
       creationCursorAdvancedTo: null,
       censusCompletedInFull: false,
+      historical: null,
       claimsProcessed: 0,
       claimsPersisted: 0,
       claimsFailed: 0,
@@ -174,6 +206,55 @@ export class MarketplaceProblemsSyncTickService {
         // outro resultado do refresh prevalece (falha ou novo yield).
         if (absorb(refresh) && pendingYield !== null) {
           report.stopReason = pendingYield;
+        }
+      }
+
+      // 4./5. Só com o incremental limpo: nenhum yield, nenhuma falha e cursor
+      // em dia (backlog de criação tem prioridade sobre tudo que é "de fundo").
+      const creationCursor =
+        report.creationCursorAdvancedTo ?? job.windowCursorAt;
+      const incrementalClean =
+        report.stopReason === 'COMPLETED' &&
+        now.getTime() - creationCursor.getTime() <=
+          INCREMENTAL_BACKLOG_TOLERANCE_MS;
+
+      // 4. Quarentena: lote pequeno, orçamento restante. Falha (exceto yield)
+      // encerra o tick como qualquer outra etapa.
+      if (incrementalClean && hasBudget()) {
+        const retry = await this.historicalSync.retryQuarantinedClaims(
+          accountId,
+          config.quarantineBatchSize,
+          budget(),
+          now,
+        );
+        if (!absorb(retry)) {
+          // Falha por-claim (ex.: 404) nunca derruba o incremental; as demais
+          // (auth, rate limit, provedor, persistência) encerram o tick.
+          if (retry.stopReason !== 'CORE_COVERAGE_INCOMPLETE') return report;
+          resetStop(report);
+        }
+      }
+
+      // 5. Backfill histórico: uma janela por tick, só com o que sobrou.
+      if (incrementalClean && hasBudget()) {
+        const step = await this.backfill.run(
+          job,
+          now,
+          budget(),
+          config.backfillWindowMs,
+          { baseMs: config.retryBaseMs, maxMs: config.retryMaxMs },
+        );
+        report.historical = step.commit;
+        if (step.result !== null) {
+          const proceeds = absorb(step.result);
+          // Yield de orçamento, limite de segurança e claim problemático só do
+          // histórico nunca viram falha do job incremental (o cursor histórico
+          // não avança e o código fica em `historical_last_error_code`).
+          const isolated =
+            step.terminalFailure ||
+            BUDGET_YIELDS.has(step.result.stopReason) ||
+            step.result.stopReason === 'CORE_COVERAGE_INCOMPLETE';
+          if (!proceeds && isolated) resetStop(report);
         }
       }
     } catch (error) {

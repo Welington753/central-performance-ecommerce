@@ -724,6 +724,52 @@ describe('MarketplaceProblemsPersistenceService (Postgres real)', () => {
       expect(secondPos).toBeLessThan(firstPos);
     });
 
+    it('devolve a data de criação do problema (acompanha uma eventual quarentena)', async () => {
+      const input = baseInput();
+      await service.upsertProblem(input);
+      const [row] = await service.findProblemsNeedingRefresh(accountId, 10);
+      expect(row.dateCreated).toEqual(input.dateCreated);
+    });
+
+    it('claim com quarentena pendente AINDA NÃO vencida espera o backoff (nunca fica fixo na frente da fila); vencida ou resolvida volta', async () => {
+      const waiting = baseInput();
+      const other = baseInput();
+      await service.upsertProblem(waiting);
+      await service.upsertProblem(other);
+      await dataSource.query(
+        `UPDATE marketplace_problems SET last_checked_at = NULL
+          WHERE external_claim_id = $1`,
+        [waiting.externalClaimId],
+      );
+      const quarantine = async (nextAttempt: string, resolved: boolean) => {
+        await dataSource.query(
+          `DELETE FROM marketplace_problem_claim_quarantine WHERE marketplace_account_id = $1`,
+          [accountId],
+        );
+        await dataSource.query(
+          `INSERT INTO marketplace_problem_claim_quarantine
+             (marketplace_account_id, external_claim_id, failure_code, first_seen_at,
+              last_seen_at, next_attempt_at, resolved_at)
+           VALUES ($1, $2, 'CORE_NOT_FOUND', now(), now(), now() + $3::interval,
+                   CASE WHEN $4 THEN now() ELSE NULL END)`,
+          [accountId, waiting.externalClaimId, nextAttempt, resolved],
+        );
+      };
+      const ids = async () =>
+        (await service.findProblemsNeedingRefresh(accountId, 10)).map(
+          (r) => r.externalClaimId,
+        );
+
+      await quarantine('1 hour', false);
+      expect(await ids()).toEqual([other.externalClaimId]);
+
+      await quarantine('-1 second', false);
+      expect((await ids())[0]).toBe(waiting.externalClaimId);
+
+      await quarantine('1 hour', true);
+      expect((await ids())[0]).toBe(waiting.externalClaimId);
+    });
+
     it('nunca devolve linha de outra conta', async () => {
       const [otherAccount] = await dataSource.query<Array<{ id: string }>>(
         `INSERT INTO marketplace_accounts (marketplace, nickname, encrypted_access_token, encrypted_refresh_token, encrypted_credential_metadata)

@@ -9,7 +9,10 @@ import {
   PROBLEMS_FROM,
   type ProblemsWhere,
 } from './marketplace-problems-query.filters';
-import type { MarketplaceProblemsSyncJobStatus } from './marketplace-problems-sync-jobs.types';
+import type {
+  MarketplaceProblemsHistoricalStatus,
+  MarketplaceProblemsSyncJobStatus,
+} from './marketplace-problems-sync-jobs.types';
 import type {
   ProblemReasonOptionDto,
   ProblemResponsibility,
@@ -146,7 +149,11 @@ export class MarketplaceProblemsSummaryQueryService {
     const rows = await this.dataSource.query<Row[]>(
       `SELECT a.id, a.nickname, a.marketplace,
               COALESCE(pc.total, 0)::int AS total, COALESCE(pc.open, 0)::int AS open,
-              j.status, j.window_cursor_at, j.last_census_at
+              j.status, j.window_cursor_at, j.last_census_at, j.last_activity_at,
+              j.last_error_code, j.historical_covered_from, j.historical_target_from,
+              j.historical_status, j.historical_completed_at,
+              j.historical_last_error_code,
+              COALESCE(qc.pending, 0)::int AS quarantined
          FROM marketplace_accounts a
          LEFT JOIN marketplace_problems_sync_jobs j ON j.marketplace_account_id = a.id
          LEFT JOIN (
@@ -154,6 +161,11 @@ export class MarketplaceProblemsSummaryQueryService {
                   count(*) FILTER (WHERE resolution_date IS NULL) AS open
              FROM marketplace_problems GROUP BY marketplace_account_id
          ) pc ON pc.marketplace_account_id = a.id
+         LEFT JOIN (
+           SELECT marketplace_account_id, count(*) AS pending
+             FROM marketplace_problem_claim_quarantine
+            WHERE resolved_at IS NULL GROUP BY marketplace_account_id
+         ) qc ON qc.marketplace_account_id = a.id
         WHERE ${clauses.join(' AND ')}
         ORDER BY a.nickname NULLS LAST, a.id`,
       params,
@@ -169,6 +181,21 @@ export class MarketplaceProblemsSummaryQueryService {
         'NOT_STARTED',
       windowCursorAt: iso(row.window_cursor_at),
       lastCompleteCensusAt: iso(row.last_census_at),
+      lastActivityAt: iso(row.last_activity_at),
+      lastErrorCode:
+        typeof row.last_error_code === 'string' ? row.last_error_code : null,
+      incrementalCoveredThrough: iso(row.window_cursor_at),
+      historicalCoveredFrom: iso(row.historical_covered_from),
+      historicalTargetFrom: iso(row.historical_target_from),
+      historicalCompletedAt: iso(row.historical_completed_at),
+      historicalStatus:
+        (row.historical_status as MarketplaceProblemsHistoricalStatus | null) ??
+        'NOT_STARTED',
+      historicalLastErrorCode:
+        typeof row.historical_last_error_code === 'string'
+          ? row.historical_last_error_code
+          : null,
+      quarantinedClaimsCount: Number(row.quarantined),
     }));
   }
 }

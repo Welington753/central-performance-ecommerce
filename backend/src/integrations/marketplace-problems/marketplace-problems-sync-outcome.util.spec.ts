@@ -21,6 +21,8 @@ const CONFIG: ProblemsSyncWorkerConfig = {
   tickMaxClaims: 50,
   tickMaxHttpCalls: 300,
   refreshBatchSize: 20,
+  quarantineBatchSize: 5,
+  backfillWindowMs: 14 * 24 * 60 * 60 * 1000,
 };
 
 function job(
@@ -44,6 +46,13 @@ function job(
     version: 1,
     lastActivityAt: null,
     lastCompleteCensusAt: null,
+    historicalCoveredFrom: new Date('2026-06-01T00:00:00.000Z'),
+    historicalTargetFrom: null,
+    historicalStatus: 'RUNNING',
+    historicalCompletedAt: null,
+    historicalLastErrorCode: null,
+    historicalAttemptCount: 0,
+    historicalNextAttemptAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -60,6 +69,7 @@ function report(
     failureCode: null,
     creationCursorAdvancedTo: null,
     censusCompletedInFull: false,
+    historical: null,
     claimsProcessed: 0,
     claimsPersisted: 0,
     claimsFailed: 0,
@@ -503,5 +513,51 @@ describe('buildCommitUpdate', () => {
       CONFIG,
     );
     expect(update.lastErrorCode).toMatch(/^[A-Z_]+$/);
+  });
+
+  describe('progresso do backfill histórico (mesmo commit/CAS)', () => {
+    const historical = {
+      coveredFrom: new Date('2026-05-01T00:00:00.000Z'),
+      targetFrom: new Date('2026-01-01T00:00:00.000Z'),
+      status: 'RUNNING' as const,
+      completedAt: null,
+      errorCode: null,
+      attemptCount: 0,
+      nextAttemptAt: null,
+    };
+
+    it('repassa o progresso histórico sem mexer no cursor incremental', () => {
+      const update = buildCommitUpdate(
+        job(),
+        report({ historical }),
+        NOW,
+        CONFIG,
+      );
+
+      expect(update.historical).toBe(historical);
+      expect(update.windowCursorAt).toBe(CURSOR);
+      expect(update.status).toBe('RUNNING');
+    });
+
+    it('tick que não tocou no histórico não grava nada dele (null)', () => {
+      expect(
+        buildCommitUpdate(job(), report(), NOW, CONFIG).historical,
+      ).toBeNull();
+    });
+
+    it('falha incremental preserva o progresso histórico já feito no mesmo tick', () => {
+      const update = buildCommitUpdate(
+        job(),
+        report({
+          stopReason: 'PROVIDER_UNAVAILABLE',
+          historical,
+        }),
+        NOW,
+        CONFIG,
+      );
+
+      expect(update.status).toBe('WAITING_RETRY');
+      expect(update.historical).toBe(historical);
+    });
   });
 });

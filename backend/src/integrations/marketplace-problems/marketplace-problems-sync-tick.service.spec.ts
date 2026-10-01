@@ -27,6 +27,13 @@ function job(
     version: 1,
     lastActivityAt: null,
     lastCompleteCensusAt: null,
+    historicalCoveredFrom: new Date('2026-06-01T00:00:00.000Z'),
+    historicalTargetFrom: null,
+    historicalStatus: 'RUNNING',
+    historicalCompletedAt: null,
+    historicalLastErrorCode: null,
+    historicalAttemptCount: 0,
+    historicalNextAttemptAt: null,
     createdAt: NOW,
     updatedAt: NOW,
     ...overrides,
@@ -47,6 +54,7 @@ function result(
     claimsPersisted: 0,
     claimsPreserved: 0,
     claimsFailed: 0,
+    claimsQuarantined: 0,
     detailFailures: 0,
     reputationFailures: 0,
     reasonLookupFailures: 0,
@@ -64,6 +72,10 @@ const CONFIG = {
   tickMaxHttpCalls: 300,
   refreshBatchSize: 20,
   censusIntervalMs: 6 * 60 * 60 * 1000,
+  quarantineBatchSize: 5,
+  backfillWindowMs: 14 * 24 * 60 * 60 * 1000,
+  retryBaseMs: 1000,
+  retryMaxMs: 8000,
 };
 
 function build(
@@ -72,6 +84,10 @@ function build(
     censusOpenClaims: jest.Mock;
     refreshNonTerminalBatch: jest.Mock;
   }> = {},
+  extra: {
+    retryQuarantinedClaims?: jest.Mock;
+    backfillRun?: jest.Mock;
+  } = {},
 ) {
   const service = {
     syncCreationWindow: jest.fn().mockResolvedValue(result()),
@@ -79,9 +95,28 @@ function build(
     refreshNonTerminalBatch: jest.fn().mockResolvedValue(result()),
     ...sync,
   };
+  const historicalSync = {
+    retryQuarantinedClaims:
+      extra.retryQuarantinedClaims ?? jest.fn().mockResolvedValue(result()),
+  };
+  const backfill = {
+    run:
+      extra.backfillRun ??
+      jest.fn().mockResolvedValue({
+        result: null,
+        commit: null,
+        terminalFailure: false,
+      }),
+  };
   return {
     service,
-    tick: new MarketplaceProblemsSyncTickService(service as never),
+    historicalSync,
+    backfill,
+    tick: new MarketplaceProblemsSyncTickService(
+      service as never,
+      historicalSync as never,
+      backfill as never,
+    ),
   };
 }
 
@@ -534,5 +569,270 @@ describe('MarketplaceProblemsSyncTickService', () => {
     const report = await tick.runTick(job(), NOW, CONFIG);
     expect(report.thrownCode).toBe('SYNC_FAILED');
     expect(JSON.stringify(report)).not.toContain('APP_USR');
+  });
+});
+
+describe('MarketplaceProblemsSyncTickService — quarentena e backfill histórico (CP4)', () => {
+  const CAUGHT_UP = '2026-06-15T11:59:59.000Z';
+  const COMMIT = {
+    coveredFrom: new Date('2026-05-20T00:00:00.000Z'),
+    targetFrom: new Date('2026-01-01T00:00:00.000Z'),
+    status: 'RUNNING' as const,
+    completedAt: null,
+    errorCode: null,
+  };
+  const stepOk = (res = result()) => ({
+    result: res,
+    commit: COMMIT,
+    terminalFailure: false,
+  });
+
+  function caughtUp(overrides: Partial<ProblemsSyncResult> = {}) {
+    return jest.fn().mockResolvedValue(
+      result({
+        nextWindowFrom: CAUGHT_UP,
+        claimsFound: 10,
+        claimsProcessed: 10,
+        httpCallsMade: 40,
+        ...overrides,
+      }),
+    );
+  }
+
+  it('só com o incremental limpo: roda quarentena e depois o histórico, com o orçamento que SOBROU', async () => {
+    const retry = jest
+      .fn()
+      .mockResolvedValue(result({ claimsFound: 2, httpCallsMade: 9 }));
+    const run = jest
+      .fn()
+      .mockResolvedValue(
+        stepOk(
+          result({ claimsFound: 4, claimsProcessed: 4, claimsPersisted: 3 }),
+        ),
+      );
+    const { tick } = build(
+      { syncCreationWindow: caughtUp() },
+      { retryQuarantinedClaims: retry, backfillRun: run },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    // criação gastou 10 claims/40 chamadas; quarentena 2/9.
+    expect(retry).toHaveBeenCalledWith(
+      'acc-1',
+      5,
+      { maxClaims: 40, maxHttpCalls: 260 },
+      NOW,
+    );
+    expect(run).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'job-1' }),
+      NOW,
+      { maxClaims: 38, maxHttpCalls: 251 },
+      CONFIG.backfillWindowMs,
+      { baseMs: 1000, maxMs: 8000 },
+    );
+    expect(report.historical).toBe(COMMIT);
+    expect(report.stopReason).toBe('COMPLETED');
+    expect(report.claimsPersisted).toBe(3);
+  });
+
+  it('INCREMENTAL PRIORITÁRIO: yield de orçamento da criação => nem quarentena nem histórico rodam', async () => {
+    const run = jest.fn();
+    const retry = jest.fn();
+    const { tick } = build(
+      {
+        syncCreationWindow: jest
+          .fn()
+          .mockResolvedValue(
+            result({ complete: false, stopReason: 'CALL_BUDGET_EXHAUSTED' }),
+          ),
+      },
+      { retryQuarantinedClaims: retry, backfillRun: run },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(retry).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    expect(report.stopReason).toBe('CALL_BUDGET_EXHAUSTED');
+    expect(report.historical).toBeNull();
+  });
+
+  it('INCREMENTAL PRIORITÁRIO: cursor ainda atrasado (backlog) => etapas de fundo não rodam', async () => {
+    const run = jest.fn();
+    const retry = jest.fn();
+    const { tick } = build(
+      {
+        syncCreationWindow: jest
+          .fn()
+          .mockResolvedValue(
+            result({ nextWindowFrom: '2026-06-15T11:30:00.000Z' }),
+          ),
+      },
+      { retryQuarantinedClaims: retry, backfillRun: run },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(retry).not.toHaveBeenCalled();
+    expect(run).not.toHaveBeenCalled();
+    expect(report.creationCursorAdvancedTo).not.toBeNull();
+  });
+
+  it('INCREMENTAL PRIORITÁRIO: sem orçamento restante o histórico nem é chamado', async () => {
+    const run = jest.fn();
+    const { tick } = build(
+      {
+        syncCreationWindow: caughtUp({
+          claimsFound: 50,
+          claimsProcessed: 50,
+          httpCallsMade: 100,
+        }),
+      },
+      { backfillRun: run },
+    );
+
+    await tick.runTick(job(), NOW, CONFIG);
+
+    expect(run).not.toHaveBeenCalled();
+  });
+
+  it('falha incremental (rate limit na criação) => histórico não roda', async () => {
+    const run = jest.fn();
+    const { tick } = build(
+      {
+        syncCreationWindow: jest.fn().mockResolvedValue(
+          result({
+            complete: false,
+            stopReason: 'RATE_LIMITED',
+            retryAfterMs: 1,
+          }),
+        ),
+      },
+      { backfillRun: run },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(report.stopReason).toBe('RATE_LIMITED');
+  });
+
+  it('quarentena com falha GLOBAL (rate limit) encerra o tick e não chama o histórico', async () => {
+    const run = jest.fn();
+    const { tick } = build(
+      { syncCreationWindow: caughtUp() },
+      {
+        retryQuarantinedClaims: jest.fn().mockResolvedValue(
+          result({
+            complete: false,
+            stopReason: 'RATE_LIMITED',
+            retryAfterMs: 5,
+          }),
+        ),
+        backfillRun: run,
+      },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(run).not.toHaveBeenCalled();
+    expect(report.stopReason).toBe('RATE_LIMITED');
+    expect(report.retryAfterMs).toBe(5);
+  });
+
+  it('claim em quarentena que falha por motivo POR-CLAIM (ex.: 404) nunca derruba o incremental nem bloqueia o histórico', async () => {
+    const run = jest.fn().mockResolvedValue(stepOk());
+    const { tick } = build(
+      { syncCreationWindow: caughtUp() },
+      {
+        retryQuarantinedClaims: jest.fn().mockResolvedValue(
+          result({
+            complete: false,
+            stopReason: 'CORE_COVERAGE_INCOMPLETE',
+            claimsFailed: 1,
+          }),
+        ),
+        backfillRun: run,
+      },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(report.stopReason).toBe('COMPLETED');
+    expect(report.failureCode).toBeNull();
+  });
+
+  it('falha de busca no histórico (rate limit) vira falha do tick, mas o progresso salvo é preservado no relatório', async () => {
+    const failed = result({
+      complete: false,
+      stopReason: 'RATE_LIMITED',
+      retryAfterMs: 7000,
+    });
+    const { tick } = build(
+      { syncCreationWindow: caughtUp() },
+      { backfillRun: jest.fn().mockResolvedValue(stepOk(failed)) },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(report.stopReason).toBe('RATE_LIMITED');
+    expect(report.retryAfterMs).toBe(7000);
+    expect(report.historical).toBe(COMMIT);
+    expect(report.creationCursorAdvancedTo).not.toBeNull();
+  });
+
+  it.each([
+    [
+      'limite de segurança só do histórico',
+      {
+        result: result({ complete: false, stopReason: 'SAFETY_LIMIT_REACHED' }),
+        commit: { ...COMMIT, status: 'FAILED' as const },
+        terminalFailure: true,
+      },
+    ],
+    [
+      'yield de orçamento do histórico',
+      stepOk(result({ complete: false, stopReason: 'CALL_BUDGET_EXHAUSTED' })),
+    ],
+    [
+      'claim problemático de uma janela antiga (CORE_COVERAGE_INCOMPLETE)',
+      stepOk(
+        result({
+          complete: false,
+          stopReason: 'CORE_COVERAGE_INCOMPLETE',
+          claimsFailed: 1,
+        }),
+      ),
+    ],
+  ])('%s NUNCA derruba o job incremental', async (_name, step) => {
+    const { tick } = build(
+      { syncCreationWindow: caughtUp() },
+      { backfillRun: jest.fn().mockResolvedValue(step) },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(report.stopReason).toBe('COMPLETED');
+    expect(report.failureCode).toBeNull();
+    expect(report.historical).toBe(step.commit);
+  });
+
+  it('histórico sem chamada (pausado/NO_TARGET): só repassa o commit, sem alterar o resultado do tick', async () => {
+    const commit = { ...COMMIT, status: 'NO_TARGET' as const };
+    const { tick } = build(
+      { syncCreationWindow: caughtUp() },
+      {
+        backfillRun: jest
+          .fn()
+          .mockResolvedValue({ result: null, commit, terminalFailure: false }),
+      },
+    );
+
+    const report = await tick.runTick(job(), NOW, CONFIG);
+
+    expect(report.historical).toBe(commit);
+    expect(report.stopReason).toBe('COMPLETED');
   });
 });
