@@ -17,6 +17,9 @@ frontend/out/
 *.log
 npm-debug.log*
 
+# Checkpoint archives
+*.zip
+
 # Test / coverage
 coverage/
 
