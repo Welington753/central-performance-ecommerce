@@ -47,7 +47,7 @@ async function bootstrap(): Promise<void> {
     const swaggerConfig = new DocumentBuilder()
       .setTitle('Central de Performance — API')
       .setDescription(
-        'Fundação multi-marketplace (Fase 1). Nenhuma integração externa real está implementada nesta fase.',
+        'API da Central de Performance: KPIs e sincronização de pedidos de Mercado Livre, Shopee e Amazon, com controle de acesso por papéis, permissões e escopo por conta.',
       )
       .setVersion('0.0.1')
       .addCookieAuth('access_token')

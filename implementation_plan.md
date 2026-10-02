@@ -1,3 +1,7 @@
+> **Plano histórico (Fase 1 — Fundação, 2026-08-27).** Não descreve o estado atual do sistema:
+> as integrações com Mercado Livre, Shopee e Amazon já existem. Documentação atual:
+> [README](README.md) e [docs/architecture.md](docs/architecture.md).
+
 # Implementation Plan — Fase 1: Fundação
 
 ## Objetivo desta fase
