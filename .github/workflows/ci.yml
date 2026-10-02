@@ -1,0 +1,208 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - "feat/**"
+  workflow_dispatch:
+
+# Uma execução por workflow + ref: um push novo na mesma branch/PR cancela a
+# execução anterior ainda em andamento.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Somente leitura: nenhum job escreve no repositório nem usa segredos.
+permissions:
+  contents: read
+
+env:
+  NODE_VERSION: "24"
+  NPM_CONFIG_AUDIT: "false"
+  NPM_CONFIG_FUND: "false"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Backend — checagens estáticas e build (não exigem banco).
+  # ---------------------------------------------------------------------------
+  backend-static:
+    name: backend-static
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Sem --fix: o script `npm run lint` do package.json usa --fix e
+      # alteraria arquivos no runner em vez de reprovar o código.
+      - name: ESLint
+        run: npx eslint "{src,apps,libs,test}/**/*.ts"
+
+      - name: Verify custom ESLint rules
+        run: npm run lint:rules:verify
+
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.json
+
+      # Regra crítica de arquitetura: o núcleo nunca importa conector concreto.
+      - name: Architecture rule (architecture.spec.ts)
+        run: npx jest --ci src/integrations/architecture.spec.ts
+
+      - name: Build
+        run: npm run build
+
+  # ---------------------------------------------------------------------------
+  # Backend — suíte Jest completa contra um PostgreSQL 16 descartável.
+  # ---------------------------------------------------------------------------
+  backend-tests:
+    name: backend-tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: backend
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Credenciais sintéticas de um banco que só existe durante este job.
+          POSTGRES_USER: ci_test
+          POSTGRES_PASSWORD: ci_test_pw
+          POSTGRES_DB: cpe_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci_test -d cpe_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      NODE_ENV: test
+      # Apontam SOMENTE para o service container acima (nunca um banco real).
+      DATABASE_URL: postgres://ci_test:ci_test_pw@localhost:5432/cpe_test
+      TEST_DATABASE_URL: postgres://ci_test:ci_test_pw@localhost:5432/cpe_test
+      # Variáveis exigidas pela validação de ambiente (Joi) dos specs que sobem
+      # o ConfigModule real. Todas sintéticas — nenhum segredo real, nenhum
+      # valor do Render ou de marketplace.
+      ACCESS_TOKEN_SECRET: ci-only-access-token-secret-0123456789abcdef
+      CREDENTIAL_ENCRYPTION_KEY: "0000000000000000000000000000000000000000000000000000000000000000"
+      ML_CLIENT_ID: ci-ml-client-id
+      ML_CLIENT_SECRET: ci-ml-client-secret
+      ML_REDIRECT_URI: https://ci.example.test/integrations/mercado-livre/callback
+      FRONTEND_URL: http://localhost:3001
+      COOKIE_SECURE: "false"
+    steps:
+      # Checkout Git real (com .git): generate-build-info.script.spec.ts exige
+      # um commit resolvível.
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # O healthcheck do service já bloqueia o início dos steps até o banco
+      # responder; esta espera extra é só uma verificação explícita (sem
+      # imprimir a URL de conexão).
+      - name: Wait for PostgreSQL
+        run: |
+          for attempt in $(seq 1 30); do
+            if node -e "const { Client } = require('pg'); const c = new Client({ connectionString: process.env.TEST_DATABASE_URL }); c.connect().then(() => c.end()).then(() => process.exit(0), () => process.exit(1));"; then
+              echo "PostgreSQL pronto."
+              exit 0
+            fi
+            echo "Aguardando PostgreSQL (tentativa ${attempt}/30)..."
+            sleep 2
+          done
+          echo "PostgreSQL não ficou disponível a tempo." >&2
+          exit 1
+
+      # Parte do schema real: os specs de integração esperam o banco migrado.
+      - name: Run migrations
+        run: npm run migration:run
+
+      # Suíte completa, serial (maxWorkers: 1 no package.json) e sem
+      # --forceExit. Nenhum spec é excluído, EXCETO os dois abaixo, que exigem
+      # infraestrutura que este job não provisiona:
+      #
+      #   - migrate-ml-accounts/migrate-ml-accounts.integration.spec.ts
+      #       exige TEST_TARGET_DATABASE_URL: um SEGUNDO PostgreSQL descartável
+      #       já migrado, representando o destino da migração.
+      #   - migrate-ml-accounts/connection-options.integration.spec.ts
+      #       exige TEST_SSL_DATABASE_URL: um PostgreSQL com TLS ligado e
+      #       certificado autoassinado.
+      #
+      # Ambos falham de propósito (erro claro) quando a variável falta, nunca
+      # pulam em silêncio.
+      # TODO: criar um job dedicado (backend-tests-migrate-ml-accounts) com
+      # dois services PostgreSQL (um deles com TLS) e remover esta exclusão.
+      - name: Jest (full suite)
+        run: >-
+          npx jest --ci
+          --testPathIgnorePatterns
+          'migrate-ml-accounts/migrate-ml-accounts\.integration\.spec\.ts$'
+          'migrate-ml-accounts/connection-options\.integration\.spec\.ts$'
+
+  # ---------------------------------------------------------------------------
+  # Frontend — lint, typecheck, Jest e build.
+  # ---------------------------------------------------------------------------
+  frontend:
+    name: frontend
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: ESLint
+        run: npx eslint
+
+      - name: Verify custom ESLint rules
+        run: npm run lint:rules:verify
+
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Jest (full suite)
+        run: npx jest --ci
+
+      # Depois do Jest, nunca antes: `next build` gera .next/standalone com um
+      # package.json que colide com o do projeto no jest-haste-map.
+      - name: Build
+        run: npx next build
