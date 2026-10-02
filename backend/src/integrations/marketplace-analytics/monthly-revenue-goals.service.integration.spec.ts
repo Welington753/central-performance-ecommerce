@@ -23,8 +23,15 @@ describe('MonthlyRevenueGoalsService (Postgres real)', () => {
     await dataSource.query('TRUNCATE TABLE monthly_revenue_goals CASCADE');
     await dataSource.query('TRUNCATE TABLE users CASCADE');
 
+    // `users.role_id` é NOT NULL desde a migration de RBAC: usa o papel ADMIN
+    // semeado pelas próprias migrations (mesmo padrão dos demais specs).
+    const [adminRole] = await dataSource.query<{ id: string }[]>(
+      "SELECT id FROM roles WHERE key = 'ADMIN'",
+    );
+
     const user = await dataSource.getRepository(User).save({
       id: randomUUID(),
+      roleId: adminRole.id,
       name: 'Admin',
       email: `admin-${randomUUID()}@example.com`,
       passwordHash: 'hash',

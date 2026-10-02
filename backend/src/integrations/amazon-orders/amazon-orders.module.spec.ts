@@ -20,7 +20,16 @@ import { AmazonOrdersSyncService } from './amazon-orders-sync.service';
 @Global()
 @Module({
   providers: [
-    { provide: DataSource, useValue: { createQueryRunner: jest.fn() } },
+    {
+      provide: DataSource,
+      useValue: {
+        createQueryRunner: jest.fn(),
+        // Lidos pelo factory de `TypeOrmModule.forFeature` de qualquer módulo importado.
+        entityMetadatas: [],
+        options: { type: 'postgres' },
+        getRepository: jest.fn(() => ({})),
+      },
+    },
   ],
   exports: [DataSource],
 })

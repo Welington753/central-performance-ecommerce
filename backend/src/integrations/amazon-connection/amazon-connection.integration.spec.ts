@@ -71,6 +71,9 @@ describe('AmazonConnectionService.provision (Postgres real)', () => {
   });
 
   afterAll(async () => {
+    // Não deixa usuário/admin sintético órfão no banco compartilhado: outras
+    // suítes (ex.: `last-admin-guard`, `users-management`) contam admins reais.
+    await dataSource.query('TRUNCATE TABLE users CASCADE');
     await dataSource.destroy();
   });
 

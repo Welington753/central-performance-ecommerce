@@ -33,9 +33,10 @@ describe('last-admin-guard (Postgres real)', () => {
   });
 
   beforeEach(async () => {
-    await dataSource.query(
-      "DELETE FROM users WHERE email LIKE '%@last-admin-guard-spec.example.com'",
-    );
+    // O guard conta TODOS os admins ativos do banco: parte de uma tabela
+    // `users` vazia para não depender de admins deixados por outras suítes
+    // (independe da ordem de execução).
+    await dataSource.query('TRUNCATE TABLE users CASCADE');
   });
 
   async function createAdmin(active = true): Promise<string> {

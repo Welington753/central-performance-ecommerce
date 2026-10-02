@@ -26,7 +26,14 @@ import { MercadoLivreOrdersModule } from './mercado-livre-orders.module';
   providers: [
     {
       provide: DataSource,
-      useValue: { createQueryRunner: jest.fn(), query: jest.fn() },
+      useValue: {
+        createQueryRunner: jest.fn(),
+        query: jest.fn(),
+        // Lidos pelo factory de `TypeOrmModule.forFeature` de qualquer módulo importado.
+        entityMetadatas: [],
+        options: { type: 'postgres' },
+        getRepository: jest.fn(() => ({})),
+      },
     },
   ],
   exports: [DataSource],

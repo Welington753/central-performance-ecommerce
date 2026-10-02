@@ -91,6 +91,9 @@ describe('Callback atomicity and concurrency (real Postgres)', () => {
   });
 
   afterAll(async () => {
+    // Não deixa usuário/admin sintético órfão no banco compartilhado: outras
+    // suítes (ex.: `last-admin-guard`, `users-management`) contam admins reais.
+    await dataSource.query('TRUNCATE TABLE users CASCADE');
     await dataSource.destroy();
   });
 

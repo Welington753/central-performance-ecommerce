@@ -125,9 +125,10 @@ describe('UsersManagementService (Postgres real)', () => {
     await dataSource.query('TRUNCATE TABLE user_account_scope CASCADE');
     await dataSource.query('TRUNCATE TABLE user_permission_overrides CASCADE');
     await dataSource.query('TRUNCATE TABLE user_sessions CASCADE');
-    await dataSource.query(
-      "DELETE FROM users WHERE email LIKE '%@users-mgmt-spec.example.com'",
-    );
+    // O guard do último admin conta TODOS os admins ativos do banco: parte de
+    // uma tabela `users` vazia para não depender de admins deixados por
+    // outras suítes (independe da ordem de execução).
+    await dataSource.query('TRUNCATE TABLE users CASCADE');
     await dataSource.query('TRUNCATE TABLE marketplace_accounts CASCADE');
 
     const account = await dataSource.getRepository(MarketplaceAccount).save({
