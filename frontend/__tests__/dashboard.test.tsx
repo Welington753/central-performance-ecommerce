@@ -13,6 +13,7 @@ jest.mock("next/navigation", () => ({
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import DashboardPage from "@/app/(protegido)/dashboard/page";
+import FullPage from "@/app/(protegido)/full/page";
 import * as api from "@/lib/api";
 import type {
   AccountBreakdownEntry,
@@ -706,11 +707,26 @@ describe("DashboardPage", () => {
       expect(screen.queryByText("Mercado Livre Full")).not.toBeInTheDocument();
     });
 
-    it("renders the Full section with its cards when full.summary is populated", async () => {
+    // As seções Full foram extraídas do Dashboard (resumo executivo) para a
+    // página dedicada /full: os testes abaixo renderizam `FullPage`, e este
+    // garante que o Dashboard não volta a exibi-las nem com `full` preenchido.
+    it("does not render the Full section on the Dashboard even when full is populated (moved to /full)", async () => {
       (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
         analyticsDto({ full: fullDto() }),
       );
       render(<DashboardPage />);
+      await screen.findByText(/Última sincronização/);
+      expect(screen.queryByText("Mercado Livre Full")).not.toBeInTheDocument();
+      expect(
+        screen.queryByTestId("full-kpi-card-paid-revenue"),
+      ).not.toBeInTheDocument();
+    });
+
+    it("renders the Full section with its cards when full.summary is populated", async () => {
+      (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
+        analyticsDto({ full: fullDto() }),
+      );
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
       expect(screen.getByTestId("full-kpi-card-paid-revenue")).toHaveTextContent(
         "480,00",
@@ -727,7 +743,7 @@ describe("DashboardPage", () => {
           full: fullDto({ coverage: "partial", classifiedOrders: 3, unclassifiedOrders: 2 }),
         }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
       expect(screen.getByText(/Cobertura parcial da classificação Full/)).toBeInTheDocument();
       expect(screen.getByText(/3 de 5 pedidos/)).toBeInTheDocument();
@@ -739,7 +755,7 @@ describe("DashboardPage", () => {
           full: fullDto({ coverage: "unknown", classifiedOrders: 0, unclassifiedOrders: 0, summary: null }),
         }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
       expect(
         screen.getByText(/Nenhum pedido Full comprovado neste período ainda/),
@@ -751,7 +767,7 @@ describe("DashboardPage", () => {
       (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
         analyticsDto({ full: fullDto() }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Full x vendas sem Full x total geral");
       expect(screen.getByText("Vendas brutas (R$)")).toBeInTheDocument();
       const table = screen.getByText("Vendas brutas (R$)").closest("table")!;
@@ -781,7 +797,7 @@ describe("DashboardPage", () => {
           }),
         }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
       expect(screen.getByText(/2 pedido\(s\) ainda não classificado/)).toBeInTheDocument();
       expect(
@@ -793,7 +809,7 @@ describe("DashboardPage", () => {
       (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValueOnce(
         analyticsDto({ full: fullDto({ classifiedOrders: 10, unclassifiedOrders: 0 }) }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
       expect(
         screen.getByText(/Full \+ vendas sem Full = total das vendas/),
@@ -839,7 +855,7 @@ describe("DashboardPage", () => {
       (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
         analyticsDto({ full: fullDto() }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
     });
 
@@ -856,7 +872,7 @@ describe("DashboardPage", () => {
           },
         }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
     });
 
@@ -885,7 +901,7 @@ describe("DashboardPage", () => {
             },
           }),
         );
-        render(<DashboardPage />);
+        render(<FullPage />);
         await screen.findByText("Mercado Livre Full");
 
         expect(api.fetchMarketplaceAnalyticsKpis).toHaveBeenCalledWith(
@@ -913,7 +929,7 @@ describe("DashboardPage", () => {
           }),
         }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
 
       const notice = screen
@@ -934,7 +950,7 @@ describe("DashboardPage", () => {
       (api.fetchMarketplaceAnalyticsKpis as jest.Mock).mockResolvedValue(
         analyticsDto({ full: fullDto({ unclassifiedOrders: 0 }) }),
       );
-      render(<DashboardPage />);
+      render(<FullPage />);
       await screen.findByText("Mercado Livre Full");
 
       const confirmation = screen.getByText(

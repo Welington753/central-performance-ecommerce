@@ -6,6 +6,15 @@ import type { MarketplaceAccountDto } from "@/types/marketplace";
 import type { AmazonSetupStatusDto } from "@/types/amazon-connection";
 import type { BackfillStatusDto } from "@/types/marketplace-backfill";
 
+// A página usa `useRouter` (redireciona para /login em sessão expirada no
+// polling da reclassificação Full) e fora do app router real o hook lança
+// "expected app router to be mounted" — mesmo mock dos demais testes da página
+// (__tests__/sincronizacoes*.test.tsx). Objeto estável, como o router real.
+const routerMock = { replace: jest.fn(), push: jest.fn() };
+jest.mock("next/navigation", () => ({
+  useRouter: () => routerMock,
+}));
+
 // `jest.mock`/`jest.requireActual` resolvem o próprio argumento fora do
 // pipeline de transform do Next — por isso é preciso caminho relativo real
 // para `src/lib/api.ts` (mesmo padrão de dashboard/page.test.tsx).

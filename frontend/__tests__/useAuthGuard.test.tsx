@@ -42,8 +42,12 @@ describe("useAuthGuard", () => {
     expect(replaceMock).not.toHaveBeenCalled();
   });
 
-  it("redireciona para /login quando /auth/me responde com erro (401)", async () => {
-    (global.fetch as jest.Mock).mockResolvedValueOnce({
+  it("redireciona para /login quando /auth/me responde 401 e o refresh também confirma 401", async () => {
+    // `apiFetch` tenta UM refresh em 401 antes de devolver a resposta: o 401 só
+    // é "confirmado" (sessão expirada) se `/auth/refresh` também responder 401.
+    // `mockResolvedValue` (não `Once`) atende as duas chamadas: /auth/me e
+    // /auth/refresh.
+    (global.fetch as jest.Mock).mockResolvedValue({
       ok: false,
       status: 401,
       json: async () => ({ message: "Unauthorized" }),
@@ -53,16 +57,19 @@ describe("useAuthGuard", () => {
 
     await waitFor(() => expect(result.current).toBe("unauthenticated"));
     expect(replaceMock).toHaveBeenCalledWith("/login");
+    expect(global.fetch).toHaveBeenCalledTimes(2);
   });
 
-  it("redireciona para /login quando a chamada falha por rede (backend indisponível)", async () => {
+  it("não redireciona e entra em 'reconnecting' quando a chamada falha por rede (backend indisponível)", async () => {
+    // Contrato atual (cold start do Render, commit "make authentication
+    // resilient to cold starts"): falha de rede nunca é logout.
     (global.fetch as jest.Mock).mockRejectedValueOnce(
       new Error("fetch failed: ECONNREFUSED"),
     );
 
     const { result } = renderHook(() => useAuthGuard());
 
-    await waitFor(() => expect(result.current).toBe("unauthenticated"));
-    expect(replaceMock).toHaveBeenCalledWith("/login");
+    await waitFor(() => expect(result.current).toBe("reconnecting"));
+    expect(replaceMock).not.toHaveBeenCalled();
   });
 });
